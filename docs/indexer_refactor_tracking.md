@@ -36,14 +36,32 @@ Owner: Codex (GPT-5)
 - 2025-02-XX: Added DB queries for attribute catalog and source_path coverage.
 - 2025-02-XX: Hybrid mapping now merges DB-derived mappings to avoid costly Nix fallback.
 - 2025-02-XX: Incremental path targeting now uses DB missing-source fallback to prevent misses.
+- 2025-02-XX: Advanced indexer knobs moved to JSON config/env; CLI trimmed.
+- 2025-02-XX: Full rebuild now deletes existing DB/WAL/SHM + bloom before indexing.
+- 2025-02-XX: Ran full index from 2017-01-01 to 2019-01-01 (x86_64-linux). Run exceeded 30 minutes but processed multiple baseline batches successfully; continue run to completion.
+- 2025-02-XX: Ran parallel ranges 2017+2018 with NXV_INDEXER_CONFIG; process ran >2 hours and was still progressing when the command timed out.
 
 ## Open Questions
 
-- Confirm desired minimal CLI surface (parallel ranges retained or removed?).
-- Decide whether full rebuild should drop existing DB rows or continue UPSERT-only.
+- Confirm preferred default for parallel ranges (kept via config only).
 
 ## Next Steps
 
 - Continue extracting static map only when `all-packages.nix` changes (already cached).
 - Evaluate removing parallel range CLI or migrating to config-only.
 - Add performance benchmarks for mapping + extraction stages.
+
+## Config Example
+
+```json
+{
+  "checkpoint_interval": 50,
+  "workers": 1,
+  "gc_interval": 10,
+  "max_range_workers": 4,
+  "max_commits": null,
+  "full_extraction_interval": 0,
+  "full_extraction_parallelism": 1,
+  "parallel_ranges": null
+}
+```

@@ -1129,7 +1129,9 @@ fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
 #[cfg(feature = "indexer")]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::db::Database;
+    use crate::index::config::load_indexer_overrides;
     use crate::index::{Indexer, IndexerConfig, YearRange, save_bloom_filter};
+    use std::fs;
     use std::sync::atomic::Ordering;
 
     // Check for internal worker mode first
@@ -1149,6 +1151,18 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
     eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
 
+    if args.full {
+        let db_path = &cli.db_path;
+        let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+        let shm_path = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+        let bloom_path = paths::get_bloom_path_for_db(db_path);
+
+        let _ = fs::remove_file(db_path);
+        let _ = fs::remove_file(wal_path);
+        let _ = fs::remove_file(shm_path);
+        let _ = fs::remove_file(bloom_path);
+    }
+
     let systems = args
         .systems
         .clone()
@@ -1157,20 +1171,20 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let system_count = systems.len();
     let memory_budget = args.max_memory;
 
-    let config = IndexerConfig {
-        checkpoint_interval: args.checkpoint_interval,
-        show_progress: !cli.quiet,
+    let overrides = load_indexer_overrides()?;
+    if !overrides.is_empty() {
+        eprintln!("Using indexer overrides from NXV_INDEXER_CONFIG or data dir.");
+    }
+
+    let mut config = IndexerConfig {
         systems,
         since: args.since.clone(),
         until: args.until.clone(),
-        max_commits: args.max_commits,
-        worker_count: args.workers,
         memory_budget,
         verbose: args.show_warnings,
-        gc_interval: args.gc_interval,
-        // Use defaults for removed CLI options
         ..IndexerConfig::default()
     };
+    config.apply_overrides(&overrides);
 
     let indexer = Indexer::new(config);
 
@@ -1188,14 +1202,17 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     // Check for parallel ranges mode
-    let result = if let Some(ref ranges_spec) = args.parallel_ranges {
+    let ranges_spec = overrides.parallel_ranges.as_deref();
+    let max_range_workers = overrides.max_range_workers.unwrap_or(4);
+
+    let result = if let Some(ranges_spec) = ranges_spec {
         // Parse year ranges from CLI specification
         // Default year range: 2017 to current year + 1
         use chrono::Datelike;
         let current_year = chrono::Utc::now().year() as u16;
         let ranges = YearRange::parse_ranges(ranges_spec, 2017, current_year + 1)?;
 
-        let effective_max_workers = args.max_range_workers.min(ranges.len());
+        let effective_max_workers = max_range_workers.min(ranges.len());
 
         // Calculate and display memory allocation
         let total_workers = system_count * effective_max_workers;

@@ -8,6 +8,7 @@
 
 pub mod backfill;
 pub mod blob_cache;
+pub mod config;
 pub mod extractor;
 pub mod gc;
 pub mod git;
@@ -382,9 +383,6 @@ impl Drop for FullExtractionPermit<'_> {
 pub struct IndexerConfig {
     /// Number of commits between checkpoints.
     pub checkpoint_interval: usize,
-    /// Whether to show progress output (currently unused, reserved for future use).
-    #[allow(dead_code)]
-    pub show_progress: bool,
     /// Systems to evaluate for arch coverage.
     pub systems: Vec<String>,
     /// Optional git --since filter.
@@ -428,7 +426,6 @@ impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
             checkpoint_interval: 100,
-            show_progress: true,
             systems: vec![
                 "x86_64-linux".to_string(),
                 "aarch64-linux".to_string(),
@@ -445,6 +442,29 @@ impl Default for IndexerConfig {
             gc_min_free_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
             full_extraction_interval: 0, // Disabled - full extraction is very expensive
             full_extraction_parallelism: 1, // Serialize full extractions to avoid system thrash
+        }
+    }
+}
+
+impl IndexerConfig {
+    pub(crate) fn apply_overrides(&mut self, overrides: &config::IndexerConfigOverrides) {
+        if let Some(value) = overrides.checkpoint_interval {
+            self.checkpoint_interval = value;
+        }
+        if let Some(value) = overrides.workers {
+            self.worker_count = Some(value);
+        }
+        if let Some(value) = overrides.gc_interval {
+            self.gc_interval = value;
+        }
+        if let Some(value) = overrides.max_commits {
+            self.max_commits = Some(value);
+        }
+        if let Some(value) = overrides.full_extraction_interval {
+            self.full_extraction_interval = value;
+        }
+        if let Some(value) = overrides.full_extraction_parallelism {
+            self.full_extraction_parallelism = value;
         }
     }
 }
@@ -3672,7 +3692,6 @@ mod tests {
     fn test_indexer_config_default() {
         let config = IndexerConfig::default();
         assert_eq!(config.checkpoint_interval, 100);
-        assert!(config.show_progress);
         assert!(config.systems.contains(&"x86_64-linux".to_string()));
     }
 
@@ -3889,7 +3908,6 @@ mod tests {
 
         let config = IndexerConfig {
             checkpoint_interval: 10,
-            show_progress: false,
             systems: vec!["x86_64-linux".to_string()],
             since: None,
             until: None,
@@ -3926,7 +3944,6 @@ mod tests {
 
         let config = IndexerConfig {
             checkpoint_interval: 5,
-            show_progress: false,
             systems: vec!["x86_64-linux".to_string()],
             since: None,
             until: None,

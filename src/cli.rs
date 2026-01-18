@@ -344,6 +344,7 @@ pub struct ServeArgs {
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
 pub struct IndexArgs {
+    /// Advanced indexer knobs are read from NXV_INDEXER_CONFIG (JSON) or data-dir config.
     /// Path to the nixpkgs repository.
     #[arg(long)]
     pub nixpkgs_path: PathBuf,
@@ -364,10 +365,6 @@ pub struct IndexArgs {
     #[arg(long)]
     pub until: Option<String>,
 
-    /// Limit the number of commits processed.
-    #[arg(long, hide = true)]
-    pub max_commits: Option<usize>,
-
     /// Total memory budget for all workers (e.g., "32G", "8GiB", "16384M").
     /// Plain numbers are MiB for backwards compatibility.
     /// Divided automatically among workers.
@@ -377,32 +374,6 @@ pub struct IndexArgs {
     /// Show extraction warnings (failed evaluations, missing packages).
     #[arg(long)]
     pub show_warnings: bool,
-
-    /// Process year ranges in parallel for faster indexing.
-    /// Formats:
-    ///   "4"             - Auto-partition into 4 equal year ranges
-    ///   "2017,2018"     - Process years 2017 and 2018 in parallel
-    ///   "2017-2020"     - Single range from 2017 to 2019 (end exclusive)
-    ///   "2017-2019,2020-2024" - Multiple explicit ranges
-    #[arg(long, value_name = "RANGES", hide = true)]
-    pub parallel_ranges: Option<String>,
-
-    // === Hidden expert options (not shown in --help) ===
-    /// Commits between checkpoints (expert tuning).
-    #[arg(long, default_value_t = 100, hide = true)]
-    pub checkpoint_interval: usize,
-
-    /// Number of parallel worker processes for evaluation (expert tuning).
-    #[arg(long, hide = true)]
-    pub workers: Option<usize>,
-
-    /// Number of checkpoints between garbage collection runs (expert tuning).
-    #[arg(long, default_value_t = 5, hide = true)]
-    pub gc_interval: usize,
-
-    /// Maximum concurrent range workers for parallel indexing (expert tuning).
-    #[arg(long, default_value_t = 4, hide = true)]
-    pub max_range_workers: usize,
 
     /// Internal flag for worker subprocess mode.
     #[arg(long, hide = true)]
