@@ -735,12 +735,6 @@ impl ProgressTracker {
         (self.processed as f64 / self.total as f64) * 100.0
     }
 
-    /// Get number of items processed.
-    #[allow(dead_code)]
-    fn processed(&self) -> u64 {
-        self.processed
-    }
-
     /// Check if we should log progress at this point.
     fn should_log(&self) -> bool {
         let pct = self.percentage();
@@ -1704,10 +1698,7 @@ impl Indexer {
             // If full extraction is needed (first commit, periodic, or large infrastructure diff),
             // extract all packages from all-packages.nix (if we have the file_attr_map)
             if needs_full_extraction {
-                if let Some(all_attrs_list) = all_attrs {
-                    for attr in all_attrs_list {
-                        target_attr_paths.insert(attr.clone());
-                    }
+                if add_all_attrs(&file_attr_map, &mut target_attr_paths) {
                     if commit_idx == 0 {
                         debug!(
                             commit = %commit.short_hash,
@@ -1743,71 +1734,70 @@ impl Indexer {
                 }
             }
 
-            for path in &changed_paths {
-                if let Some(attr_paths) = file_attr_map.get(path) {
-                    // Path is in the file-to-attr map (built from HEAD)
-                    for attr in attr_paths {
-                        target_attr_paths.insert(attr.clone());
-                    }
-                    trace!(
-                        path = path,
-                        commit = %commit.short_hash,
-                        attrs_found = attr_paths.len(),
-                        "Path found in file_attr_map"
+            let mut unknown_paths = Vec::new();
+            add_targets_from_changed_paths(
+                &changed_paths,
+                &file_attr_map,
+                &mut target_attr_paths,
+                &mut unknown_paths,
+            );
+
+            if !unknown_paths.is_empty() && !needs_full_extraction {
+                debug!(
+                    commit = %commit.short_hash,
+                    unknown_paths = unknown_paths.len(),
+                    "Unknown package files detected, attempting map refresh"
+                );
+
+                let mut unmapped_paths = unknown_paths;
+                if mapping_commit != commit.hash
+                    && let Ok((new_map, coverage)) = build_hybrid_file_attr_map(
+                        repo,
+                        &commit.hash,
+                        &mut blob_cache,
+                        worktree_path,
+                        systems,
+                        worker_pool.as_ref(),
+                        db_file_map.as_ref(),
+                        db_all_attrs.as_ref(),
+                    )
+                {
+                    file_attr_map = new_map;
+                    mapping_commit = commit.hash.clone();
+                    _last_static_coverage = coverage;
+
+                    let mut still_unknown = Vec::new();
+                    add_targets_from_changed_paths(
+                        &unmapped_paths,
+                        &file_attr_map,
+                        &mut target_attr_paths,
+                        &mut still_unknown,
                     );
-                } else if let Some(attr) = extract_attr_from_path(path) {
-                    // Fallback: extract attr name from path structure
-                    // No validation against all_attrs - this allows detecting changes
-                    // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
-                    target_attr_paths.insert(attr.clone());
-                    trace!(
-                        path = path,
-                        commit = %commit.short_hash,
-                        attr = attr,
-                        "Path extracted via extract_attr_from_path"
-                    );
-                } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
-                    // Changed .nix file in pkgs/ but couldn't determine attribute
-                    // This happens for files like firefox/packages.nix where the filename
-                    // doesn't match the package name.
-                    trace!(
-                        path = path,
-                        commit = %commit.short_hash,
-                        needs_full_extraction = needs_full_extraction,
-                        "Ambiguous pkgs/*.nix file detected"
-                    );
-                    if !needs_full_extraction {
-                        if let Some(all_attrs_list) = all_attrs {
-                            // We have the attr map - trigger full extraction
-                            debug!(
-                                path = path,
-                                commit = %commit.short_hash,
-                                "Unknown package file changed, triggering full extraction"
-                            );
-                            needs_full_extraction = true;
-                            for attr in all_attrs_list {
-                                target_attr_paths.insert(attr.clone());
-                            }
-                        } else if !db_missing_source_attrs.is_empty() {
-                            debug!(
-                                path = path,
-                                commit = %commit.short_hash,
-                                missing_source_attrs = db_missing_source_attrs.len(),
-                                "Unknown package file changed, targeting attrs missing source_path"
-                            );
-                            for attr in &db_missing_source_attrs {
-                                target_attr_paths.insert(attr.clone());
-                            }
-                        } else {
-                            // all_attrs is None - DO NOT fall back to dynamic discovery
-                            // Just log and skip this file. This may miss some packages but
-                            // prevents memory exhaustion from repeated builtins.attrNames calls.
-                            trace!(
-                                path = path,
-                                commit = %commit.short_hash,
-                                "Unknown package file changed but file_attr_map unavailable, skipping"
-                            );
+                    unmapped_paths = still_unknown;
+                }
+
+                if !unmapped_paths.is_empty() {
+                    if !db_missing_source_attrs.is_empty() {
+                        debug!(
+                            commit = %commit.short_hash,
+                            missing_source_attrs = db_missing_source_attrs.len(),
+                            "Unknown package files mapped to attrs missing source_path"
+                        );
+                        for attr in &db_missing_source_attrs {
+                            target_attr_paths.insert(attr.clone());
                         }
+                    } else if add_all_attrs(&file_attr_map, &mut target_attr_paths) {
+                        debug!(
+                            commit = %commit.short_hash,
+                            unmapped_paths = unmapped_paths.len(),
+                            "Unknown package files remain, triggering full extraction"
+                        );
+                    } else {
+                        trace!(
+                            commit = %commit.short_hash,
+                            unmapped_paths = unmapped_paths.len(),
+                            "Unknown package files remain without fallback"
+                        );
                     }
                 }
             }
@@ -2598,6 +2588,45 @@ fn update_file_attr_map_from_aggregates(
     }
 }
 
+fn add_targets_from_changed_paths(
+    changed_paths: &[String],
+    file_attr_map: &HashMap<String, Vec<String>>,
+    target_attr_paths: &mut HashSet<String>,
+    unknown_paths: &mut Vec<String>,
+) {
+    for path in changed_paths {
+        if let Some(attr_paths) = file_attr_map.get(path) {
+            for attr in attr_paths {
+                target_attr_paths.insert(attr.clone());
+            }
+            continue;
+        }
+
+        if let Some(attr) = extract_attr_from_path(path) {
+            target_attr_paths.insert(attr);
+            continue;
+        }
+
+        if path.ends_with(".nix") && path.starts_with("pkgs/") {
+            unknown_paths.push(path.clone());
+        }
+    }
+}
+
+fn add_all_attrs(
+    file_attr_map: &HashMap<String, Vec<String>>,
+    target_attr_paths: &mut HashSet<String>,
+) -> bool {
+    if let Some(all_attrs) = file_attr_map.get(ALL_PACKAGES_PATH) {
+        for attr in all_attrs {
+            target_attr_paths.insert(attr.clone());
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn should_refresh_file_map(changed_paths: &[String]) -> bool {
     const TOP_LEVEL_FILES: [&str; 4] = [
         "pkgs/top-level/all-packages.nix",
@@ -3150,10 +3179,13 @@ fn process_range_worker(
         // Full extraction for first commit, periodic interval, or large infrastructure diff
         // (only if we have file_attr_map - dynamic discovery is disabled to prevent memory exhaustion)
         if needs_full_extraction {
-            if let Some(all_attrs_list) = all_attrs {
-                for attr in all_attrs_list {
-                    target_attr_paths.insert(attr.clone());
-                }
+            if add_all_attrs(&file_attr_map, &mut target_attr_paths) {
+                tracing::debug!(
+                    range = %range.label,
+                    commit = %&commit.hash[..8],
+                    total_attrs = target_attr_paths.len(),
+                    "Full extraction targets selected"
+                );
             } else {
                 // all_attrs is None (file_attr_map failed or is empty)
                 // DO NOT fall back to dynamic discovery (builtins.attrNames) - it's too expensive
@@ -3170,57 +3202,75 @@ fn process_range_worker(
             }
         }
 
-        // Add attrs from changed package files
-        for path in &changed_paths {
-            if let Some(attr_paths) = file_attr_map.get(path) {
-                // Path is in the file-to-attr map (built from HEAD)
-                for attr in attr_paths {
-                    target_attr_paths.insert(attr.clone());
-                }
-            } else if let Some(attr) = extract_attr_from_path(path) {
-                // Fallback: extract attr name from path structure
-                // No validation against all_attrs - this allows detecting changes
-                // to packages that have moved (e.g., to pkgs/by-name/) since HEAD
-                target_attr_paths.insert(attr);
-            } else if path.ends_with(".nix") && path.starts_with("pkgs/") {
-                // Changed .nix file in pkgs/ but couldn't determine attribute
-                // This happens for files like firefox/packages.nix where the filename
-                // doesn't match the package name.
-                if !needs_full_extraction {
-                    if let Some(all_attrs_list) = all_attrs {
-                        // We have the attr map - trigger full extraction
-                        tracing::debug!(
-                            range = %range.label,
-                            path = path,
-                            commit = %&commit.hash[..8],
-                            "Unknown package file changed, triggering full extraction"
-                        );
-                        needs_full_extraction = true;
-                        for attr in all_attrs_list {
-                            target_attr_paths.insert(attr.clone());
-                        }
-                    } else if !db_missing_source_attrs.is_empty() {
-                        tracing::debug!(
-                            range = %range.label,
-                            path = path,
-                            commit = %&commit.hash[..8],
-                            missing_source_attrs = db_missing_source_attrs.len(),
-                            "Unknown package file changed, targeting attrs missing source_path"
-                        );
-                        for attr in &db_missing_source_attrs {
-                            target_attr_paths.insert(attr.clone());
-                        }
-                    } else {
-                        // all_attrs is None - DO NOT fall back to dynamic discovery
-                        // Just log and skip this file. This may miss some packages but
-                        // prevents memory exhaustion from repeated builtins.attrNames calls.
-                        tracing::debug!(
-                            range = %range.label,
-                            path = path,
-                            commit = %&commit.hash[..8],
-                            "Unknown package file changed but file_attr_map unavailable, skipping"
-                        );
+        let mut unknown_paths = Vec::new();
+        add_targets_from_changed_paths(
+            &changed_paths,
+            &file_attr_map,
+            &mut target_attr_paths,
+            &mut unknown_paths,
+        );
+
+        if !unknown_paths.is_empty() && !needs_full_extraction {
+            tracing::debug!(
+                range = %range.label,
+                commit = %&commit.hash[..8],
+                unknown_paths = unknown_paths.len(),
+                "Unknown package files detected, attempting map refresh"
+            );
+
+            let mut unmapped_paths = unknown_paths;
+            if mapping_commit != commit.hash
+                && let Ok((new_map, coverage)) = build_hybrid_file_attr_map(
+                    &repo,
+                    &commit.hash,
+                    &mut blob_cache,
+                    worktree_path,
+                    systems,
+                    worker_pool.as_ref(),
+                    Some(&db_file_map),
+                    Some(&db_all_attrs),
+                )
+            {
+                file_attr_map = new_map;
+                mapping_commit = commit.hash.clone();
+                last_static_coverage = coverage;
+
+                let mut still_unknown = Vec::new();
+                add_targets_from_changed_paths(
+                    &unmapped_paths,
+                    &file_attr_map,
+                    &mut target_attr_paths,
+                    &mut still_unknown,
+                );
+                unmapped_paths = still_unknown;
+            }
+
+            if !unmapped_paths.is_empty() {
+                if !db_missing_source_attrs.is_empty() {
+                    tracing::debug!(
+                        range = %range.label,
+                        commit = %&commit.hash[..8],
+                        missing_source_attrs = db_missing_source_attrs.len(),
+                        "Unknown package files mapped to attrs missing source_path"
+                    );
+                    for attr in &db_missing_source_attrs {
+                        target_attr_paths.insert(attr.clone());
                     }
+                } else if add_all_attrs(&file_attr_map, &mut target_attr_paths) {
+                    tracing::debug!(
+                        range = %range.label,
+                        commit = %&commit.hash[..8],
+                        unmapped_paths = unmapped_paths.len(),
+                        "Unknown package files remain, triggering full extraction"
+                    );
+                    needs_full_extraction = true;
+                } else {
+                    tracing::trace!(
+                        range = %range.label,
+                        commit = %&commit.hash[..8],
+                        unmapped_paths = unmapped_paths.len(),
+                        "Unknown package files remain without fallback"
+                    );
                 }
             }
         }
@@ -3562,7 +3612,7 @@ mod tests {
     #[test]
     fn test_progress_tracker_new() {
         let tracker = ProgressTracker::new(100, "Test");
-        assert_eq!(tracker.processed(), 0);
+        assert_eq!(tracker.processed, 0);
         assert!((tracker.percentage() - 0.0).abs() < f64::EPSILON);
     }
 
@@ -3570,13 +3620,13 @@ mod tests {
     fn test_progress_tracker_tick() {
         let mut tracker = ProgressTracker::new(100, "Test");
         tracker.tick();
-        assert_eq!(tracker.processed(), 1);
+        assert_eq!(tracker.processed, 1);
         assert!((tracker.percentage() - 1.0).abs() < f64::EPSILON);
 
         for _ in 0..49 {
             tracker.tick();
         }
-        assert_eq!(tracker.processed(), 50);
+        assert_eq!(tracker.processed, 50);
         assert!((tracker.percentage() - 50.0).abs() < f64::EPSILON);
     }
 
@@ -3586,7 +3636,7 @@ mod tests {
         for _ in 0..100 {
             tracker.tick();
         }
-        assert_eq!(tracker.processed(), 100);
+        assert_eq!(tracker.processed, 100);
         assert!((tracker.percentage() - 100.0).abs() < f64::EPSILON);
     }
 

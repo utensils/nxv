@@ -38,8 +38,13 @@ Owner: Codex (GPT-5)
 - 2025-02-XX: Incremental path targeting now uses DB missing-source fallback to prevent misses.
 - 2025-02-XX: Advanced indexer knobs moved to JSON config/env; CLI trimmed.
 - 2025-02-XX: Full rebuild now deletes existing DB/WAL/SHM + bloom before indexing.
+- 2025-02-XX: Target selection now refreshes file-to-attr map when unknown paths appear; falls back to DB missing-source attrs or full all-packages list.
+- 2025-02-XX: Extraction batching now bisects failed batches down to single attrs to minimize skipped packages.
+- 2025-02-XX: Removed dead extractor helpers (commit-local extract, nix_list helpers) and trimmed unused JSON helpers.
+- 2025-02-XX: On batch failure, extractor retries without store-path extraction before bisecting.
 - 2025-02-XX: Ran full index from 2017-01-01 to 2019-01-01 (x86_64-linux). Run exceeded 30 minutes but processed multiple baseline batches successfully; continue run to completion.
 - 2025-02-XX: Ran parallel ranges 2017+2018 with NXV_INDEXER_CONFIG; process ran >2 hours and was still progressing when the command timed out.
+- 2025-02-XX: Re-ran 2017-2018 full index with parallel ranges (2017,2018); run progressed to ~5% of 2017 range before timing out (command timeout, not indexer failure).
 
 ## Open Questions
 

@@ -47,32 +47,7 @@ pub struct AttrPosition {
 }
 
 impl PackageInfo {
-    /// Serialize licenses to JSON for database storage.
-    #[allow(dead_code)]
-    pub fn license_json(&self) -> Option<String> {
-        self.license
-            .as_ref()
-            .map(|l| serde_json::to_string(l).unwrap_or_default())
-    }
-
-    /// Serialize maintainers to JSON for database storage.
-    #[allow(dead_code)]
-    pub fn maintainers_json(&self) -> Option<String> {
-        self.maintainers
-            .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap_or_default())
-    }
-
-    /// Serialize platforms to JSON for database storage.
-    #[allow(dead_code)]
-    pub fn platforms_json(&self) -> Option<String> {
-        self.platforms
-            .as_ref()
-            .map(|p| serde_json::to_string(p).unwrap_or_default())
-    }
-
     /// Serialize known vulnerabilities to JSON for database storage.
-    #[allow(dead_code)]
     pub fn known_vulnerabilities_json(&self) -> Option<String> {
         self.known_vulnerabilities
             .as_ref()
@@ -95,6 +70,7 @@ const POSITIONS_NIX: &str = include_str!("nix/positions.nix");
 ///
 /// # Returns
 /// A vector of PackageInfo, or an error if extraction fails.
+#[cfg(test)]
 pub fn extract_packages<P: AsRef<Path>>(repo_path: P) -> Result<Vec<PackageInfo>> {
     extract_packages_for_attrs(repo_path, "x86_64-linux", &[], true)
 }
@@ -148,6 +124,55 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         let mut failed_batches = 0;
         let mut total_failed_attrs = 0;
 
+        fn extract_with_fallback<P: AsRef<Path>>(
+            repo_path: P,
+            system: &str,
+            attrs: &[String],
+            extract_store_paths: bool,
+            all_packages: &mut Vec<PackageInfo>,
+        ) -> usize {
+            match extract_packages_batch(repo_path.as_ref(), system, attrs, extract_store_paths) {
+                Ok(batch_result) => {
+                    all_packages.extend(batch_result);
+                    0
+                }
+                Err(_e) => {
+                    if extract_store_paths {
+                        if let Ok(batch_result) =
+                            extract_packages_batch(repo_path.as_ref(), system, attrs, false)
+                        {
+                            trace!(
+                                system = %system,
+                                attr_count = attrs.len(),
+                                "Retry without store paths succeeded"
+                            );
+                            all_packages.extend(batch_result);
+                            return 0;
+                        }
+                    }
+                    if attrs.len() <= 1 {
+                        return attrs.len();
+                    }
+                    let mid = attrs.len() / 2;
+                    let left_failures = extract_with_fallback(
+                        repo_path.as_ref(),
+                        system,
+                        &attrs[..mid],
+                        extract_store_paths,
+                        all_packages,
+                    );
+                    let right_failures = extract_with_fallback(
+                        repo_path.as_ref(),
+                        system,
+                        &attrs[mid..],
+                        extract_store_paths,
+                        all_packages,
+                    );
+                    left_failures + right_failures
+                }
+            }
+        }
+
         for (batch_idx, batch) in attr_names.chunks(BATCH_SIZE).enumerate() {
             let _ = writeln!(
                 std::io::stderr(),
@@ -180,62 +205,27 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                     all_packages.extend(batch_result);
                 }
                 Err(e) => {
-                    // Try subdivision: retry failed batch with smaller chunks
-                    // This helps recover from OOM by reducing memory pressure
-                    const MIN_SUBDIVISION_SIZE: usize = 50;
-                    if batch.len() > MIN_SUBDIVISION_SIZE {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "[{}] Batch {}/{} failed, retrying with subdivision ({} -> {} chunks)",
-                            system,
-                            batch_idx + 1,
-                            num_batches,
-                            batch.len(),
-                            batch.len().div_ceil(MIN_SUBDIVISION_SIZE)
-                        );
-                        let _ = std::io::stderr().flush();
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "[{}] Batch {}/{} failed, retrying with smaller chunks ({} attrs): {}",
+                        system,
+                        batch_idx + 1,
+                        num_batches,
+                        batch.len(),
+                        e
+                    );
+                    let _ = std::io::stderr().flush();
 
-                        let mut sub_failed = 0;
-                        for sub_batch in batch.chunks(MIN_SUBDIVISION_SIZE) {
-                            match extract_packages_batch(
-                                repo_path,
-                                system,
-                                sub_batch,
-                                extract_store_paths,
-                            ) {
-                                Ok(sub_result) => {
-                                    all_packages.extend(sub_result);
-                                }
-                                Err(_sub_e) => {
-                                    sub_failed += sub_batch.len();
-                                }
-                            }
-                        }
-                        if sub_failed > 0 {
-                            failed_batches += 1;
-                            total_failed_attrs += sub_failed;
-                        }
-                    } else {
-                        // Batch is already small, can't subdivide further
+                    let failed = extract_with_fallback(
+                        repo_path,
+                        system,
+                        batch,
+                        extract_store_paths,
+                        &mut all_packages,
+                    );
+                    if failed > 0 {
                         failed_batches += 1;
-                        total_failed_attrs += batch.len();
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "[{}] Batch {}/{} failed ({} attrs): {}",
-                            system,
-                            batch_idx + 1,
-                            num_batches,
-                            batch.len(),
-                            e
-                        );
-                        let _ = std::io::stderr().flush();
-                        trace!(
-                            system = %system,
-                            batch_idx = batch_idx,
-                            batch_size = batch.len(),
-                            error = %e,
-                            "Batch extraction failed, continuing with remaining batches"
-                        );
+                        total_failed_attrs += failed;
                     }
                     // Continue with remaining batches instead of failing early
                 }
@@ -392,74 +382,6 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
     Ok(positions)
 }
 
-#[allow(dead_code)]
-fn nix_string(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
-#[allow(dead_code)]
-fn nix_list(values: &[String]) -> String {
-    if values.is_empty() {
-        return "null".to_string();
-    }
-
-    let items: Vec<String> = values
-        .iter()
-        .map(|value| format!("\"{}\"", nix_string(value)))
-        .collect();
-    format!("[ {} ]", items.join(" "))
-}
-
-/// Extract packages at a specific commit.
-///
-/// This function checks out the commit, runs extraction, then restores the original state.
-/// For parallel extraction, use git worktrees instead.
-///
-/// # Arguments
-/// * `repo_path` - Path to the nixpkgs repository
-/// * `commit_hash` - The commit hash to extract from
-///
-/// # Returns
-/// A vector of PackageInfo, or an error if extraction fails.
-#[allow(dead_code)]
-pub fn extract_at_commit<P: AsRef<Path>>(
-    repo_path: P,
-    commit_hash: &str,
-) -> Result<Vec<PackageInfo>> {
-    use crate::index::git::{NixpkgsRepo, WorktreeSession};
-
-    let repo = NixpkgsRepo::open(&repo_path)?;
-
-    // Create a worktree session - doesn't modify the main repo
-    let session = WorktreeSession::new(&repo, commit_hash)?;
-
-    // Extract packages from the worktree
-    extract_packages(session.path())
-    // WorktreeSession auto-cleans up on drop
-}
-
-/// Try to extract packages, returning None on failure instead of error.
-///
-/// This is useful for iterating over commits where some may fail to evaluate.
-#[allow(dead_code)]
-pub fn try_extract_at_commit<P: AsRef<Path>>(
-    repo_path: P,
-    commit_hash: &str,
-) -> Option<Vec<PackageInfo>> {
-    match extract_at_commit(repo_path, commit_hash) {
-        Ok(packages) => Some(packages),
-        Err(e) => {
-            eprintln!("Warning: extraction failed at {}: {}", &commit_hash[..7], e);
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,19 +399,12 @@ mod tests {
             maintainers: Some(vec!["user1".to_string(), "user2".to_string()]),
             platforms: Some(vec!["x86_64-linux".to_string()]),
             source_path: Some("pkgs/test/default.nix".to_string()),
-            known_vulnerabilities: None,
+            known_vulnerabilities: Some(vec!["CVE-2025-0001".to_string()]),
             out_path: Some("/nix/store/abc123-test-1.0.0".to_string()),
         };
 
-        let license_json = pkg.license_json().unwrap();
-        assert!(license_json.contains("MIT"));
-        assert!(license_json.contains("Apache-2.0"));
-
-        let maintainers_json = pkg.maintainers_json().unwrap();
-        assert!(maintainers_json.contains("user1"));
-
-        let platforms_json = pkg.platforms_json().unwrap();
-        assert!(platforms_json.contains("x86_64-linux"));
+        let vulnerabilities_json = pkg.known_vulnerabilities_json().unwrap();
+        assert!(vulnerabilities_json.contains("CVE-2025-0001"));
     }
 
     #[test]
@@ -685,19 +600,6 @@ mod tests {
                 panic!("Extraction should not fail with edge case packages: {}", e);
             }
         }
-    }
-
-    #[test]
-    fn test_nix_list_empty_is_null() {
-        assert_eq!(super::nix_list(&[]), "null");
-    }
-
-    #[test]
-    fn test_nix_list_values_are_escaped() {
-        let values = vec![r#"a"b"#.to_string(), "c\\d".to_string()];
-        let list = super::nix_list(&values);
-        assert!(list.contains(r#""a\"b""#));
-        assert!(list.contains(r#""c\\d""#));
     }
 
     #[test]
