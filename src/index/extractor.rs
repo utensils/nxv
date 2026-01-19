@@ -7,7 +7,81 @@ use std::path::Path;
 #[cfg(test)]
 use std::process::Command;
 use std::time::Instant;
-use tracing::{instrument, trace};
+use tracing::{debug, instrument, trace};
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+const MAX_SKIP_SAMPLES: usize = 2000;
+
+struct SkipMetrics {
+    total_skipped: AtomicU64,
+    failed_batches: AtomicU64,
+    samples: Mutex<Vec<String>>,
+}
+
+impl SkipMetrics {
+    fn new() -> Self {
+        Self {
+            total_skipped: AtomicU64::new(0),
+            failed_batches: AtomicU64::new(0),
+            samples: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkipSummary {
+    pub total_skipped: u64,
+    pub failed_batches: u64,
+    pub samples: Vec<String>,
+}
+
+static SKIP_METRICS: OnceLock<SkipMetrics> = OnceLock::new();
+
+fn skip_metrics() -> &'static SkipMetrics {
+    SKIP_METRICS.get_or_init(SkipMetrics::new)
+}
+
+pub fn reset_skip_metrics() {
+    let metrics = skip_metrics();
+    metrics.total_skipped.store(0, Ordering::SeqCst);
+    metrics.failed_batches.store(0, Ordering::SeqCst);
+    let mut samples = metrics.samples.lock().unwrap();
+    samples.clear();
+}
+
+pub fn take_skip_metrics() -> SkipSummary {
+    let metrics = skip_metrics();
+    let samples = metrics.samples.lock().unwrap().clone();
+    SkipSummary {
+        total_skipped: metrics.total_skipped.load(Ordering::SeqCst),
+        failed_batches: metrics.failed_batches.load(Ordering::SeqCst),
+        samples,
+    }
+}
+
+fn record_failed_batch() {
+    skip_metrics().failed_batches.fetch_add(1, Ordering::SeqCst);
+}
+
+fn record_skipped(system: &str, attrs: &[String], reason: &str) {
+    if attrs.is_empty() {
+        return;
+    }
+    let metrics = skip_metrics();
+    metrics
+        .total_skipped
+        .fetch_add(attrs.len() as u64, Ordering::SeqCst);
+    let mut samples = metrics.samples.lock().unwrap();
+    if samples.len() >= MAX_SKIP_SAMPLES {
+        return;
+    }
+    let remaining = MAX_SKIP_SAMPLES - samples.len();
+    for attr in attrs.iter().take(remaining) {
+        samples.push(format!("{}:{} ({})", system, attr, reason));
+    }
+}
 
 /// Information about an extracted package.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -130,11 +204,11 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             attrs: &[String],
             extract_store_paths: bool,
             all_packages: &mut Vec<PackageInfo>,
-        ) -> usize {
+            skipped: &mut Vec<String>,
+        ) {
             match extract_packages_batch(repo_path.as_ref(), system, attrs, extract_store_paths) {
                 Ok(batch_result) => {
                     all_packages.extend(batch_result);
-                    0
                 }
                 Err(_e) => {
                     if extract_store_paths {
@@ -147,28 +221,30 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                                 "Retry without store paths succeeded"
                             );
                             all_packages.extend(batch_result);
-                            return 0;
+                            return;
                         }
                     }
                     if attrs.len() <= 1 {
-                        return attrs.len();
+                        skipped.extend(attrs.iter().cloned());
+                        return;
                     }
                     let mid = attrs.len() / 2;
-                    let left_failures = extract_with_fallback(
+                    extract_with_fallback(
                         repo_path.as_ref(),
                         system,
                         &attrs[..mid],
                         extract_store_paths,
                         all_packages,
+                        skipped,
                     );
-                    let right_failures = extract_with_fallback(
+                    extract_with_fallback(
                         repo_path.as_ref(),
                         system,
                         &attrs[mid..],
                         extract_store_paths,
                         all_packages,
+                        skipped,
                     );
-                    left_failures + right_failures
                 }
             }
         }
@@ -216,16 +292,26 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                     );
                     let _ = std::io::stderr().flush();
 
-                    let failed = extract_with_fallback(
+                    let mut skipped = Vec::new();
+                    extract_with_fallback(
                         repo_path,
                         system,
                         batch,
                         extract_store_paths,
                         &mut all_packages,
+                        &mut skipped,
                     );
-                    if failed > 0 {
+                    if !skipped.is_empty() {
                         failed_batches += 1;
-                        total_failed_attrs += failed;
+                        total_failed_attrs += skipped.len();
+                        record_failed_batch();
+                        record_skipped(system, &skipped, "eval_failed");
+                        debug!(
+                            system = %system,
+                            batch_idx = batch_idx,
+                            skipped_attrs = skipped.len(),
+                            "Batch extraction skipped attributes after retries"
+                        );
                     }
                     // Continue with remaining batches instead of failing early
                 }
@@ -632,6 +718,34 @@ mod tests {
         let packages = extract_packages_for_attrs(path, "x86_64-linux", &[], true).unwrap();
         assert!(!packages.is_empty());
         assert!(packages.iter().any(|pkg| pkg.name == "hello"));
+    }
+
+    #[test]
+    fn test_skip_metrics_tracking() {
+        reset_skip_metrics();
+        record_failed_batch();
+        record_skipped(
+            "x86_64-linux",
+            &vec!["foo".to_string(), "bar".to_string()],
+            "eval_failed",
+        );
+        let summary = take_skip_metrics();
+        assert!(summary.total_skipped >= 2);
+        assert!(summary.failed_batches >= 1);
+        assert!(summary.samples.len() >= 2);
+        assert!(summary.samples[0].contains("x86_64-linux:foo"));
+    }
+
+    #[test]
+    fn test_skip_metrics_sample_cap() {
+        reset_skip_metrics();
+        let attrs: Vec<String> = (0..(MAX_SKIP_SAMPLES as u32 + 10))
+            .map(|i| format!("attr{}", i))
+            .collect();
+        record_skipped("x86_64-linux", &attrs, "eval_failed");
+        let summary = take_skip_metrics();
+        assert!(summary.total_skipped >= attrs.len() as u64);
+        assert!(summary.samples.len() <= MAX_SKIP_SAMPLES);
     }
 
     #[test]

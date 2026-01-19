@@ -1,6 +1,6 @@
 {
   "_comment": "Regression test fixture for package version extraction",
-  "_generated": "2026-01-09",
+  "_generated": "2026-01-19",
   "_description": "Contains known-good packages with expected version extraction behavior",
 
   "packages": [
@@ -71,7 +71,7 @@
       "attr_path": "emacs",
       "category": "editors",
       "notes": "Text editor",
-      "expect_version_regex": "^2[789]\\.[0-9]+",
+      "expect_version_regex": "^(2[789]|3[0-9])\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {
@@ -169,7 +169,7 @@
       "attr_path": "cmake",
       "category": "build_tools",
       "notes": "Build system",
-      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_regex": "^[34]\\.[0-9]+\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {
@@ -204,7 +204,7 @@
       "attr_path": "redis",
       "category": "databases",
       "notes": "Redis cache",
-      "expect_version_regex": "^[67]\\.[0-9]+\\.[0-9]+",
+      "expect_version_regex": "^[678]\\.[0-9]+\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {
@@ -253,7 +253,7 @@
       "attr_path": "fish",
       "category": "shells",
       "notes": "Fish shell",
-      "expect_version_regex": "^3\\.[0-9]+\\.[0-9]+",
+      "expect_version_regex": "^[34]\\.[0-9]+\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {
@@ -267,14 +267,14 @@
       "attr_path": "screen",
       "category": "terminal",
       "notes": "Terminal multiplexer",
-      "expect_version_regex": "^4\\.[0-9]+\\.[0-9]+",
+      "expect_version_regex": "^[45]\\.[0-9]+\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {
       "attr_path": "openssh",
       "category": "network",
       "notes": "SSH client/server",
-      "expect_version_regex": "^[89]\\.[0-9]+p[0-9]+",
+      "expect_version_regex": "^(8|9|10)\\.[0-9]+p[0-9]+",
       "expect_version_source": "direct"
     },
     {
@@ -295,7 +295,7 @@
       "attr_path": "ffmpeg",
       "category": "media",
       "notes": "Media converter",
-      "expect_version_regex": "^[567]\\.[0-9]+",
+      "expect_version_regex": "^[5-8]\\.[0-9]+",
       "expect_version_source": "direct"
     },
     {

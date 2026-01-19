@@ -1130,7 +1130,7 @@ fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     use crate::db::Database;
     use crate::index::config::load_indexer_overrides;
-    use crate::index::{Indexer, IndexerConfig, YearRange, save_bloom_filter};
+    use crate::index::{Indexer, IndexerConfig, YearRange, extractor, save_bloom_filter};
     use std::fs;
     use std::sync::atomic::Ordering;
 
@@ -1187,6 +1187,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     config.apply_overrides(&overrides);
 
     let indexer = Indexer::new(config);
+    extractor::reset_skip_metrics();
 
     // Set up Ctrl+C handler
     let shutdown_flag = indexer.shutdown_flag();
@@ -1256,6 +1257,21 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     eprintln!("  Total packages found: {}", result.packages_found);
     eprintln!("  Packages upserted: {}", result.packages_upserted);
     eprintln!("  Unique package names: {}", result.unique_names);
+
+    let skip_summary = extractor::take_skip_metrics();
+    eprintln!(
+        "  Skipped attrs: {} (failed batches: {})",
+        skip_summary.total_skipped, skip_summary.failed_batches
+    );
+    if !skip_summary.samples.is_empty() {
+        eprintln!("  Skipped samples (system:attr):");
+        for sample in skip_summary.samples.iter().take(20) {
+            eprintln!("    {}", sample);
+        }
+        if skip_summary.samples.len() > 20 {
+            eprintln!("    ... ({} more)", skip_summary.samples.len() - 20);
+        }
+    }
 
     // Build and save bloom filter from current database state
     // We do this even after interruption since the DB is consistent via checkpoints
