@@ -37,6 +37,28 @@ the index.
 | `NXV_INDEXER_CONFIG` | JSON string or path to `indexer.json` for advanced overrides | None    |
 | `NXV_EVAL_STORE_PATH`| Custom Nix store for evaluation workers                      | None    |
 
+### Indexer Config File
+
+Advanced indexer settings live in `indexer.json` in the data directory:
+
+| Platform | Path                                          |
+| -------- | --------------------------------------------- |
+| Linux    | `~/.local/share/nxv/indexer.json`             |
+| macOS    | `~/Library/Application Support/nxv/indexer.json` |
+
+Example:
+
+```json
+{
+  "parallel_ranges": "2017-2019,2020-2022,2023-2024",
+  "max_range_workers": 3,
+  "checkpoint_interval": 50,
+  "gc_interval": 2
+}
+```
+
+You can also provide the same JSON directly via `NXV_INDEXER_CONFIG`.
+
 ### Logging
 
 | Variable           | Description                                | Default  |
