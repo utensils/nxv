@@ -175,18 +175,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
 
     if !attr_names.is_empty() && attr_names.len() > BATCH_SIZE {
         let num_batches = attr_names.len().div_ceil(BATCH_SIZE);
-        // Use write! to stderr with flush to ensure output is captured
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr(),
-            "[{}] Batching large extraction: {} attrs into {} batches of {}",
-            system,
-            attr_names.len(),
-            num_batches,
-            BATCH_SIZE
-        );
-        let _ = std::io::stderr().flush();
-        trace!(
+        debug!(
             system = %system,
             total_attrs = attr_names.len(),
             batch_size = BATCH_SIZE,
@@ -250,16 +239,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         }
 
         for (batch_idx, batch) in attr_names.chunks(BATCH_SIZE).enumerate() {
-            let _ = writeln!(
-                std::io::stderr(),
-                "[{}] Processing batch {}/{}: {} attrs",
-                system,
-                batch_idx + 1,
-                num_batches,
-                batch.len()
-            );
-            let _ = std::io::stderr().flush();
-            trace!(
+            debug!(
                 system = %system,
                 batch_idx = batch_idx,
                 batch_size = batch.len(),
@@ -281,16 +261,14 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                     all_packages.extend(batch_result);
                 }
                 Err(e) => {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "[{}] Batch {}/{} failed, retrying with smaller chunks ({} attrs): {}",
-                        system,
-                        batch_idx + 1,
-                        num_batches,
-                        batch.len(),
-                        e
+                    debug!(
+                        system = %system,
+                        batch_idx = batch_idx + 1,
+                        total_batches = num_batches,
+                        batch_size = batch.len(),
+                        error = %e,
+                        "Batch failed, retrying with smaller chunks"
                     );
-                    let _ = std::io::stderr().flush();
 
                     let mut skipped = Vec::new();
                     extract_with_fallback(
@@ -319,15 +297,13 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
         }
 
         if failed_batches > 0 {
-            let _ = writeln!(
-                std::io::stderr(),
-                "[{}] Batched extraction completed with {} failed batches ({} attrs skipped), {} packages extracted",
-                system,
-                failed_batches,
-                total_failed_attrs,
-                all_packages.len()
+            debug!(
+                system = %system,
+                failed_batches = failed_batches,
+                total_failed_attrs = total_failed_attrs,
+                packages_extracted = all_packages.len(),
+                "Batched extraction completed with skipped attrs"
             );
-            let _ = std::io::stderr().flush();
         }
 
         trace!(
