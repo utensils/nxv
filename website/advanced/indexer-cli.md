@@ -29,21 +29,35 @@ Use `--show-warnings` to see extraction failures during indexing.
 | `--systems <SYSTEMS>`            | all 4        | Comma-separated systems to evaluate               |
 | `--since <DATE>`                 | `2017-01-01` | Only process commits after this date (YYYY-MM-DD) |
 | `--until <DATE>`                 | -            | Only process commits before this date             |
-| `--max-commits <N>`              | -            | Limit total commits processed                     |
 | `--max-memory <SIZE>`            | `8G`         | Total memory budget (e.g., `32G`, `16384M`)       |
 | `--show-warnings`                | `false`      | Show extraction warnings (failed evals, missing)  |
-| `--parallel-ranges <SPEC>`       | -            | Process year ranges in parallel                   |
 
-### Hidden Expert Options
+### Advanced Indexer Overrides (Config)
 
-These options are available for debugging and performance tuning but are hidden from `--help`:
+Advanced indexer knobs are read from `NXV_INDEXER_CONFIG` (JSON string or path)
+or the default data-dir config (`indexer.json`). These are not exposed as CLI
+flags.
 
-| Flag                        | Default | Description                            |
-| --------------------------- | ------- | -------------------------------------- |
-| `--checkpoint-interval <N>` | `100`   | Commits between checkpoint saves       |
-| `--workers <N>`             | (auto)  | Number of parallel worker processes    |
-| `--gc-interval <N>`         | `5`     | Checkpoints between garbage collection |
-| `--max-range-workers <N>`   | `4`     | Maximum concurrent range workers       |
+| Key                           | Default | Description                            |
+| ----------------------------- | ------- | -------------------------------------- |
+| `checkpoint_interval`         | `100`   | Commits between checkpoint saves       |
+| `workers`                     | (auto)  | Number of parallel worker processes    |
+| `gc_interval`                 | `5`     | Checkpoints between garbage collection |
+| `max_range_workers`           | `4`     | Maximum concurrent range workers       |
+| `max_commits`                 | -       | Limit total commits processed          |
+| `full_extraction_interval`    | `0`     | Periodic full extraction (0 disables)  |
+| `full_extraction_parallelism` | `1`     | Parallelism for full extraction        |
+| `parallel_ranges`             | -       | Process year ranges in parallel        |
+
+Example `indexer.json`:
+
+```json
+{
+  "parallel_ranges": "2017-2019,2020-2022,2023-2024",
+  "max_range_workers": 3,
+  "checkpoint_interval": 50
+}
+```
 
 ### Default Systems
 
@@ -56,22 +70,16 @@ When `--systems` is not specified, these 4 systems are evaluated:
 
 ### Parallel Ranges
 
-The `--parallel-ranges` flag enables concurrent year-range indexing for faster
-builds on multi-core machines:
+Configure parallel ranges in `indexer.json` or `NXV_INDEXER_CONFIG`:
 
-```bash
-# Auto-partition into 4 concurrent ranges
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 4
-
-# Explicit year ranges (end year is inclusive: 2017-2019 covers 2017, 2018, 2019)
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2017-2019,2020-2022,2023-2024"
-
-# Half-year granularity
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2023-H1,2023-H2,2024-H1"
-
-# Quarterly ranges
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges "2024-Q1,2024-Q2,2024-Q3,2024-Q4"
+```json
+{
+  "parallel_ranges": "2017-2019,2020-2022,2023-2024",
+  "max_range_workers": 3
+}
 ```
+
+If you pass `--since` or `--until`, any `parallel_ranges` config is ignored.
 
 ::: warning Memory Allocation
 Memory is divided evenly among all concurrent workers (systems × ranges).
@@ -102,11 +110,6 @@ nxv index --nixpkgs-path ./nixpkgs
 
 # Index only 2024 commits
 nxv index --nixpkgs-path ./nixpkgs --since 2024-01-01
-
-# Fast parallel indexing with more memory
-nxv index --nixpkgs-path ./nixpkgs \
-  --parallel-ranges 4 \
-  --max-memory 32G
 
 # Linux-only indexing
 nxv index --nixpkgs-path ./nixpkgs \
@@ -350,6 +353,7 @@ These environment variables affect indexer commands:
 | `NXV_DB_PATH`         | Override default database path                                  |
 | `NXV_SECRET_KEY`      | Secret key for manifest signing (alternative to `--secret-key`) |
 | `NXV_EVAL_STORE_PATH` | Custom Nix store for evaluation (prevents system store issues)  |
+| `NXV_INDEXER_CONFIG`  | JSON string or path to `indexer.json` for advanced overrides    |
 | `NXV_LOG`             | Log filter (e.g., `nxv=debug`)                                  |
 | `NXV_LOG_LEVEL`       | Log level: `error`, `warn`, `info`, `debug`, `trace`            |
 | `NXV_LOG_FORMAT`      | Log format: `pretty`, `compact`, `json`                         |

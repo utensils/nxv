@@ -61,8 +61,8 @@ A full index processes all nixpkgs commits since 2017-01-01:
 nxv index --nixpkgs-path ./nixpkgs
 ```
 
-This takes 24-48 hours depending on hardware. Progress is checkpointed every 100
-commits, so you can safely interrupt with Ctrl+C and resume later.
+This takes 24-48 hours depending on hardware. Progress is checkpointed regularly
+so you can safely interrupt with Ctrl+C and resume later.
 
 ### Resuming Interrupted Indexing
 
@@ -73,7 +73,7 @@ Just run the same command again:
 nxv index --nixpkgs-path ./nixpkgs
 ```
 
-To force a fresh start (ignoring checkpoints):
+To force a fresh start (discard checkpoints and rebuild the database):
 
 ```bash
 nxv index --nixpkgs-path ./nixpkgs --full
@@ -81,23 +81,30 @@ nxv index --nixpkgs-path ./nixpkgs --full
 
 ### Parallel Year-Range Indexing
 
-For faster builds on multi-core machines, process year ranges in parallel:
+Parallel year-range indexing is configured via `indexer.json` (or
+`NXV_INDEXER_CONFIG`) so the CLI stays minimal. This can reduce build time by
+2-3x on systems with 8+ cores and sufficient RAM.
 
-```bash
-# Auto-partition into 4 concurrent ranges
-nxv index --nixpkgs-path ./nixpkgs --parallel-ranges 4 --max-memory 32G
+`~/.local/share/nxv/indexer.json` (Linux) example:
 
-# Or specify explicit ranges (end year is inclusive: 2017-2019 = 2017, 2018, 2019)
-nxv index --nixpkgs-path ./nixpkgs \
-  --parallel-ranges "2017-2019,2020-2022,2023-2024"
+```json
+{
+  "parallel_ranges": "2017-2019,2020-2022,2023-2024",
+  "max_range_workers": 3
+}
 ```
 
-This can reduce build time by 2-3x on systems with 8+ cores and sufficient RAM.
+To auto-partition by count, set `parallel_ranges` to a number (e.g., `"4"`).
+
+::: warning Range Overrides
+If you pass `--since` or `--until`, any `parallel_ranges` config is ignored to
+avoid silently overriding your requested range.
+:::
 
 ::: tip Memory Allocation
 Memory is divided evenly among all workers (systems × concurrent ranges).
 With 32 GiB, 4 systems, and 4 parallel ranges, each worker gets 32G / 16 = 2 GiB.
-Use `--max-range-workers` to limit concurrent ranges if needed.
+Limit concurrency via `max_range_workers` in `indexer.json` if needed.
 :::
 
 ### Indexing a Specific Date Range
@@ -111,6 +118,21 @@ nxv index --nixpkgs-path ./nixpkgs --since 2024-01-01
 # Specific range
 nxv index --nixpkgs-path ./nixpkgs --since 2023-01-01 --until 2024-01-01
 ```
+
+### Run Summary and Skip Metrics
+
+At the end of a run, nxv prints a summary including skipped attributes. This is
+useful for identifying packages that failed evaluation on specific systems.
+
+```text
+Skipped attrs: 2107 (failed batches: 2083)
+Skipped samples (system:attr):
+  aarch64-darwin:lambdabot (eval_failed)
+  ...
+```
+
+To see per-batch progress and evaluation warnings during the run, enable debug
+logging (for example, `nxv -v index ...`) or set `NXV_LOG_LEVEL=debug`.
 
 ## Memory Management
 
@@ -309,7 +331,7 @@ This optimization provides 100x+ speedup for incremental indexing.
 
 ### Checkpointing and Ctrl+C Safety
 
-Progress is saved every 100 commits (configurable via `--checkpoint-interval`):
+Progress is saved every 100 commits (configurable via `indexer.json`):
 
 - **Checkpoint data**: Last indexed commit hash, date, statistics
 - **Atomic writes**: Database commits are transactional
@@ -375,12 +397,14 @@ Automatic garbage collection prevents disk exhaustion:
 ```bash
 # Default: GC every 5 checkpoints (500 commits)
 nxv index --nixpkgs-path ./nixpkgs
+```
 
-# More frequent GC
-nxv index --nixpkgs-path ./nixpkgs --gc-interval 2
+Use `indexer.json` to tune GC frequency:
 
-# Disable automatic GC
-nxv index --nixpkgs-path ./nixpkgs --gc-interval 0
+```json
+{
+  "gc_interval": 2
+}
 ```
 
 ## Troubleshooting
@@ -390,18 +414,16 @@ nxv index --nixpkgs-path ./nixpkgs --gc-interval 0
 The memory budget is too small for the number of workers. Either:
 
 - Increase `--max-memory`
-- Reduce `--workers` count
+- Reduce `workers` or `max_range_workers` in `indexer.json`
 - Reduce `--systems` to fewer architectures
 
 ### Stuck on a Commit
 
-Some commits may have evaluation issues. Use `--max-commits` to limit processing
-and isolate the problematic commit, or use `--since`/`--until` to skip a date range:
+Some commits may have evaluation issues. Use `--since`/`--until` to skip a date
+range, or temporarily narrow the range in `indexer.json` with `parallel_ranges`
+to isolate a problematic window.
 
 ```bash
-# Limit to next 100 commits to isolate the issue
-nxv index --nixpkgs-path ./nixpkgs --max-commits 100
-
 # Skip problematic date range
 nxv index --nixpkgs-path ./nixpkgs --since 2023-06-01
 ```

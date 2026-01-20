@@ -30,6 +30,13 @@ the index.
 | `NXV_PUBLIC_KEY`   | Custom public key for manifest verification | Built-in key    |
 | `NXV_SKIP_VERIFY`  | Skip manifest signature verification        | `false`         |
 
+### Indexer
+
+| Variable             | Description                                                  | Default |
+| -------------------- | ------------------------------------------------------------ | ------- |
+| `NXV_INDEXER_CONFIG` | JSON string or path to `indexer.json` for advanced overrides | None    |
+| `NXV_EVAL_STORE_PATH`| Custom Nix store for evaluation workers                      | None    |
+
 ### Logging
 
 | Variable           | Description                                | Default  |

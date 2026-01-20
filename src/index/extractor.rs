@@ -225,18 +225,17 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                     all_packages.extend(batch_result);
                 }
                 Err(_e) => {
-                    if extract_store_paths {
-                        if let Ok(batch_result) =
+                    if extract_store_paths
+                        && let Ok(batch_result) =
                             extract_packages_batch(repo_path.as_ref(), system, attrs, false)
-                        {
-                            trace!(
-                                system = %system,
-                                attr_count = attrs.len(),
-                                "Retry without store paths succeeded"
-                            );
-                            all_packages.extend(batch_result);
-                            return;
-                        }
+                    {
+                        trace!(
+                            system = %system,
+                            attr_count = attrs.len(),
+                            "Retry without store paths succeeded"
+                        );
+                        all_packages.extend(batch_result);
+                        return;
                     }
                     if attrs.len() <= 1 {
                         skipped.extend(attrs.iter().cloned());

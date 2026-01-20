@@ -2672,6 +2672,7 @@ const BLOB_CACHE_FILENAME: &str = "blob_cache.json";
 /// A tuple of (file_attr_map, static_coverage_ratio) where:
 /// - file_attr_map: HashMap<file_path, Vec<attr_names>>
 /// - static_coverage_ratio: fraction of packages covered by static analysis
+#[allow(clippy::too_many_arguments)]
 fn build_hybrid_file_attr_map(
     repo: &NixpkgsRepo,
     commit_hash: &str,
@@ -2751,23 +2752,23 @@ fn build_hybrid_file_attr_map(
         }
     }
 
-    if let Some(db_attrs) = db_all_attrs {
-        if !db_attrs.is_empty() {
-            let entry = file_attr_map
-                .entry(ALL_PACKAGES_PATH.to_string())
-                .or_default();
-            for attr in db_attrs {
-                if !entry.contains(attr) {
-                    entry.push(attr.clone());
-                }
+    if let Some(db_attrs) = db_all_attrs
+        && !db_attrs.is_empty()
+    {
+        let entry = file_attr_map
+            .entry(ALL_PACKAGES_PATH.to_string())
+            .or_default();
+        for attr in db_attrs {
+            if !entry.contains(attr) {
+                entry.push(attr.clone());
             }
         }
     }
 
     // Step 4: Optionally supplement with Nix evaluation for missing coverage.
     // We avoid Nix fallback when the database already provides attr mappings.
-    let db_map_empty = db_file_map.map_or(true, |map| map.is_empty());
-    let db_attrs_empty = db_all_attrs.map_or(true, |attrs| attrs.is_empty());
+    let db_map_empty = db_file_map.is_none_or(|map| map.is_empty());
+    let db_attrs_empty = db_all_attrs.is_none_or(|attrs| attrs.is_empty());
     let needs_full_nix_supplement = static_coverage < MIN_STATIC_COVERAGE && db_map_empty;
     let needs_nix_all_attrs = db_attrs_empty;
 
