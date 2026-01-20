@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::Instant;
 use tracing::{debug, instrument, trace};
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -17,7 +18,9 @@ const MAX_SKIP_SAMPLES: usize = 2000;
 struct SkipMetrics {
     total_skipped: AtomicU64,
     failed_batches: AtomicU64,
+    counts: Mutex<HashMap<String, u64>>,
     samples: Mutex<Vec<String>>,
+    sample_keys: Mutex<HashSet<String>>,
 }
 
 impl SkipMetrics {
@@ -25,7 +28,9 @@ impl SkipMetrics {
         Self {
             total_skipped: AtomicU64::new(0),
             failed_batches: AtomicU64::new(0),
+            counts: Mutex::new(HashMap::new()),
             samples: Mutex::new(Vec::new()),
+            sample_keys: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -34,6 +39,8 @@ impl SkipMetrics {
 pub struct SkipSummary {
     pub total_skipped: u64,
     pub failed_batches: u64,
+    pub unique_skipped: usize,
+    pub top_skipped: Vec<(String, u64)>,
     pub samples: Vec<String>,
 }
 
@@ -47,16 +54,23 @@ pub fn reset_skip_metrics() {
     let metrics = skip_metrics();
     metrics.total_skipped.store(0, Ordering::SeqCst);
     metrics.failed_batches.store(0, Ordering::SeqCst);
-    let mut samples = metrics.samples.lock().unwrap();
-    samples.clear();
+    metrics.counts.lock().unwrap().clear();
+    metrics.samples.lock().unwrap().clear();
+    metrics.sample_keys.lock().unwrap().clear();
 }
 
 pub fn take_skip_metrics() -> SkipSummary {
     let metrics = skip_metrics();
+    let counts = metrics.counts.lock().unwrap();
+    let mut top: Vec<(String, u64)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.truncate(20);
     let samples = metrics.samples.lock().unwrap().clone();
     SkipSummary {
         total_skipped: metrics.total_skipped.load(Ordering::SeqCst),
         failed_batches: metrics.failed_batches.load(Ordering::SeqCst),
+        unique_skipped: counts.len(),
+        top_skipped: top,
         samples,
     }
 }
@@ -73,13 +87,24 @@ fn record_skipped(system: &str, attrs: &[String], reason: &str) {
     metrics
         .total_skipped
         .fetch_add(attrs.len() as u64, Ordering::SeqCst);
+    {
+        let mut counts = metrics.counts.lock().unwrap();
+        for attr in attrs {
+            let key = format!("{}:{}", system, attr);
+            *counts.entry(key).or_insert(0) += 1;
+        }
+    }
     let mut samples = metrics.samples.lock().unwrap();
+    let mut sample_keys = metrics.sample_keys.lock().unwrap();
     if samples.len() >= MAX_SKIP_SAMPLES {
         return;
     }
     let remaining = MAX_SKIP_SAMPLES - samples.len();
     for attr in attrs.iter().take(remaining) {
-        samples.push(format!("{}:{} ({})", system, attr, reason));
+        let key = format!("{}:{}", system, attr);
+        if sample_keys.insert(key.clone()) {
+            samples.push(format!("{} ({})", key, reason));
+        }
     }
 }
 
@@ -709,6 +734,7 @@ mod tests {
         assert!(summary.total_skipped >= 2);
         assert!(summary.failed_batches >= 1);
         assert!(summary.samples.len() >= 2);
+        assert_eq!(summary.unique_skipped, 2);
         assert!(summary.samples[0].contains("x86_64-linux:foo"));
     }
 
@@ -722,6 +748,7 @@ mod tests {
         let summary = take_skip_metrics();
         assert!(summary.total_skipped >= attrs.len() as u64);
         assert!(summary.samples.len() <= MAX_SKIP_SAMPLES);
+        assert!(summary.unique_skipped >= attrs.len());
     }
 
     #[test]

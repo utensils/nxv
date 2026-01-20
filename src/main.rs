@@ -1203,7 +1203,13 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     // Check for parallel ranges mode
-    let ranges_spec = overrides.parallel_ranges.as_deref();
+    let mut ranges_spec = overrides.parallel_ranges.as_deref();
+    if ranges_spec.is_some() && (args.since.is_some() || args.until.is_some()) {
+        eprintln!(
+            "Note: ignoring parallel_ranges from indexer config because --since/--until was provided."
+        );
+        ranges_spec = None;
+    }
     let max_range_workers = overrides.max_range_workers.unwrap_or(4);
 
     let result = if let Some(ranges_spec) = ranges_spec {
@@ -1260,9 +1266,15 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
     let skip_summary = extractor::take_skip_metrics();
     eprintln!(
-        "  Skipped attrs: {} (failed batches: {})",
-        skip_summary.total_skipped, skip_summary.failed_batches
+        "  Skipped attrs: {} (unique: {}, failed batches: {})",
+        skip_summary.total_skipped, skip_summary.unique_skipped, skip_summary.failed_batches
     );
+    if !skip_summary.top_skipped.is_empty() {
+        eprintln!("  Top skipped attrs (system:attr=count):");
+        for (entry, count) in &skip_summary.top_skipped {
+            eprintln!("    {}={}", entry, count);
+        }
+    }
     if !skip_summary.samples.is_empty() {
         eprintln!("  Skipped samples (system:attr):");
         for sample in skip_summary.samples.iter().take(20) {
