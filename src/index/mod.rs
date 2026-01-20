@@ -1985,6 +1985,19 @@ impl Indexer {
                 pending_upserts.push(aggregate.to_package_version(&commit.hash, commit.date));
             }
 
+            if pending_upserts.len() >= MAX_PENDING_UPSERTS {
+                let upsert_start = Instant::now();
+                let upsert_count = pending_upserts.len();
+                result.packages_upserted += db.upsert_packages_batch(&pending_upserts)? as u64;
+                pending_upserts.clear();
+                debug!(
+                    pending_limit = MAX_PENDING_UPSERTS,
+                    upsert_count = upsert_count,
+                    upsert_time_ms = upsert_start.elapsed().as_millis(),
+                    "Flushed pending upserts early to limit memory use"
+                );
+            }
+
             result.commits_processed += 1;
             last_processed_commit = Some(commit.hash.clone());
 
@@ -2156,6 +2169,8 @@ const AMBIGUOUS_FILENAMES: &[&str] = &[
     "bin",
     "unwrapped",
 ];
+
+const MAX_PENDING_UPSERTS: usize = 50_000;
 
 /// Extract an attribute name from a nixpkgs file path.
 ///
@@ -3456,6 +3471,23 @@ fn process_range_worker(
         // Convert aggregates to PackageVersion records
         for aggregate in aggregates.values() {
             pending_upserts.push(aggregate.to_package_version(&commit.hash, commit.date));
+        }
+
+        if pending_upserts.len() >= MAX_PENDING_UPSERTS {
+            let upsert_start = std::time::Instant::now();
+            let mut db_guard = db.lock().unwrap();
+            let upsert_count = db_guard.upsert_packages_batch(&pending_upserts)?;
+            result.packages_upserted += upsert_count as u64;
+            let upsert_ms = upsert_start.elapsed().as_millis();
+            pending_upserts.clear();
+            drop(db_guard);
+            tracing::debug!(
+                range = %range.label,
+                pending_limit = MAX_PENDING_UPSERTS,
+                upsert_count = upsert_count,
+                upsert_ms = upsert_ms,
+                "Flushed pending upserts early to limit memory use"
+            );
         }
 
         result.commits_processed += 1;
