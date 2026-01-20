@@ -90,6 +90,23 @@ fn calculate_per_worker_memory(
     Ok(per_worker.as_mib() as usize)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerPoolMode {
+    Disabled,
+    Single,
+    Parallel,
+}
+
+fn worker_pool_mode(worker_count: usize, systems_len: usize) -> WorkerPoolMode {
+    if systems_len == 0 {
+        WorkerPoolMode::Disabled
+    } else if worker_count > 1 && systems_len > 1 {
+        WorkerPoolMode::Parallel
+    } else {
+        WorkerPoolMode::Single
+    }
+}
+
 /// A year range for parallel indexing.
 ///
 /// Represents a time range for partitioning commits during parallel indexing.
@@ -1437,40 +1454,43 @@ impl Indexer {
         // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
         let _ = nixpkgs_path.as_ref();
 
-        // Determine if we should use parallel evaluation
-        let use_parallel = self.config.worker_count != Some(1) && systems.len() > 1;
         let worker_count = self.config.worker_count.unwrap_or(systems.len());
+        let pool_mode = worker_pool_mode(worker_count, systems.len());
 
-        // Create worker pool for parallel evaluation (if enabled)
-        let worker_pool = if use_parallel && worker_count > 1 {
-            // Calculate per-worker memory from total budget
-            let per_worker_mib = calculate_per_worker_memory(
-                self.config.memory_budget,
-                worker_count,
-                1, // single range mode
-            )?;
-            let pool_config = worker::WorkerPoolConfig {
-                worker_count,
-                per_worker_memory_mib: per_worker_mib,
-                ..Default::default()
-            };
-            match worker::WorkerPool::new(pool_config) {
-                Ok(pool) => Some(pool),
-                Err(e) => {
-                    warn!(
-                        target: "nxv::index",
-                        "Failed to create worker pool ({}), falling back to sequential",
-                        e
-                    );
-                    None
+        // Create worker pool even for single-worker mode to cap evaluator memory.
+        let worker_pool = match pool_mode {
+            WorkerPoolMode::Disabled => None,
+            WorkerPoolMode::Single | WorkerPoolMode::Parallel => {
+                let per_worker_mib = calculate_per_worker_memory(
+                    self.config.memory_budget,
+                    worker_count,
+                    1, // single range mode
+                )?;
+                let pool_config = worker::WorkerPoolConfig {
+                    worker_count,
+                    per_worker_memory_mib: per_worker_mib,
+                    ..Default::default()
+                };
+                match worker::WorkerPool::new(pool_config) {
+                    Ok(pool) => Some(pool),
+                    Err(e) => {
+                        warn!(
+                            target: "nxv::index",
+                            "Failed to create worker pool ({}), falling back to sequential",
+                            e
+                        );
+                        None
+                    }
                 }
             }
-        } else {
-            if systems.len() > 1 {
-                info!(target: "nxv::index", "Using sequential evaluation (--workers=1)");
-            }
-            None
         };
+
+        if pool_mode == WorkerPoolMode::Single && systems.len() > 1 {
+            info!(
+                target: "nxv::index",
+                "Using worker pool with a single worker for isolated evaluation"
+            );
+        }
 
         // Progress tracking
         let mut progress = ProgressTracker::new(total_commits as u64, "Indexing");
@@ -3013,8 +3033,8 @@ fn process_range_worker(
 
     // Determine if we should use parallel evaluation for systems
     let systems = &config.systems;
-    let use_parallel = config.worker_count != Some(1) && systems.len() > 1;
     let worker_count = config.worker_count.unwrap_or(systems.len());
+    let pool_mode = worker_pool_mode(worker_count, systems.len());
 
     // Acquire startup barrier to stagger heavy initialization work.
     // This prevents all ranges from creating worker pools and building
@@ -3030,19 +3050,20 @@ fn process_range_worker(
         "Acquired startup barrier, initializing worker pool"
     );
 
-    // Create worker pool for parallel system evaluation (if enabled)
-    // Each range gets its own eval store to avoid SQLite contention
-    let worker_pool = if use_parallel && worker_count > 1 {
-        let eval_store_path = format!("{}-{}", gc::TEMP_EVAL_STORE_PATH, range.label);
-        let pool_config = worker::WorkerPoolConfig {
-            worker_count,
-            per_worker_memory_mib,
-            eval_store_path: Some(eval_store_path),
-            ..Default::default()
-        };
-        worker::WorkerPool::new(pool_config).ok()
-    } else {
-        None
+    // Create worker pool even for single-worker mode to cap evaluator memory.
+    // Each range gets its own eval store to avoid SQLite contention.
+    let worker_pool = match pool_mode {
+        WorkerPoolMode::Disabled => None,
+        WorkerPoolMode::Single | WorkerPoolMode::Parallel => {
+            let eval_store_path = format!("{}-{}", gc::TEMP_EVAL_STORE_PATH, range.label);
+            let pool_config = worker::WorkerPoolConfig {
+                worker_count,
+                per_worker_memory_mib,
+                eval_store_path: Some(eval_store_path),
+                ..Default::default()
+            };
+            worker::WorkerPool::new(pool_config).ok()
+        }
     };
 
     // Build initial file-to-attribute map using hybrid approach
@@ -3698,6 +3719,15 @@ mod tests {
         // Hit 5%
         tracker.tick();
         assert!(tracker.should_log());
+    }
+
+    #[test]
+    fn test_worker_pool_mode() {
+        assert_eq!(worker_pool_mode(1, 0), WorkerPoolMode::Disabled);
+        assert_eq!(worker_pool_mode(1, 1), WorkerPoolMode::Single);
+        assert_eq!(worker_pool_mode(1, 4), WorkerPoolMode::Single);
+        assert_eq!(worker_pool_mode(2, 1), WorkerPoolMode::Single);
+        assert_eq!(worker_pool_mode(2, 2), WorkerPoolMode::Parallel);
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.
