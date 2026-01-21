@@ -497,6 +497,47 @@ pub struct WorkerPool {
     watchdog: Arc<WorkerWatchdog>,
 }
 
+fn run_batched_with_retry<T, F>(
+    attrs: &[String],
+    initial_batch_size: usize,
+    mut extract_fn: F,
+) -> Result<Vec<T>>
+where
+    F: FnMut(&[String]) -> Result<Vec<T>>,
+{
+    use std::collections::VecDeque;
+
+    if attrs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut queue: VecDeque<Vec<String>> = attrs
+        .chunks(initial_batch_size)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+    let mut results: Vec<T> = Vec::new();
+
+    while let Some(chunk) = queue.pop_front() {
+        match extract_fn(&chunk) {
+            Ok(items) => {
+                results.extend(items);
+            }
+            Err(e) => {
+                if chunk.len() <= 1 {
+                    return Err(e);
+                }
+                let mid = chunk.len() / 2;
+                let left = chunk[..mid].to_vec();
+                let right = chunk[mid..].to_vec();
+                queue.push_front(right);
+                queue.push_front(left);
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 impl WorkerPool {
     /// Create a new worker pool and spawn worker processes.
     pub fn new(config: WorkerPoolConfig) -> Result<Self> {
@@ -661,51 +702,34 @@ impl WorkerPool {
         // to reduce IPC overhead, but small enough that workers don't accumulate
         // too much memory before a potential restart.
         const PARENT_BATCH_SIZE: usize = 500;
+        let batch_size = self.recommended_batch_size(PARENT_BATCH_SIZE);
 
-        if attrs.len() <= PARENT_BATCH_SIZE {
+        if attrs.len() <= batch_size {
             // Small extraction - no need for parent-level batching
             return self.extract(system, repo_path, attrs, extract_store_paths);
         }
 
-        let total_batches = attrs.len().div_ceil(PARENT_BATCH_SIZE);
+        let total_batches = attrs.len().div_ceil(batch_size);
 
         tracing::debug!(
             system = %system,
             total_attrs = attrs.len(),
-            batch_size = PARENT_BATCH_SIZE,
+            batch_size = batch_size,
             batches = total_batches,
             "Starting parent-level batched extraction"
         );
 
-        let mut all_packages: Vec<PackageInfo> = Vec::with_capacity(attrs.len());
-
-        for (batch_idx, chunk) in attrs.chunks(PARENT_BATCH_SIZE).enumerate() {
-            // Wait for memory to clear between batches
+        let mut all_packages = run_batched_with_retry(attrs, batch_size, |chunk| {
             self.wait_for_memory_clear();
 
             tracing::trace!(
                 system = %system,
-                batch = batch_idx + 1,
-                total = total_batches,
                 chunk_size = chunk.len(),
                 "Processing parent batch"
             );
 
-            match self.extract(system, repo_path, chunk, extract_store_paths) {
-                Ok(packages) => {
-                    all_packages.extend(packages);
-                }
-                Err(e) => {
-                    // Log error but continue with remaining batches
-                    tracing::warn!(
-                        system = %system,
-                        batch = batch_idx + 1,
-                        error = %e,
-                        "Parent batch failed, continuing with remaining batches"
-                    );
-                }
-            }
-        }
+            self.extract(system, repo_path, chunk, extract_store_paths)
+        })?;
 
         tracing::debug!(
             system = %system,
@@ -713,6 +737,7 @@ impl WorkerPool {
             "Parent-level batched extraction complete"
         );
 
+        all_packages.shrink_to_fit();
         Ok(all_packages)
     }
 
@@ -934,6 +959,33 @@ mod tests {
                 .map(|base| format!("{}-w{}", base, id));
             assert!(worker_store_path.is_none());
         }
+    }
+
+    #[test]
+    fn test_run_batched_with_retry_splits_on_error() {
+        let attrs: Vec<String> = (0..5).map(|i| format!("attr{}", i)).collect();
+        let mut seen: Vec<String> = Vec::new();
+        let result = run_batched_with_retry(&attrs, 4, |chunk| {
+            if chunk.len() > 1 {
+                return Err(NxvError::Worker("simulated failure".to_string()));
+            }
+            seen.push(chunk[0].clone());
+            Ok(vec![chunk[0].clone()])
+        })
+        .unwrap();
+
+        assert_eq!(result.len(), attrs.len());
+        assert_eq!(seen.len(), attrs.len());
+    }
+
+    #[test]
+    fn test_run_batched_with_retry_fails_on_single_error() {
+        let attrs: Vec<String> = vec!["only".to_string()];
+        let result: Result<Vec<String>> = run_batched_with_retry(&attrs, 4, |_chunk| {
+            Err(NxvError::Worker("simulated failure".to_string()))
+        });
+
+        assert!(result.is_err());
     }
 
     // Note: Full pool tests require the binary to support --internal-worker.
