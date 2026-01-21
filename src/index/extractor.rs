@@ -471,6 +471,12 @@ pub fn extract_attr_positions<P: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn skip_metrics_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_package_info_json_serialization() {
@@ -722,6 +728,7 @@ mod tests {
 
     #[test]
     fn test_skip_metrics_tracking() {
+        let _guard = skip_metrics_test_lock().lock().unwrap();
         reset_skip_metrics();
         record_failed_batch();
         record_skipped(
@@ -739,6 +746,7 @@ mod tests {
 
     #[test]
     fn test_skip_metrics_sample_cap() {
+        let _guard = skip_metrics_test_lock().lock().unwrap();
         reset_skip_metrics();
         let attrs: Vec<String> = (0..(MAX_SKIP_SAMPLES as u32 + 10))
             .map(|i| format!("attr{}", i))

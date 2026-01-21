@@ -8,7 +8,7 @@ use super::proc::Proc;
 use super::protocol::{WorkRequest, WorkResponse};
 use super::signals::{TerminationReason, WorkerFailure, analyze_wait_status};
 use super::spawn::{WorkerConfig, spawn_worker};
-use super::watchdog::{MEMORY_CRITICAL, WorkerWatchdog};
+use super::watchdog::{MEMORY_CRITICAL, WorkerWatchdog, take_watchdog_kill};
 use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
 use crate::memory::DEFAULT_MEMORY_BUDGET;
@@ -423,16 +423,27 @@ impl Worker {
 
     /// Handle worker death and return an appropriate error.
     fn handle_death(&mut self, context: &str) -> Result<NxvError> {
-        let reason = if let Some(mut proc) = self.proc.take() {
-            match proc.try_wait() {
+        let (reason, killed_by_watchdog) = if let Some(mut proc) = self.proc.take() {
+            let pid = proc.pid().as_raw() as u32;
+            let killed_by_watchdog = take_watchdog_kill(pid);
+            let reason = match proc.try_wait() {
                 Ok(Some(status)) => analyze_wait_status(status),
                 _ => TerminationReason::Unknown,
-            }
+            };
+            let reason = if killed_by_watchdog {
+                TerminationReason::OutOfMemory
+            } else {
+                reason
+            };
+            (reason, killed_by_watchdog)
         } else {
-            TerminationReason::Unknown
+            (TerminationReason::Unknown, false)
         };
 
-        let failure = WorkerFailure::new(reason.clone()).with_context(context);
+        let mut failure = WorkerFailure::new(reason.clone()).with_context(context);
+        if killed_by_watchdog {
+            failure = failure.with_message("exceeded memory limit");
+        }
 
         tracing::warn!(
             worker_id = self.id,
@@ -591,6 +602,17 @@ impl WorkerPool {
     /// Get the number of workers in the pool.
     pub fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    pub fn total_memory_budget_mib(&self) -> usize {
+        self.config
+            .per_worker_memory_mib
+            .saturating_mul(self.config.worker_count)
+    }
+
+    pub fn single_worker_pool(&self, label_suffix: &str) -> Result<Self> {
+        let config = single_worker_config(&self.config, label_suffix);
+        Self::new(config)
     }
 
     /// Check if the system is under critical memory pressure.
@@ -869,6 +891,21 @@ impl WorkerPool {
     }
 }
 
+fn single_worker_config(config: &WorkerPoolConfig, label_suffix: &str) -> WorkerPoolConfig {
+    let mut single = config.clone();
+    single.worker_count = 1;
+    single.per_worker_memory_mib = config
+        .per_worker_memory_mib
+        .saturating_mul(config.worker_count);
+    let label = single
+        .label
+        .as_deref()
+        .map(|label| format!("{}-{}", label, label_suffix))
+        .unwrap_or_else(|| label_suffix.to_string());
+    single.label = Some(label);
+    single
+}
+
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.shutdown();
@@ -959,6 +996,24 @@ mod tests {
                 .map(|base| format!("{}-w{}", base, id));
             assert!(worker_store_path.is_none());
         }
+    }
+
+    #[test]
+    fn test_single_worker_config_uses_total_budget() {
+        let config = WorkerPoolConfig {
+            worker_count: 4,
+            per_worker_memory_mib: 2048,
+            timeout: Duration::from_secs(42),
+            eval_store_path: Some("path".to_string()),
+            label: Some("range-2017".to_string()),
+        };
+
+        let single = single_worker_config(&config, "single");
+        assert_eq!(single.worker_count, 1);
+        assert_eq!(single.per_worker_memory_mib, 8192);
+        assert_eq!(single.timeout, config.timeout);
+        assert_eq!(single.eval_store_path, config.eval_store_path);
+        assert_eq!(single.label.as_deref(), Some("range-2017-single"));
     }
 
     #[test]

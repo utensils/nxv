@@ -565,6 +565,19 @@ impl Database {
         Ok(())
     }
 
+    /// Clear checkpoint for a specific range label.
+    #[cfg(feature = "indexer")]
+    pub fn clear_range_checkpoint(&self, range_label: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM meta WHERE key = ? OR key = ?",
+            [
+                format!("last_indexed_commit_{}", range_label),
+                format!("last_indexed_date_{}", range_label),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Get all range checkpoints (for resume logic in parallel indexing).
     ///
     /// Returns a map from range label to last indexed commit hash.
@@ -1395,6 +1408,25 @@ mod tests {
         assert_eq!(db.get_all_range_checkpoints().unwrap().len(), 0);
         assert_eq!(db.get_range_checkpoint("2017").unwrap(), None);
         assert_eq!(db.get_range_checkpoint("2018").unwrap(), None);
+    }
+
+    #[test]
+    #[cfg(feature = "indexer")]
+    fn test_clear_single_range_checkpoint() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.set_range_checkpoint("2017", "abc123").unwrap();
+        db.set_range_checkpoint("2018", "def456").unwrap();
+
+        db.clear_range_checkpoint("2017").unwrap();
+
+        assert_eq!(db.get_range_checkpoint("2017").unwrap(), None);
+        assert_eq!(
+            db.get_range_checkpoint("2018").unwrap(),
+            Some("def456".to_string())
+        );
     }
 
     #[test]

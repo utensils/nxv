@@ -8,10 +8,10 @@
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -28,6 +28,21 @@ pub static MEMORY_CRITICAL: AtomicBool = AtomicBool::new(false);
 
 /// Total system memory in MiB (cached on first read).
 static SYSTEM_MEMORY_MIB: AtomicU64 = AtomicU64::new(0);
+static WATCHDOG_KILLED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+fn watchdog_killed_pids() -> &'static Mutex<HashSet<u32>> {
+    WATCHDOG_KILLED_PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub fn mark_watchdog_kill(pid: u32) {
+    let mut killed = watchdog_killed_pids().lock().unwrap();
+    killed.insert(pid);
+}
+
+pub fn take_watchdog_kill(pid: u32) -> bool {
+    let mut killed = watchdog_killed_pids().lock().unwrap();
+    killed.remove(&pid)
+}
 
 /// Get total system memory in MiB.
 pub fn get_system_memory_mib() -> u64 {
@@ -287,6 +302,7 @@ fn handle_over_limit(
             limit_mib = worker.limit_mib,
             "Killing worker for exceeding memory limit"
         );
+        mark_watchdog_kill(worker.pid);
 
         // Send SIGTERM first for graceful shutdown
         let pid = Pid::from_raw(worker.pid as i32);

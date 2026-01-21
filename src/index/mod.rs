@@ -107,6 +107,18 @@ fn worker_pool_mode(worker_count: usize, systems_len: usize) -> WorkerPoolMode {
     }
 }
 
+fn is_memory_error(error: &NxvError) -> bool {
+    match error {
+        NxvError::Worker(message) => {
+            let message = message.to_lowercase();
+            message.contains("out of memory")
+                || message.contains("exceeded memory limit")
+                || message.contains("memory limit")
+        }
+        _ => false,
+    }
+}
+
 /// A year range for parallel indexing.
 ///
 /// Represents a time range for partitioning commits during parallel indexing.
@@ -325,6 +337,12 @@ impl YearRange {
 
         Ok(ranges)
     }
+}
+
+pub(crate) fn range_label_for_dates(since: Option<&str>, until: Option<&str>) -> String {
+    let start = since.unwrap_or("min");
+    let end = until.unwrap_or("max");
+    format!("custom-{}-{}", start, end)
 }
 
 /// Result from indexing a single year range (for parallel indexing).
@@ -822,6 +840,31 @@ impl Indexer {
         nixpkgs_path: P,
         db_path: Q,
     ) -> Result<IndexResult> {
+        self.index_full_with_options(nixpkgs_path, db_path, true, None, false)
+    }
+
+    /// Run a full reprocess of a specific date range without clobbering global checkpoints.
+    ///
+    /// This uses a range-specific checkpoint key so the main incremental checkpoint remains
+    /// unchanged. Useful for reindexing historical ranges without nuking the database.
+    pub fn index_full_range<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        nixpkgs_path: P,
+        db_path: Q,
+    ) -> Result<IndexResult> {
+        let label =
+            range_label_for_dates(self.config.since.as_deref(), self.config.until.as_deref());
+        self.index_full_with_options(nixpkgs_path, db_path, false, Some(&label), true)
+    }
+
+    fn index_full_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        nixpkgs_path: P,
+        db_path: Q,
+        update_global_checkpoint: bool,
+        range_label: Option<&str>,
+        clear_range_checkpoint: bool,
+    ) -> Result<IndexResult> {
         let repo = NixpkgsRepo::open(&nixpkgs_path)?;
 
         // Clean up orphaned worktrees from previous crashed runs
@@ -860,6 +903,14 @@ impl Indexer {
         }
 
         let mut db = Database::open(&db_path)?;
+        if clear_range_checkpoint && let Some(label) = range_label {
+            db.clear_range_checkpoint(label)?;
+            info!(
+                target: "nxv::index",
+                range = label,
+                "Cleared range checkpoint for full reindex"
+            );
+        }
 
         info!(target: "nxv::index", "Performing full index rebuild...");
         debug!(
@@ -898,7 +949,24 @@ impl Indexer {
             );
         }
 
-        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None, false)
+        let resume_from = if update_global_checkpoint {
+            None
+        } else if let Some(label) = range_label {
+            db.get_range_checkpoint(label)?
+        } else {
+            None
+        };
+
+        self.process_commits(
+            &mut db,
+            &nixpkgs_path,
+            &repo,
+            commits,
+            resume_from.as_deref(),
+            false,
+            update_global_checkpoint,
+            range_label,
+        )
     }
 
     /// Run an incremental index, processing only commits that have not yet been indexed.
@@ -1079,6 +1147,8 @@ impl Indexer {
                             commits,
                             Some(&hash),
                             true,
+                            true,
+                            None,
                         )
                     }
                     Err(_) => {
@@ -1414,7 +1484,8 @@ impl Indexer {
     ///
     /// The method supports graceful shutdown (saving a checkpoint and flushing pending
     /// UPSERTs), periodic checkpoints controlled by the indexer's configuration, and optional
-    /// progress reporting with a smoothed ETA. It updates the "last_indexed_commit" meta key.
+    /// progress reporting with a smoothed ETA. It updates the "last_indexed_commit" meta key
+    /// unless global checkpoint updates are disabled (range-only reprocessing).
     ///
     /// # Returns
     ///
@@ -1436,10 +1507,21 @@ impl Indexer {
     /// let mut db = Database::open("/tmp/index.db").unwrap();
     /// let repo = open_nixpkgs_repo("/path/to/nixpkgs").unwrap();
     /// let commits = repo.list_commits_touching_pkgs().unwrap();
-    /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None, false).unwrap();
+    /// let result = indexer.process_commits(
+    ///     &mut db,
+    ///     "/path/to/nixpkgs",
+    ///     &repo,
+    ///     commits,
+    ///     None,
+    ///     false,
+    ///     true,
+    ///     None,
+    /// )
+    /// .unwrap();
     /// println!("Indexed {} commits", result.commits_processed);
     /// ```
     #[instrument(level = "debug", skip(self, db, nixpkgs_path, repo, commits, resume_from), fields(total_commits = commits.len()))]
+    #[allow(clippy::too_many_arguments)]
     fn process_commits<P: AsRef<Path>>(
         &self,
         db: &mut Database,
@@ -1448,6 +1530,8 @@ impl Indexer {
         commits: Vec<git::CommitInfo>,
         resume_from: Option<&str>,
         use_db_mapping: bool,
+        update_global_checkpoint: bool,
+        range_label: Option<&str>,
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
@@ -1484,6 +1568,7 @@ impl Indexer {
                 }
             }
         };
+        let mut single_worker_pool: Option<worker::WorkerPool> = None;
 
         if pool_mode == WorkerPoolMode::Single && systems.len() > 1 {
             info!(
@@ -1592,8 +1677,12 @@ impl Indexer {
 
                 // Save checkpoint - just the last processed commit
                 if let Some(ref last_hash) = last_processed_commit {
-                    db.set_meta("last_indexed_commit", last_hash)?;
-                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                    if update_global_checkpoint {
+                        db.set_meta("last_indexed_commit", last_hash)?;
+                        db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                    } else if let Some(label) = range_label {
+                        db.set_range_checkpoint(label, last_hash)?;
+                    }
                     db.checkpoint()?;
                     info!(
                         target: "nxv::index",
@@ -1895,18 +1984,64 @@ impl Indexer {
                             targets = target_list.len(),
                             "Using sequential batched extraction for large target list"
                         );
-                        systems
-                            .iter()
-                            .map(|system| {
-                                let result = pool.extract_batched(
+
+                        let mut per_system = Vec::with_capacity(systems.len());
+                        for system in systems.iter() {
+                            let mut result = if pool.worker_count() > 1 {
+                                let single_pool = match single_worker_pool.as_ref() {
+                                    Some(pool) => pool,
+                                    None => {
+                                        let pool = pool.single_worker_pool("single")?;
+                                        single_worker_pool = Some(pool);
+                                        single_worker_pool
+                                            .as_ref()
+                                            .expect("single worker pool just initialized")
+                                    }
+                                };
+                                single_pool.extract_batched(
+                                    system,
+                                    worktree_path,
+                                    &target_list,
+                                    extract_store_paths,
+                                )
+                            } else {
+                                pool.extract_batched(
+                                    system,
+                                    worktree_path,
+                                    &target_list,
+                                    extract_store_paths,
+                                )
+                            };
+
+                            if let Err(ref err) = result && is_memory_error(err) {
+                                let single_pool = match single_worker_pool.as_ref() {
+                                    Some(pool) => pool,
+                                    None => {
+                                        let pool = pool.single_worker_pool("single")?;
+                                        single_worker_pool = Some(pool);
+                                        single_worker_pool
+                                            .as_ref()
+                                            .expect("single worker pool just initialized")
+                                    }
+                                };
+                                result = single_pool.extract_batched(
                                     system,
                                     worktree_path,
                                     &target_list,
                                     extract_store_paths,
                                 );
-                                (system.clone(), result)
-                            })
-                            .collect()
+                            }
+
+                            if let Err(ref err) = result && is_memory_error(err) {
+                                return Err(NxvError::Worker(format!(
+                                    "Memory-limited extraction failed for {}: {}",
+                                    system, err
+                                )));
+                            }
+
+                            per_system.push((system.clone(), result));
+                        }
+                        per_system
                     } else {
                         // Small extraction: parallel is fine
                         let results = pool.extract_parallel(
@@ -1915,7 +2050,38 @@ impl Indexer {
                             &target_list,
                             extract_store_paths,
                         );
-                        systems.iter().cloned().zip(results).collect()
+                        let mut paired: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
+                            systems.iter().cloned().zip(results).collect();
+
+                        for (system, result) in paired.iter_mut() {
+                            if let Err(err) = result.as_ref() && is_memory_error(err) {
+                                let single_pool = match single_worker_pool.as_ref() {
+                                    Some(pool) => pool,
+                                    None => {
+                                        let pool = pool.single_worker_pool("single")?;
+                                        single_worker_pool = Some(pool);
+                                        single_worker_pool
+                                            .as_ref()
+                                            .expect("single worker pool just initialized")
+                                    }
+                                };
+                                *result = single_pool.extract_batched(
+                                    system,
+                                    worktree_path,
+                                    &target_list,
+                                    extract_store_paths,
+                                );
+                            }
+
+                            if let Err(err) = result.as_ref() && is_memory_error(err) {
+                                return Err(NxvError::Worker(format!(
+                                    "Memory-limited extraction failed for {}: {}",
+                                    system, err
+                                )));
+                            }
+                        }
+
+                        paired
                     }
                 } else {
                     // Sequential extraction (fallback)
@@ -2045,8 +2211,12 @@ impl Indexer {
                     pending_upserts.clear();
                 }
 
-                db.set_meta("last_indexed_commit", &commit.hash)?;
-                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                if update_global_checkpoint {
+                    db.set_meta("last_indexed_commit", &commit.hash)?;
+                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+                } else if let Some(label) = range_label {
+                    db.set_range_checkpoint(label, &commit.hash)?;
+                }
                 db.checkpoint()?;
 
                 // Garbage collection: run periodically or when disk is low
@@ -2105,8 +2275,12 @@ impl Indexer {
         if !result.was_interrupted
             && let Some(ref last_hash) = last_processed_commit
         {
-            db.set_meta("last_indexed_commit", last_hash)?;
-            db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+            if update_global_checkpoint {
+                db.set_meta("last_indexed_commit", last_hash)?;
+                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+            } else if let Some(label) = range_label {
+                db.set_range_checkpoint(label, last_hash)?;
+            }
         }
 
         // Set final unique names count
@@ -3728,6 +3902,34 @@ mod tests {
         assert_eq!(worker_pool_mode(1, 4), WorkerPoolMode::Single);
         assert_eq!(worker_pool_mode(2, 1), WorkerPoolMode::Single);
         assert_eq!(worker_pool_mode(2, 2), WorkerPoolMode::Parallel);
+    }
+
+    #[test]
+    fn test_is_memory_error() {
+        let err = NxvError::Worker("Worker died (out of memory)".to_string());
+        assert!(is_memory_error(&err));
+
+        let err = NxvError::Worker("Worker failed: exceeded memory limit".to_string());
+        assert!(is_memory_error(&err));
+
+        let err = NxvError::Worker("Worker failed: evaluation error".to_string());
+        assert!(!is_memory_error(&err));
+    }
+
+    #[test]
+    fn test_range_label_for_dates() {
+        assert_eq!(
+            range_label_for_dates(Some("2017-01-01"), Some("2018-01-01")),
+            "custom-2017-01-01-2018-01-01"
+        );
+        assert_eq!(
+            range_label_for_dates(None, Some("2018-01-01")),
+            "custom-min-2018-01-01"
+        );
+        assert_eq!(
+            range_label_for_dates(Some("2017-01-01"), None),
+            "custom-2017-01-01-max"
+        );
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.

@@ -79,6 +79,9 @@ To force a fresh start (discard checkpoints and rebuild the database):
 nxv index --nixpkgs-path ./nixpkgs --full
 ```
 
+If you combine `--full` with `--since`/`--until`, nxv reprocesses only that
+range without deleting the existing database.
+
 ### Parallel Year-Range Indexing
 
 Parallel year-range indexing is configured via `indexer.json` (or

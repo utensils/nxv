@@ -32,6 +32,9 @@ Use `--show-warnings` to see extraction failures during indexing.
 | `--max-memory <SIZE>`            | `8G`         | Total memory budget (e.g., `32G`, `16384M`)       |
 | `--show-warnings`                | `false`      | Show extraction warnings (failed evals, missing)  |
 
+When `--full` is combined with `--since` or `--until`, nxv reprocesses only that
+range without deleting the existing database.
+
 ### Advanced Indexer Overrides (Config)
 
 Advanced indexer knobs are read from `NXV_INDEXER_CONFIG` (JSON string or path)
@@ -115,8 +118,11 @@ nxv index --nixpkgs-path ./nixpkgs --since 2024-01-01
 nxv index --nixpkgs-path ./nixpkgs \
   --systems x86_64-linux,aarch64-linux
 
-# Force fresh start
+# Force fresh start (deletes DB + checkpoints)
 nxv index --nixpkgs-path ./nixpkgs --full
+
+# Reprocess a historical range without deleting the database
+nxv index --nixpkgs-path ./nixpkgs --full --since 2018-01-01 --until 2019-01-01
 ```
 
 ---

@@ -1151,7 +1151,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
     eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
 
-    if args.full {
+    let range_reprocess = args.full && (args.since.is_some() || args.until.is_some());
+    if args.full && !range_reprocess {
         let db_path = &cli.db_path;
         let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
         let shm_path = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
@@ -1161,6 +1162,10 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         let _ = fs::remove_file(wal_path);
         let _ = fs::remove_file(shm_path);
         let _ = fs::remove_file(bloom_path);
+    } else if range_reprocess {
+        eprintln!(
+            "Note: --full with --since/--until reprocesses only that range without deleting the database."
+        );
     }
 
     let systems = args
@@ -1251,7 +1256,11 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             args.full,
         )?
     } else if args.full {
-        indexer.index_full(&nixpkgs_path, &cli.db_path)?
+        if range_reprocess {
+            indexer.index_full_range(&nixpkgs_path, &cli.db_path)?
+        } else {
+            indexer.index_full(&nixpkgs_path, &cli.db_path)?
+        }
     } else {
         indexer.index_incremental(&nixpkgs_path, &cli.db_path)?
     };
