@@ -2013,7 +2013,9 @@ impl Indexer {
                                 )
                             };
 
-                            if let Err(ref err) = result && is_memory_error(err) {
+                            if let Err(ref err) = result
+                                && is_memory_error(err)
+                            {
                                 let single_pool = match single_worker_pool.as_ref() {
                                     Some(pool) => pool,
                                     None => {
@@ -2032,7 +2034,9 @@ impl Indexer {
                                 );
                             }
 
-                            if let Err(ref err) = result && is_memory_error(err) {
+                            if let Err(ref err) = result
+                                && is_memory_error(err)
+                            {
                                 return Err(NxvError::Worker(format!(
                                     "Memory-limited extraction failed for {}: {}",
                                     system, err
@@ -2054,7 +2058,9 @@ impl Indexer {
                             systems.iter().cloned().zip(results).collect();
 
                         for (system, result) in paired.iter_mut() {
-                            if let Err(err) = result.as_ref() && is_memory_error(err) {
+                            if let Err(err) = result.as_ref()
+                                && is_memory_error(err)
+                            {
                                 let single_pool = match single_worker_pool.as_ref() {
                                     Some(pool) => pool,
                                     None => {
@@ -2073,7 +2079,9 @@ impl Indexer {
                                 );
                             }
 
-                            if let Err(err) = result.as_ref() && is_memory_error(err) {
+                            if let Err(err) = result.as_ref()
+                                && is_memory_error(err)
+                            {
                                 return Err(NxvError::Worker(format!(
                                     "Memory-limited extraction failed for {}: {}",
                                     system, err
