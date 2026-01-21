@@ -74,6 +74,11 @@ pub fn get_high_threshold_mib() -> u64 {
     ten_percent.max(2048) // At least 2 GiB
 }
 
+fn effective_worker_limit_mib(limit_mib: usize) -> u64 {
+    let slack = (limit_mib / 20).max(128);
+    (limit_mib as u64).saturating_add(slack as u64)
+}
+
 /// Read total system memory from /proc/meminfo.
 #[cfg(target_os = "linux")]
 fn read_mem_total_mib() -> Option<u64> {
@@ -211,7 +216,8 @@ fn watchdog_loop(workers: Arc<Mutex<HashMap<u32, MonitoredWorker>>>, shutdown: A
 
         for worker in workers_snapshot {
             if let Some(rss_mib) = read_process_rss_mib(worker.pid) {
-                if rss_mib > worker.limit_mib as u64 {
+                let effective_limit = effective_worker_limit_mib(worker.limit_mib);
+                if rss_mib > effective_limit {
                     handle_over_limit(&workers, &worker, rss_mib);
                 } else {
                     // Clear exceeded_since if under limit
@@ -266,6 +272,7 @@ fn handle_over_limit(
     worker: &MonitoredWorker,
     rss_mib: u64,
 ) {
+    let effective_limit = effective_worker_limit_mib(worker.limit_mib);
     let now = std::time::Instant::now();
 
     let should_kill = {
@@ -300,6 +307,7 @@ fn handle_over_limit(
             label = %worker.label,
             rss_mib,
             limit_mib = worker.limit_mib,
+            effective_limit_mib = effective_limit,
             "Killing worker for exceeding memory limit"
         );
         mark_watchdog_kill(worker.pid);
@@ -372,6 +380,16 @@ mod tests {
         assert!(high >= 2048);
         // High should be >= critical
         assert!(high >= critical);
+    }
+
+    #[test]
+    fn test_effective_worker_limit_mib() {
+        let limit = effective_worker_limit_mib(1000);
+        assert!(limit > 1000);
+        assert!(limit <= 1200);
+
+        let small_limit = effective_worker_limit_mib(100);
+        assert!(small_limit >= 228); // 100 + min slack (128)
     }
 
     #[test]

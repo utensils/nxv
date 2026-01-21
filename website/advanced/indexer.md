@@ -168,6 +168,10 @@ memory decreases. For example, 32G with 4 systems × 8 ranges = 32 workers = 1 G
 The minimum per-worker allocation is 512 MiB (hard limit). Indexing will fail if
 the budget can't meet this threshold.
 
+When workers hit memory limits, the indexer automatically reduces parent batch
+sizes and retries. After a streak of successful batches, it gradually increases
+batch sizes again to recover throughput.
+
 ### Memory Format
 
 Human-readable sizes are supported:

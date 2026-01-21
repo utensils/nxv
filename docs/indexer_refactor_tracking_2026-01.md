@@ -9,6 +9,8 @@
 - Added worker watchdog kill tracking to classify memory-limit kills as recoverable.
 - Added single-worker fallback pool to retry memory-constrained extractions using full budget.
 - Added memory-aware error classification to avoid skipping attrs when memory limits are hit.
+- Added adaptive parent batch sizing to reduce memory pressure after worker kills.
+- Added watchdog slack to avoid repeated kills from minor RSS spikes.
 - Updated --full behavior to only reprocess the requested range when --since/--until is provided.
 - Added tests for range labels, single-worker config, and memory error classification.
 - Updated website docs for indexer CLI and range reprocessing behavior.

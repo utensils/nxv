@@ -506,12 +506,86 @@ pub struct WorkerPool {
     next_worker: AtomicUsize,
     /// Memory watchdog for RSS enforcement.
     watchdog: Arc<WorkerWatchdog>,
+    adaptive_batcher: AdaptiveBatcher,
+}
+
+const PARENT_BATCH_SIZE: usize = 500;
+const MIN_PARENT_BATCH_SIZE: usize = 10;
+const SUCCESS_STREAK_TO_GROW: usize = 8;
+
+struct AdaptiveBatcher {
+    current: AtomicUsize,
+    min: usize,
+    max: usize,
+    success_streak: AtomicUsize,
+}
+
+impl AdaptiveBatcher {
+    fn new(min: usize, max: usize) -> Self {
+        Self {
+            current: AtomicUsize::new(max),
+            min,
+            max,
+            success_streak: AtomicUsize::new(0),
+        }
+    }
+
+    fn batch_size(&self, cap: usize) -> usize {
+        let current = self.current.load(Ordering::Relaxed);
+        let capped = current.min(cap).max(self.min);
+        capped.min(self.max)
+    }
+
+    fn record_memory_failure(&self, chunk_len: usize) -> usize {
+        let current = self.current.load(Ordering::Relaxed);
+        let mut next = current.saturating_div(2).max(self.min);
+        if chunk_len > 1 {
+            next = next.min((chunk_len / 2).max(self.min));
+        }
+        if next < current {
+            self.current.store(next, Ordering::Relaxed);
+        }
+        self.success_streak.store(0, Ordering::Relaxed);
+        next
+    }
+
+    fn record_success(&self, chunk_len: usize) -> Option<usize> {
+        let current = self.current.load(Ordering::Relaxed);
+        if chunk_len < current {
+            return None;
+        }
+        let streak = self.success_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak < SUCCESS_STREAK_TO_GROW {
+            return None;
+        }
+        self.success_streak.store(0, Ordering::Relaxed);
+
+        let delta = (current / 4).max(1);
+        let increased = (current + delta).min(self.max);
+        if increased > current {
+            self.current.store(increased, Ordering::Relaxed);
+            Some(increased)
+        } else {
+            None
+        }
+    }
+
+    fn set_current(&self, value: usize) {
+        let value = value.clamp(self.min, self.max);
+        self.current.store(value, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn current(&self) -> usize {
+        self.current.load(Ordering::Relaxed)
+    }
 }
 
 fn run_batched_with_retry<T, F>(
     attrs: &[String],
     initial_batch_size: usize,
     mut extract_fn: F,
+    mut on_error: impl FnMut(usize, &NxvError),
 ) -> Result<Vec<T>>
 where
     F: FnMut(&[String]) -> Result<Vec<T>>,
@@ -534,6 +608,7 @@ where
                 results.extend(items);
             }
             Err(e) => {
+                on_error(chunk.len(), &e);
                 if chunk.len() <= 1 {
                     return Err(e);
                 }
@@ -596,6 +671,7 @@ impl WorkerPool {
             config,
             next_worker: AtomicUsize::new(0),
             watchdog,
+            adaptive_batcher: AdaptiveBatcher::new(MIN_PARENT_BATCH_SIZE, PARENT_BATCH_SIZE),
         })
     }
 
@@ -612,7 +688,10 @@ impl WorkerPool {
 
     pub fn single_worker_pool(&self, label_suffix: &str) -> Result<Self> {
         let config = single_worker_config(&self.config, label_suffix);
-        Self::new(config)
+        let pool = Self::new(config)?;
+        let current = self.adaptive_batcher.current.load(Ordering::Relaxed);
+        pool.adaptive_batcher.set_current(current);
+        Ok(pool)
     }
 
     /// Check if the system is under critical memory pressure.
@@ -723,8 +802,9 @@ impl WorkerPool {
         // Parent-level batch size: larger than worker internal batch (100)
         // to reduce IPC overhead, but small enough that workers don't accumulate
         // too much memory before a potential restart.
-        const PARENT_BATCH_SIZE: usize = 500;
-        let batch_size = self.recommended_batch_size(PARENT_BATCH_SIZE);
+        let batch_size = self
+            .adaptive_batcher
+            .batch_size(self.recommended_batch_size(PARENT_BATCH_SIZE));
 
         if attrs.len() <= batch_size {
             // Small extraction - no need for parent-level batching
@@ -741,17 +821,36 @@ impl WorkerPool {
             "Starting parent-level batched extraction"
         );
 
-        let mut all_packages = run_batched_with_retry(attrs, batch_size, |chunk| {
-            self.wait_for_memory_clear();
+        let mut all_packages = run_batched_with_retry(
+            attrs,
+            batch_size,
+            |chunk| {
+                self.wait_for_memory_clear();
 
-            tracing::trace!(
-                system = %system,
-                chunk_size = chunk.len(),
-                "Processing parent batch"
-            );
+                tracing::trace!(
+                    system = %system,
+                    chunk_size = chunk.len(),
+                    "Processing parent batch"
+                );
 
-            self.extract(system, repo_path, chunk, extract_store_paths)
-        })?;
+                let result = self.extract(system, repo_path, chunk, extract_store_paths);
+                if result.is_ok() {
+                    self.adaptive_batcher.record_success(chunk.len());
+                }
+                result
+            },
+            |chunk_len, err| {
+                if err.is_memory_error() {
+                    let new_batch_size = self.adaptive_batcher.record_memory_failure(chunk_len);
+                    tracing::debug!(
+                        system = %system,
+                        chunk_len = chunk_len,
+                        new_batch_size = new_batch_size,
+                        "Reducing parent batch size after memory failure"
+                    );
+                }
+            },
+        )?;
 
         tracing::debug!(
             system = %system,
@@ -1020,13 +1119,18 @@ mod tests {
     fn test_run_batched_with_retry_splits_on_error() {
         let attrs: Vec<String> = (0..5).map(|i| format!("attr{}", i)).collect();
         let mut seen: Vec<String> = Vec::new();
-        let result = run_batched_with_retry(&attrs, 4, |chunk| {
-            if chunk.len() > 1 {
-                return Err(NxvError::Worker("simulated failure".to_string()));
-            }
-            seen.push(chunk[0].clone());
-            Ok(vec![chunk[0].clone()])
-        })
+        let result = run_batched_with_retry(
+            &attrs,
+            4,
+            |chunk| {
+                if chunk.len() > 1 {
+                    return Err(NxvError::Worker("simulated failure".to_string()));
+                }
+                seen.push(chunk[0].clone());
+                Ok(vec![chunk[0].clone()])
+            },
+            |_, _| {},
+        )
         .unwrap();
 
         assert_eq!(result.len(), attrs.len());
@@ -1036,11 +1140,39 @@ mod tests {
     #[test]
     fn test_run_batched_with_retry_fails_on_single_error() {
         let attrs: Vec<String> = vec!["only".to_string()];
-        let result: Result<Vec<String>> = run_batched_with_retry(&attrs, 4, |_chunk| {
-            Err(NxvError::Worker("simulated failure".to_string()))
-        });
+        let result: Result<Vec<String>> = run_batched_with_retry(
+            &attrs,
+            4,
+            |_chunk| Err(NxvError::Worker("simulated failure".to_string())),
+            |_, _| {},
+        );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_adaptive_batcher_reduces_on_memory_failure() {
+        let batcher = AdaptiveBatcher::new(10, 100);
+        assert_eq!(batcher.current(), 100);
+        let next = batcher.record_memory_failure(80);
+        assert!(next <= 50);
+        assert_eq!(batcher.current(), next);
+    }
+
+    #[test]
+    fn test_adaptive_batcher_grows_after_success_streak() {
+        let batcher = AdaptiveBatcher::new(10, 80);
+        let reduced = batcher.record_memory_failure(80);
+        assert!(reduced < 80);
+        let mut grew = false;
+        for _ in 0..SUCCESS_STREAK_TO_GROW {
+            if batcher.record_success(reduced).is_some() {
+                grew = true;
+            }
+        }
+        assert!(grew);
+        assert!(batcher.current() >= reduced);
+        assert!(batcher.current() <= 80);
     }
 
     // Note: Full pool tests require the binary to support --internal-worker.

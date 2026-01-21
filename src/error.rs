@@ -76,6 +76,22 @@ pub enum NxvError {
     Worker(String),
 }
 
+impl NxvError {
+    pub fn is_memory_error(&self) -> bool {
+        #[cfg(feature = "indexer")]
+        {
+            if let NxvError::Worker(message) = self {
+                let message = message.to_lowercase();
+                return message.contains("out of memory")
+                    || message.contains("exceeded memory limit")
+                    || message.contains("memory limit");
+            }
+        }
+
+        false
+    }
+}
+
 /// Result type alias for nxv operations.
 pub type Result<T> = std::result::Result<T, NxvError>;
 

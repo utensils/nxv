@@ -107,18 +107,6 @@ fn worker_pool_mode(worker_count: usize, systems_len: usize) -> WorkerPoolMode {
     }
 }
 
-fn is_memory_error(error: &NxvError) -> bool {
-    match error {
-        NxvError::Worker(message) => {
-            let message = message.to_lowercase();
-            message.contains("out of memory")
-                || message.contains("exceeded memory limit")
-                || message.contains("memory limit")
-        }
-        _ => false,
-    }
-}
-
 /// A year range for parallel indexing.
 ///
 /// Represents a time range for partitioning commits during parallel indexing.
@@ -2014,7 +2002,7 @@ impl Indexer {
                             };
 
                             if let Err(ref err) = result
-                                && is_memory_error(err)
+                                && err.is_memory_error()
                             {
                                 let single_pool = match single_worker_pool.as_ref() {
                                     Some(pool) => pool,
@@ -2035,7 +2023,7 @@ impl Indexer {
                             }
 
                             if let Err(ref err) = result
-                                && is_memory_error(err)
+                                && err.is_memory_error()
                             {
                                 return Err(NxvError::Worker(format!(
                                     "Memory-limited extraction failed for {}: {}",
@@ -2059,7 +2047,7 @@ impl Indexer {
 
                         for (system, result) in paired.iter_mut() {
                             if let Err(err) = result.as_ref()
-                                && is_memory_error(err)
+                                && err.is_memory_error()
                             {
                                 let single_pool = match single_worker_pool.as_ref() {
                                     Some(pool) => pool,
@@ -2080,7 +2068,7 @@ impl Indexer {
                             }
 
                             if let Err(err) = result.as_ref()
-                                && is_memory_error(err)
+                                && err.is_memory_error()
                             {
                                 return Err(NxvError::Worker(format!(
                                     "Memory-limited extraction failed for {}: {}",
@@ -3915,13 +3903,13 @@ mod tests {
     #[test]
     fn test_is_memory_error() {
         let err = NxvError::Worker("Worker died (out of memory)".to_string());
-        assert!(is_memory_error(&err));
+        assert!(err.is_memory_error());
 
         let err = NxvError::Worker("Worker failed: exceeded memory limit".to_string());
-        assert!(is_memory_error(&err));
+        assert!(err.is_memory_error());
 
         let err = NxvError::Worker("Worker failed: evaluation error".to_string());
-        assert!(!is_memory_error(&err));
+        assert!(!err.is_memory_error());
     }
 
     #[test]
