@@ -41,3 +41,8 @@
 ## Next Steps
 - Run 1–2h soak with 4 workers @ 32 GiB to confirm long-run stability.
 - If stable, run 12h index up to 2026 as requested.
+
+## Verification
+- `cargo fmt`
+- `cargo clippy --features indexer -- -D warnings`
+- `cargo test --features indexer` (unit: 598 passed, 11 ignored; integration: 67 passed, 4 ignored)
