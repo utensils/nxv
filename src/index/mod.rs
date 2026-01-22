@@ -508,6 +508,7 @@ struct PackageAggregate {
     known_vulnerabilities: Option<Vec<String>>,
     /// Store paths per architecture
     store_paths: HashMap<String, String>,
+    systems: HashSet<String>,
 }
 
 impl PackageAggregate {
@@ -541,6 +542,7 @@ impl PackageAggregate {
         let mut maintainers = HashSet::new();
         let mut platforms = HashSet::new();
         let mut store_paths = HashMap::new();
+        let mut systems = HashSet::new();
 
         if let Some(licenses) = pkg.license {
             license.extend(licenses);
@@ -554,6 +556,7 @@ impl PackageAggregate {
         if let Some(path) = pkg.out_path {
             store_paths.insert(system.to_string(), path);
         }
+        systems.insert(system.to_string());
 
         Self {
             name: pkg.name,
@@ -569,6 +572,7 @@ impl PackageAggregate {
             source_path: pkg.source_path,
             known_vulnerabilities: pkg.known_vulnerabilities,
             store_paths,
+            systems,
         }
     }
 
@@ -581,12 +585,13 @@ impl PackageAggregate {
     /// # Examples
     ///
     /// ```
-    /// use std::collections::HashSet;
+    /// use std::collections::{HashMap, HashSet};
     ///
     /// // Construct an example aggregate (fields omitted for brevity)
     /// let mut agg = PackageAggregate {
     ///     name: "foo".into(),
     ///     version: "1.0".into(),
+    ///     version_source: None,
     ///     attribute_path: "pkgs.foo".into(),
     ///     description: None,
     ///     homepage: None,
@@ -594,12 +599,16 @@ impl PackageAggregate {
     ///     maintainers: HashSet::new(),
     ///     platforms: HashSet::new(),
     ///     source_path: None,
+    ///     known_vulnerabilities: None,
+    ///     store_paths: HashMap::new(),
+    ///     systems: HashSet::new(),
     /// };
     ///
     /// // Simulated extracted package info with some metadata
     /// let pkg = extractor::PackageInfo {
     ///     name: "foo".into(),
     ///     version: "1.0".into(),
+    ///     version_source: None,
     ///     attribute_path: "pkgs.foo".into(),
     ///     description: Some("A package".into()),
     ///     homepage: Some("https://example/".into()),
@@ -607,6 +616,8 @@ impl PackageAggregate {
     ///     maintainers: Some(HashSet::from(["alice".into()])),
     ///     platforms: Some(HashSet::from(["x86_64-linux".into()])),
     ///     source_path: Some("pkgs/foo/default.nix".into()),
+    ///     known_vulnerabilities: None,
+    ///     out_path: None,
     /// };
     ///
     /// agg.merge(pkg);
@@ -642,6 +653,7 @@ impl PackageAggregate {
         if let Some(path) = pkg.out_path {
             self.store_paths.entry(system.to_string()).or_insert(path);
         }
+        self.systems.insert(system.to_string());
     }
 
     fn license_json(&self) -> Option<String> {
@@ -687,6 +699,44 @@ impl PackageAggregate {
             known_vulnerabilities: self.known_vulnerabilities_json(),
             store_paths: self.store_paths.clone(),
         }
+    }
+}
+
+#[derive(Default)]
+struct StorePathTracker {
+    seen: HashSet<String>,
+}
+
+impl StorePathTracker {
+    fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    fn needs_store_path(&self, system: &str, attr: &str, version: &str) -> bool {
+        let key = Self::key(system, attr, version);
+        !self.seen.contains(&key)
+    }
+
+    fn mark_seen(&mut self, system: &str, attr: &str, version: &str) {
+        let key = Self::key(system, attr, version);
+        self.seen.insert(key);
+    }
+
+    fn mark_from_package(&mut self, system: &str, pkg: &extractor::PackageInfo) {
+        if pkg.out_path.is_some() {
+            let version = pkg.version.as_deref().unwrap_or("");
+            self.mark_seen(system, &pkg.attribute_path, version);
+        }
+    }
+
+    fn key(system: &str, attr: &str, version: &str) -> String {
+        let mut key = String::with_capacity(system.len() + attr.len() + version.len() + 2);
+        key.push_str(system);
+        key.push('|');
+        key.push_str(attr);
+        key.push('|');
+        key.push_str(version);
+        key
     }
 }
 
@@ -1570,6 +1620,7 @@ impl Indexer {
 
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
+        let mut store_paths = StorePathTracker::default();
 
         let mut result = IndexResult {
             commits_processed: 0,
@@ -1946,6 +1997,9 @@ impl Indexer {
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
+            let can_extract_store_paths = is_after_store_path_cutoff(commit.date);
+            let base_extract_store_paths = can_extract_store_paths && store_paths.is_empty();
+
             // Use parallel evaluation if worker pool is available, otherwise sequential
             let extraction_results: Vec<(String, Result<Vec<extractor::PackageInfo>>)> = {
                 let _extract_span = debug_span!(
@@ -1954,9 +2008,6 @@ impl Indexer {
                     systems = systems.len()
                 )
                 .entered();
-
-                // Skip store path extraction for old commits to avoid derivationStrict errors
-                let extract_store_paths = is_after_store_path_cutoff(commit.date);
 
                 // For large target lists (full extraction), use sequential processing
                 // to avoid multiplying baseline memory across workers.
@@ -1990,14 +2041,16 @@ impl Indexer {
                                     system,
                                     worktree_path,
                                     &target_list,
-                                    extract_store_paths,
+                                    base_extract_store_paths,
+                                    false,
                                 )
                             } else {
                                 pool.extract_batched(
                                     system,
                                     worktree_path,
                                     &target_list,
-                                    extract_store_paths,
+                                    base_extract_store_paths,
+                                    false,
                                 )
                             };
 
@@ -2018,7 +2071,8 @@ impl Indexer {
                                     system,
                                     worktree_path,
                                     &target_list,
-                                    extract_store_paths,
+                                    base_extract_store_paths,
+                                    false,
                                 );
                             }
 
@@ -2040,7 +2094,8 @@ impl Indexer {
                             worktree_path,
                             systems,
                             &target_list,
-                            extract_store_paths,
+                            base_extract_store_paths,
+                            false,
                         );
                         let mut paired: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
                             systems.iter().cloned().zip(results).collect();
@@ -2063,7 +2118,8 @@ impl Indexer {
                                     system,
                                     worktree_path,
                                     &target_list,
-                                    extract_store_paths,
+                                    base_extract_store_paths,
+                                    false,
                                 );
                             }
 
@@ -2088,7 +2144,7 @@ impl Indexer {
                                 worktree_path,
                                 system,
                                 &target_list,
-                                extract_store_paths,
+                                base_extract_store_paths,
                             );
                             (system.clone(), result)
                         })
@@ -2144,6 +2200,134 @@ impl Indexer {
                             agg.store_paths.clear();
                         }
                         aggregates.insert(key, agg);
+                    }
+                }
+            }
+
+            if can_extract_store_paths {
+                for aggregate in aggregates.values() {
+                    for (system, path) in &aggregate.store_paths {
+                        if !path.is_empty() {
+                            store_paths.mark_seen(
+                                system,
+                                &aggregate.attribute_path,
+                                &aggregate.version,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if can_extract_store_paths && !base_extract_store_paths {
+                for system in systems.iter() {
+                    let mut attrs: HashSet<String> = HashSet::new();
+                    for aggregate in aggregates.values() {
+                        if !aggregate.systems.contains(system) {
+                            continue;
+                        }
+                        if store_paths.needs_store_path(
+                            system,
+                            &aggregate.attribute_path,
+                            &aggregate.version,
+                        ) {
+                            attrs.insert(aggregate.attribute_path.clone());
+                        }
+                    }
+
+                    if attrs.is_empty() {
+                        continue;
+                    }
+
+                    let attr_list: Vec<String> = attrs.into_iter().collect();
+                    let mut store_result = if let Some(ref pool) = worker_pool {
+                        if pool.worker_count() > 1 {
+                            let single_pool = match single_worker_pool.as_ref() {
+                                Some(pool) => pool,
+                                None => {
+                                    let pool = pool.single_worker_pool("single")?;
+                                    single_worker_pool = Some(pool);
+                                    single_worker_pool
+                                        .as_ref()
+                                        .expect("single worker pool just initialized")
+                                }
+                            };
+                            single_pool.extract_batched(
+                                system,
+                                worktree_path,
+                                &attr_list,
+                                true,
+                                true,
+                            )
+                        } else {
+                            pool.extract_batched(system, worktree_path, &attr_list, true, true)
+                        }
+                    } else {
+                        extractor::extract_packages_for_attrs_with_mode(
+                            worktree_path,
+                            system,
+                            &attr_list,
+                            true,
+                            true,
+                        )
+                    };
+
+                    if let Err(ref err) = store_result
+                        && err.is_memory_error()
+                    {
+                        let single_pool = match single_worker_pool.as_ref() {
+                            Some(pool) => pool,
+                            None => {
+                                let pool = worker_pool
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        NxvError::Worker(
+                                            "Memory-limited extraction failed without worker pool"
+                                                .into(),
+                                        )
+                                    })?
+                                    .single_worker_pool("single")?;
+                                single_worker_pool = Some(pool);
+                                single_worker_pool
+                                    .as_ref()
+                                    .expect("single worker pool just initialized")
+                            }
+                        };
+                        store_result = single_pool.extract_batched(
+                            system,
+                            worktree_path,
+                            &attr_list,
+                            true,
+                            true,
+                        );
+                    }
+
+                    let store_packages = match store_result {
+                        Ok(pkgs) => pkgs,
+                        Err(e) => {
+                            result.extraction_failures += 1;
+                            debug!(
+                                commit = %commit.short_hash,
+                                system = %system,
+                                error = %e,
+                                "Store path extraction failed for system"
+                            );
+                            continue;
+                        }
+                    };
+
+                    for pkg in store_packages {
+                        let key = format!(
+                            "{}::{}",
+                            pkg.attribute_path,
+                            pkg.version.as_deref().unwrap_or("")
+                        );
+                        store_paths.mark_from_package(system, &pkg);
+                        if let Some(existing) = aggregates.get_mut(&key) {
+                            existing.merge(pkg, system);
+                        } else {
+                            let agg = PackageAggregate::new(pkg, system);
+                            aggregates.insert(key, agg);
+                        }
                     }
                 }
             }
@@ -3235,6 +3419,7 @@ fn process_range_worker(
             worker::WorkerPool::new(pool_config).ok()
         }
     };
+    let mut single_worker_pool: Option<worker::WorkerPool> = None;
 
     // Build initial file-to-attribute map using hybrid approach
     // (static analysis + Nix fallback for low coverage)
@@ -3277,6 +3462,7 @@ fn process_range_worker(
 
     // Buffer for batch UPSERT operations
     let mut pending_upserts: Vec<PackageVersion> = Vec::new();
+    let mut store_paths = StorePathTracker::default();
 
     // Process commits
     for (commit_idx, commit) in commits.iter().enumerate() {
@@ -3564,8 +3750,8 @@ fn process_range_worker(
             None
         };
 
-        // Skip store path extraction for old commits to avoid derivationStrict errors
-        let extract_store_paths = is_after_store_path_cutoff(commit.date);
+        let can_extract_store_paths = is_after_store_path_cutoff(commit.date);
+        let base_extract_store_paths = can_extract_store_paths && store_paths.is_empty();
 
         // For large target lists (full extraction), use sequential processing
         // to avoid multiplying baseline memory across workers.
@@ -3592,7 +3778,8 @@ fn process_range_worker(
                             system,
                             worktree_path,
                             &target_attrs,
-                            extract_store_paths,
+                            base_extract_store_paths,
+                            false,
                         );
                         (system.clone(), result)
                     })
@@ -3603,7 +3790,8 @@ fn process_range_worker(
                     worktree_path,
                     systems,
                     &target_attrs,
-                    extract_store_paths,
+                    base_extract_store_paths,
+                    false,
                 );
                 systems.iter().cloned().zip(results).collect()
             }
@@ -3615,7 +3803,7 @@ fn process_range_worker(
                         worktree_path,
                         system,
                         &target_attrs,
-                        extract_store_paths,
+                        base_extract_store_paths,
                     );
                     (system.clone(), result)
                 })
@@ -3653,6 +3841,109 @@ fn process_range_worker(
                 }
                 Err(_) => {
                     result.extraction_failures += 1;
+                }
+            }
+        }
+
+        if can_extract_store_paths {
+            for aggregate in aggregates.values() {
+                for (system, path) in &aggregate.store_paths {
+                    if !path.is_empty() {
+                        store_paths.mark_seen(
+                            system,
+                            &aggregate.attribute_path,
+                            &aggregate.version,
+                        );
+                    }
+                }
+            }
+        }
+
+        if can_extract_store_paths && !base_extract_store_paths {
+            for system in systems.iter() {
+                let mut attrs: HashSet<String> = HashSet::new();
+                for aggregate in aggregates.values() {
+                    if !aggregate.systems.contains(system) {
+                        continue;
+                    }
+                    if store_paths.needs_store_path(
+                        system,
+                        &aggregate.attribute_path,
+                        &aggregate.version,
+                    ) {
+                        attrs.insert(aggregate.attribute_path.clone());
+                    }
+                }
+
+                if attrs.is_empty() {
+                    continue;
+                }
+
+                let attr_list: Vec<String> = attrs.into_iter().collect();
+                let mut store_result = if let Some(ref pool) = worker_pool {
+                    pool.extract_batched(system, worktree_path, &attr_list, true, true)
+                } else {
+                    extractor::extract_packages_for_attrs_with_mode(
+                        worktree_path,
+                        system,
+                        &attr_list,
+                        true,
+                        true,
+                    )
+                };
+
+                if let Err(ref err) = store_result
+                    && err.is_memory_error()
+                {
+                    let single_pool = match single_worker_pool.as_ref() {
+                        Some(pool) => pool,
+                        None => {
+                            let pool = worker_pool
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    NxvError::Worker(
+                                        "Memory-limited extraction failed without worker pool"
+                                            .into(),
+                                    )
+                                })?
+                                .single_worker_pool("single")?;
+                            single_worker_pool = Some(pool);
+                            single_worker_pool
+                                .as_ref()
+                                .expect("single worker pool just initialized")
+                        }
+                    };
+                    store_result =
+                        single_pool.extract_batched(system, worktree_path, &attr_list, true, true);
+                }
+
+                let store_packages = match store_result {
+                    Ok(pkgs) => pkgs,
+                    Err(e) => {
+                        result.extraction_failures += 1;
+                        tracing::debug!(
+                            range = %range.label,
+                            commit = %&commit.hash[..8],
+                            system = %system,
+                            error = %e,
+                            "Store path extraction failed for system"
+                        );
+                        continue;
+                    }
+                };
+
+                for pkg in store_packages {
+                    let key = format!(
+                        "{}::{}",
+                        pkg.attribute_path,
+                        pkg.version.as_deref().unwrap_or("")
+                    );
+                    store_paths.mark_from_package(system, &pkg);
+                    if let Some(existing) = aggregates.get_mut(&key) {
+                        existing.merge(pkg, system);
+                    } else {
+                        aggregates.insert(key, PackageAggregate::new(pkg, system));
+                    }
                 }
             }
         }
@@ -5542,6 +5833,31 @@ index abc123..def456 100644
         assert_eq!(config.full_extraction_interval, 0); // Disabled by default
         assert_eq!(config.full_extraction_parallelism, 1);
         assert!(!config.systems.is_empty());
+    }
+
+    #[test]
+    fn test_store_path_tracker_records_entries() {
+        let mut tracker = StorePathTracker::default();
+
+        assert!(tracker.needs_store_path("x86_64-linux", "hello", "1.0"));
+
+        let pkg = extractor::PackageInfo {
+            name: "hello".to_string(),
+            version: Some("1.0".to_string()),
+            version_source: None,
+            attribute_path: "hello".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+            out_path: Some("/nix/store/abc-hello-1.0".to_string()),
+        };
+
+        tracker.mark_from_package("x86_64-linux", &pkg);
+        assert!(!tracker.needs_store_path("x86_64-linux", "hello", "1.0"));
     }
 
     #[test]

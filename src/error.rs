@@ -77,6 +77,7 @@ pub enum NxvError {
 }
 
 impl NxvError {
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn is_memory_error(&self) -> bool {
         #[cfg(feature = "indexer")]
         {

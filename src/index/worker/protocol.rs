@@ -10,6 +10,10 @@ fn default_extract_store_paths() -> bool {
     true
 }
 
+fn default_store_paths_only() -> bool {
+    false
+}
+
 /// Request from parent to worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -26,6 +30,9 @@ pub enum WorkRequest {
         /// Whether to extract store paths (skip for old commits to avoid derivationStrict errors)
         #[serde(default = "default_extract_store_paths")]
         extract_store_paths: bool,
+        /// Whether to only return store path data (skip metadata fields)
+        #[serde(default = "default_store_paths_only")]
+        store_paths_only: bool,
     },
 
     /// Extract attribute positions for file-to-attribute mapping.
@@ -88,12 +95,14 @@ impl WorkRequest {
         repo_path: impl Into<String>,
         attrs: Vec<String>,
         extract_store_paths: bool,
+        store_paths_only: bool,
     ) -> Self {
         Self::Extract {
             system: system.into(),
             repo_path: repo_path.into(),
             attrs,
             extract_store_paths,
+            store_paths_only,
         }
     }
 
@@ -168,6 +177,7 @@ mod tests {
             "/path/to/nixpkgs",
             vec!["hello".into()],
             true,
+            false,
         );
         let line = req.to_line();
         assert!(line.ends_with('\n'));
@@ -181,11 +191,13 @@ mod tests {
                 repo_path,
                 attrs,
                 extract_store_paths,
+                store_paths_only,
             } => {
                 assert_eq!(system, "x86_64-linux");
                 assert_eq!(repo_path, "/path/to/nixpkgs");
                 assert_eq!(attrs, vec!["hello"]);
                 assert!(extract_store_paths);
+                assert!(!store_paths_only);
             }
             _ => panic!("Expected Extract variant"),
         }

@@ -110,10 +110,17 @@ fn handle_extract(
     repo_path: &str,
     attrs: &[String],
     extract_store_paths: bool,
+    store_paths_only: bool,
 ) -> WorkResponse {
     let path = Path::new(repo_path);
 
-    match extractor::extract_packages_for_attrs(path, system, attrs, extract_store_paths) {
+    match extractor::extract_packages_for_attrs_with_mode(
+        path,
+        system,
+        attrs,
+        extract_store_paths,
+        store_paths_only,
+    ) {
         Ok(packages) => WorkResponse::result(packages),
         Err(e) => WorkResponse::error(format!("{}", e)),
     }
@@ -169,9 +176,16 @@ fn worker_loop(reader: &mut LineReader, writer: &mut LineWriter) -> io::Result<(
                 repo_path,
                 attrs,
                 extract_store_paths,
+                store_paths_only,
             } => {
                 // Process extraction
-                let response = handle_extract(&system, &repo_path, &attrs, extract_store_paths);
+                let response = handle_extract(
+                    &system,
+                    &repo_path,
+                    &attrs,
+                    extract_store_paths,
+                    store_paths_only,
+                );
                 writer.write_line(&response.to_line())?;
 
                 // Check memory after extraction

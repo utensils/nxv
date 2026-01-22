@@ -147,6 +147,7 @@ impl Worker {
         repo_path: &Path,
         attrs: &[String],
         extract_store_paths: bool,
+        store_paths_only: bool,
     ) -> Result<Vec<PackageInfo>> {
         let request_start = Instant::now();
         self.ensure_ready()?;
@@ -162,6 +163,7 @@ impl Worker {
             repo_path.to_string_lossy().to_string(),
             attrs.to_vec(),
             extract_store_paths,
+            store_paths_only,
         );
         let send_start = Instant::now();
         proc.send(&request)?;
@@ -196,7 +198,13 @@ impl Worker {
             }) => {
                 // Worker requested restart - respawn and retry
                 self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
-                return self.extract(system, repo_path, attrs, extract_store_paths);
+                return self.extract(
+                    system,
+                    repo_path,
+                    attrs,
+                    extract_store_paths,
+                    store_paths_only,
+                );
             }
             Some(WorkResponse::Ready) | Some(WorkResponse::PositionsResult { .. }) => {
                 return Err(NxvError::Worker(format!(
@@ -510,6 +518,7 @@ pub struct WorkerPool {
 }
 
 const PARENT_BATCH_SIZE: usize = 500;
+const STORE_PATH_PARENT_BATCH_SIZE: usize = 100;
 const MIN_PARENT_BATCH_SIZE: usize = 10;
 const SUCCESS_STREAK_TO_GROW: usize = 8;
 
@@ -765,6 +774,7 @@ impl WorkerPool {
         repo_path: &Path,
         attrs: &[String],
         extract_store_paths: bool,
+        store_paths_only: bool,
     ) -> Result<Vec<PackageInfo>> {
         // Wait for memory pressure to clear before starting new work
         self.wait_for_memory_clear();
@@ -772,14 +782,26 @@ impl WorkerPool {
         // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
-                return w.extract(system, repo_path, attrs, extract_store_paths);
+                return w.extract(
+                    system,
+                    repo_path,
+                    attrs,
+                    extract_store_paths,
+                    store_paths_only,
+                );
             }
         }
 
         // All workers busy - use round-robin to distribute wait fairly
         let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let mut w = self.workers[idx].lock().expect("worker mutex poisoned");
-        w.extract(system, repo_path, attrs, extract_store_paths)
+        w.extract(
+            system,
+            repo_path,
+            attrs,
+            extract_store_paths,
+            store_paths_only,
+        )
     }
 
     /// Extract packages with parent-level batching to control memory.
@@ -798,17 +820,29 @@ impl WorkerPool {
         repo_path: &Path,
         attrs: &[String],
         extract_store_paths: bool,
+        store_paths_only: bool,
     ) -> Result<Vec<PackageInfo>> {
         // Parent-level batch size: larger than worker internal batch (100)
         // to reduce IPC overhead, but small enough that workers don't accumulate
         // too much memory before a potential restart.
+        let base_batch_size = if extract_store_paths {
+            STORE_PATH_PARENT_BATCH_SIZE
+        } else {
+            PARENT_BATCH_SIZE
+        };
         let batch_size = self
             .adaptive_batcher
-            .batch_size(self.recommended_batch_size(PARENT_BATCH_SIZE));
+            .batch_size(self.recommended_batch_size(base_batch_size));
 
         if attrs.len() <= batch_size {
             // Small extraction - no need for parent-level batching
-            return self.extract(system, repo_path, attrs, extract_store_paths);
+            return self.extract(
+                system,
+                repo_path,
+                attrs,
+                extract_store_paths,
+                store_paths_only,
+            );
         }
 
         let total_batches = attrs.len().div_ceil(batch_size);
@@ -833,7 +867,13 @@ impl WorkerPool {
                     "Processing parent batch"
                 );
 
-                let result = self.extract(system, repo_path, chunk, extract_store_paths);
+                let result = self.extract(
+                    system,
+                    repo_path,
+                    chunk,
+                    extract_store_paths,
+                    store_paths_only,
+                );
                 if result.is_ok() {
                     self.adaptive_batcher.record_success(chunk.len());
                 }
@@ -874,6 +914,7 @@ impl WorkerPool {
         systems: &[String],
         attrs: &[String],
         extract_store_paths: bool,
+        store_paths_only: bool,
     ) -> Vec<Result<Vec<PackageInfo>>> {
         use std::thread;
 
@@ -906,7 +947,13 @@ impl WorkerPool {
 
                     s.spawn(move || {
                         let mut w = worker.lock().expect("worker mutex poisoned");
-                        w.extract(&system, &repo_path, &attrs, extract_store_paths)
+                        w.extract(
+                            &system,
+                            &repo_path,
+                            &attrs,
+                            extract_store_paths,
+                            store_paths_only,
+                        )
                     })
                 })
                 .collect();

@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::index::nix_ffi::with_evaluator;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
 use std::time::Instant;
@@ -45,9 +45,24 @@ pub struct SkipSummary {
 }
 
 static SKIP_METRICS: OnceLock<SkipMetrics> = OnceLock::new();
+static EXTRACT_NIX_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fn skip_metrics() -> &'static SkipMetrics {
     SKIP_METRICS.get_or_init(SkipMetrics::new)
+}
+
+fn extract_nix_path() -> Result<PathBuf> {
+    if let Some(path) = EXTRACT_NIX_PATH.get() {
+        if !path.exists() {
+            std::fs::write(path, EXTRACT_NIX)?;
+        }
+        return Ok(path.clone());
+    }
+
+    let path = std::env::temp_dir().join(format!("nxv-extract-{}.nix", std::process::id()));
+    std::fs::write(&path, EXTRACT_NIX)?;
+    let _ = EXTRACT_NIX_PATH.set(path.clone());
+    Ok(path)
 }
 
 pub fn reset_skip_metrics() {
@@ -162,6 +177,11 @@ const EXTRACT_NIX: &str = include_str!("nix/extract.nix");
 /// Loaded from external file at compile time for better maintainability.
 const POSITIONS_NIX: &str = include_str!("nix/positions.nix");
 
+/// Default batch size for metadata extraction.
+const DEFAULT_BATCH_SIZE: usize = 100;
+/// Smaller batch size for store path extraction to reduce memory spikes.
+const STORE_PATH_BATCH_SIZE: usize = 50;
+
 /// Extract packages from a nixpkgs checkout at a specific path.
 ///
 /// # Arguments
@@ -190,20 +210,35 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     attr_names: &[String],
     extract_store_paths: bool,
 ) -> Result<Vec<PackageInfo>> {
+    extract_packages_for_attrs_with_mode(repo_path, system, attr_names, extract_store_paths, false)
+}
+
+/// Extract packages with additional mode controls for store-path-only extraction.
+pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
+    repo_path: P,
+    system: &str,
+    attr_names: &[String],
+    extract_store_paths: bool,
+    store_paths_only: bool,
+) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
     // Batch large attribute lists to avoid memory pressure in Nix evaluation.
     // Full extraction with 11K+ attrs can exhaust worker memory.
     // Nix has ~1.5GB baseline overhead, so with 2GB workers we need small batches.
-    // Process in batches of 100 attrs to stay well within memory limits.
-    const BATCH_SIZE: usize = 100;
+    // Process in smaller batches when store paths are requested.
+    let batch_size = if extract_store_paths {
+        STORE_PATH_BATCH_SIZE
+    } else {
+        DEFAULT_BATCH_SIZE
+    };
 
-    if !attr_names.is_empty() && attr_names.len() > BATCH_SIZE {
-        let num_batches = attr_names.len().div_ceil(BATCH_SIZE);
+    if !attr_names.is_empty() && attr_names.len() > batch_size {
+        let num_batches = attr_names.len().div_ceil(batch_size);
         debug!(
             system = %system,
             total_attrs = attr_names.len(),
-            batch_size = BATCH_SIZE,
+            batch_size = batch_size,
             num_batches = num_batches,
             "Batching large extraction"
         );
@@ -217,17 +252,29 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             system: &str,
             attrs: &[String],
             extract_store_paths: bool,
+            store_paths_only: bool,
             all_packages: &mut Vec<PackageInfo>,
             skipped: &mut Vec<String>,
         ) {
-            match extract_packages_batch(repo_path.as_ref(), system, attrs, extract_store_paths) {
+            match extract_packages_batch(
+                repo_path.as_ref(),
+                system,
+                attrs,
+                extract_store_paths,
+                store_paths_only,
+            ) {
                 Ok(batch_result) => {
                     all_packages.extend(batch_result);
                 }
                 Err(_e) => {
                     if extract_store_paths
-                        && let Ok(batch_result) =
-                            extract_packages_batch(repo_path.as_ref(), system, attrs, false)
+                        && let Ok(batch_result) = extract_packages_batch(
+                            repo_path.as_ref(),
+                            system,
+                            attrs,
+                            false,
+                            store_paths_only,
+                        )
                     {
                         trace!(
                             system = %system,
@@ -247,6 +294,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                         system,
                         &attrs[..mid],
                         extract_store_paths,
+                        store_paths_only,
                         all_packages,
                         skipped,
                     );
@@ -255,6 +303,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                         system,
                         &attrs[mid..],
                         extract_store_paths,
+                        store_paths_only,
                         all_packages,
                         skipped,
                     );
@@ -262,7 +311,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             }
         }
 
-        for (batch_idx, batch) in attr_names.chunks(BATCH_SIZE).enumerate() {
+        for (batch_idx, batch) in attr_names.chunks(batch_size).enumerate() {
             debug!(
                 system = %system,
                 batch_idx = batch_idx,
@@ -274,7 +323,13 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
             // This is critical for full extraction where some batches may fail due to
             // memory pressure or evaluation errors, but we still want results from
             // successful batches.
-            match extract_packages_batch(repo_path, system, batch, extract_store_paths) {
+            match extract_packages_batch(
+                repo_path,
+                system,
+                batch,
+                extract_store_paths,
+                store_paths_only,
+            ) {
                 Ok(batch_result) => {
                     trace!(
                         system = %system,
@@ -300,6 +355,7 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
                         system,
                         batch,
                         extract_store_paths,
+                        store_paths_only,
                         &mut all_packages,
                         &mut skipped,
                     );
@@ -343,7 +399,13 @@ pub fn extract_packages_for_attrs<P: AsRef<Path>>(
     }
 
     // Single extraction for small attr lists or full discovery (empty list)
-    extract_packages_batch(repo_path, system, attr_names, extract_store_paths)
+    extract_packages_batch(
+        repo_path,
+        system,
+        attr_names,
+        extract_store_paths,
+        store_paths_only,
+    )
 }
 
 /// Internal function to extract a batch of packages.
@@ -352,6 +414,7 @@ fn extract_packages_batch<P: AsRef<Path>>(
     system: &str,
     attr_names: &[String],
     extract_store_paths: bool,
+    store_paths_only: bool,
 ) -> Result<Vec<PackageInfo>> {
     let repo_path = repo_path.as_ref();
 
@@ -359,13 +422,11 @@ fn extract_packages_batch<P: AsRef<Path>>(
     let canonical_path = std::fs::canonicalize(repo_path)?;
     let repo_path_str = canonical_path.display().to_string();
 
-    // Write the nix expression to a temp file
-    let temp_dir = tempfile::tempdir()?;
-    let nix_file = temp_dir.path().join("extract.nix");
-    std::fs::write(&nix_file, EXTRACT_NIX)?;
+    let nix_file = extract_nix_path()?;
 
     // Build the attrNames argument - write to file if large to avoid "Argument list too long"
     // OS limit is typically ~2MB for all args + env, so we use a conservative threshold
+    let mut _attr_file: Option<tempfile::NamedTempFile> = None;
     let attr_names_arg = if attr_names.is_empty() {
         "null".to_string()
     } else {
@@ -374,14 +435,13 @@ fn extract_packages_batch<P: AsRef<Path>>(
 
         if estimated_size > 100_000 {
             // Write attr names to a JSON file and read in Nix
-            let attr_file = temp_dir.path().join("attrs.json");
             let json = serde_json::to_string(attr_names)?;
-            std::fs::write(&attr_file, &json)?;
+            let attr_file = tempfile::NamedTempFile::new()?;
+            std::fs::write(attr_file.path(), &json)?;
+            let attr_path = attr_file.path().display().to_string();
+            _attr_file = Some(attr_file);
             // Quote the path to handle spaces and special characters
-            format!(
-                "builtins.fromJSON (builtins.readFile \"{}\")",
-                attr_file.display()
-            )
+            format!("builtins.fromJSON (builtins.readFile \"{}\")", attr_path)
         } else {
             let items: Vec<String> = attr_names.iter().map(|s| format!("\"{}\"", s)).collect();
             format!("[ {} ]", items.join(" "))
@@ -392,12 +452,13 @@ fn extract_packages_batch<P: AsRef<Path>>(
     // Note: Nix import takes a path, not a string, so we don't quote nix_file.
     // But nixpkgsPath is assigned as a string, so we quote it.
     let expr = format!(
-        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; extractStorePaths = {}; }}",
+        "import {} {{ nixpkgsPath = \"{}\"; system = \"{}\"; attrNames = {}; extractStorePaths = {}; storePathsOnly = {}; }}",
         nix_file.display(),
         repo_path_str,
         system,
         attr_names_arg,
-        if extract_store_paths { "true" } else { "false" }
+        if extract_store_paths { "true" } else { "false" },
+        if store_paths_only { "true" } else { "false" }
     );
 
     // Use FFI evaluator with large stack thread
@@ -844,6 +905,50 @@ mod tests {
         let packages = extract_packages_for_attrs(path, "x86_64-linux", &names, true).unwrap();
         assert!(packages.iter().any(|pkg| pkg.name == "hello"));
         assert!(!packages.iter().any(|pkg| pkg.name == "world"));
+    }
+
+    #[test]
+    fn test_store_paths_only_skips_metadata() {
+        let nix_check = Command::new("nix").arg("--version").output();
+        if nix_check.is_err() || !nix_check.unwrap().status.success() {
+            eprintln!("Skipping: nix not available");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path();
+        std::fs::create_dir_all(path.join("pkgs")).unwrap();
+
+        let default_nix = r#"
+{ system, config }:
+{
+  hello = {
+    pname = "hello";
+    version = "1.0.0";
+    type = "derivation";
+    meta = {
+      description = "A test package";
+      homepage = "https://example.com";
+    };
+  };
+}
+"#;
+        std::fs::write(path.join("default.nix"), default_nix).unwrap();
+
+        let names = vec!["hello".to_string()];
+        let full = extract_packages_for_attrs(path, "x86_64-linux", &names, true).unwrap();
+        let full_pkg = full.iter().find(|pkg| pkg.name == "hello").unwrap();
+        assert!(full_pkg.description.is_some());
+        assert!(full_pkg.homepage.is_some());
+
+        let store_only =
+            extract_packages_for_attrs_with_mode(path, "x86_64-linux", &names, true, true).unwrap();
+        let store_pkg = store_only.iter().find(|pkg| pkg.name == "hello").unwrap();
+        assert!(store_pkg.description.is_none());
+        assert!(store_pkg.homepage.is_none());
+        if let Some(full_path) = full_pkg.out_path.as_deref() {
+            assert_eq!(store_pkg.out_path.as_deref(), Some(full_path));
+        }
     }
 
     /// Test that extract_attr_positions handles attributes that throw errors.
@@ -1527,18 +1632,21 @@ mod tests {
     /// - Small enough to avoid memory pressure (<= 200)
     #[test]
     fn test_batch_size_is_reasonable() {
-        // The BATCH_SIZE constant is defined in extract_packages_for_attrs
-        // We verify it's in a reasonable range by testing with a list of that size
-        // Reduced to 100 because Nix has ~1.5GB baseline overhead
-        const BATCH_SIZE: usize = 100;
-
         assert!(
-            BATCH_SIZE >= 50,
-            "Batch size should be >= 50 for efficiency"
+            DEFAULT_BATCH_SIZE >= 50,
+            "Default batch size should be >= 50 for efficiency"
         );
         assert!(
-            BATCH_SIZE <= 200,
-            "Batch size should be <= 200 to avoid memory pressure with 2GB workers"
+            DEFAULT_BATCH_SIZE <= 200,
+            "Default batch size should be <= 200 to avoid memory pressure with 2GB workers"
+        );
+        assert!(
+            STORE_PATH_BATCH_SIZE >= 10,
+            "Store-path batch size should be >= 10 for progress"
+        );
+        assert!(
+            STORE_PATH_BATCH_SIZE <= DEFAULT_BATCH_SIZE,
+            "Store-path batch size should not exceed default batch size"
         );
     }
 }

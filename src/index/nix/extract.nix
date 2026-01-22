@@ -1,6 +1,6 @@
 # Package metadata extraction for nxv indexer
 # This file is included at compile time via include_str!()
-{ nixpkgsPath, system, attrNames ? null, extractStorePaths ? true }:
+{ nixpkgsPath, system, attrNames ? null, extractStorePaths ? true, storePathsOnly ? false }:
 let
   # Import nixpkgs with current system and permissive config
   pkgs = import nixpkgsPath {
@@ -327,26 +327,46 @@ let
 
   # Safely extract package info - each field is independently evaluated
   getPackageInfo = attrPath: pkg:
-    let
-      meta = pkg.meta or {};
-      name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
-      versionInfo = getVersionWithSource pkg name;
-      sourcePath = getSourcePath meta;
-      storePath = getStorePath pkg;
-    in {
-      name = if name != null then name else attrPath;
-      version = versionInfo.version;
-      versionSource = versionInfo.source;
-      attrPath = attrPath;
-      description = safeString (meta.description or null);
-      homepage = safeString (meta.homepage or null);
-      license = if meta ? license then getLicenses meta.license else null;
-      maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
-      platforms = if meta ? platforms then getPlatforms meta.platforms else null;
-      sourcePath = safeString sourcePath;
-      knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
-      storePath = storePath;
-    };
+    if storePathsOnly then
+      let
+        name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
+        versionInfo = getVersionWithSource pkg name;
+        storePath = getStorePath pkg;
+      in {
+        name = if name != null then name else attrPath;
+        version = versionInfo.version;
+        versionSource = versionInfo.source;
+        attrPath = attrPath;
+        description = null;
+        homepage = null;
+        license = null;
+        maintainers = null;
+        platforms = null;
+        sourcePath = null;
+        knownVulnerabilities = null;
+        storePath = storePath;
+      }
+    else
+      let
+        meta = pkg.meta or {};
+        name = tryDeep (toString' (pkg.pname or pkg.name or attrPath));
+        versionInfo = getVersionWithSource pkg name;
+        sourcePath = getSourcePath meta;
+        storePath = getStorePath pkg;
+      in {
+        name = if name != null then name else attrPath;
+        version = versionInfo.version;
+        versionSource = versionInfo.source;
+        attrPath = attrPath;
+        description = safeString (meta.description or null);
+        homepage = safeString (meta.homepage or null);
+        license = if meta ? license then getLicenses meta.license else null;
+        maintainers = if meta ? maintainers then getMaintainers meta.maintainers else null;
+        platforms = if meta ? platforms then getPlatforms meta.platforms else null;
+        sourcePath = safeString sourcePath;
+        knownVulnerabilities = if meta ? knownVulnerabilities then getKnownVulnerabilities meta.knownVulnerabilities else null;
+        storePath = storePath;
+      };
 
   # Check if an attribute name matches a nested package set pattern
   isNestedPackageSet = name:

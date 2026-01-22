@@ -396,6 +396,14 @@ Store paths are only extracted for commits after 2020-01-01, when
 cache.nixos.org availability became reliable. Earlier commits may have packages
 that aren't in the binary cache.
 
+To keep indexing fast, store paths are captured only on the first time a
+`(attribute_path, version, system)` is seen during a run. Later commits for the
+same version skip `outPath` evaluation and reuse the stored value (the database
+stores the first non-null store path per system).
+
+Store path extraction runs in a minimal mode (metadata skipped) with smaller
+batches to keep memory usage stable.
+
 ## Garbage Collection
 
 Long indexing runs accumulate Nix store data (.drv files, build outputs).

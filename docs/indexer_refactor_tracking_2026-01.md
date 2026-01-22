@@ -14,6 +14,10 @@
 - Updated --full behavior to only reprocess the requested range when --since/--until is provided.
 - Added tests for range labels, single-worker config, and memory error classification.
 - Updated website docs for indexer CLI and range reprocessing behavior.
+- Added store path tracking to only evaluate outPaths on first-seen versions per system.
+- Reused a cached extract.nix temp file to reduce per-batch I/O overhead.
+- Added store-path-only extraction mode to skip metadata during store path collection.
+- Reduced store-path batch sizes (parent + worker) to stay within memory budgets.
 
 ## Tests Run
 - cargo fmt
