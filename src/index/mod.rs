@@ -180,6 +180,11 @@ impl YearRange {
         }
     }
 
+    /// Human-friendly label for log output.
+    pub fn display_label(&self) -> String {
+        format!("{}..{}", self.since, self.until)
+    }
+
     /// Create a range for a specific month (useful for testing).
     #[cfg(test)]
     #[allow(dead_code)]
@@ -420,6 +425,14 @@ pub(crate) fn range_label_for_dates(since: Option<&str>, until: Option<&str>) ->
     let start = since.unwrap_or("min");
     let end = until.unwrap_or("max");
     format!("custom-{}-{}", start, end)
+}
+
+fn format_systems_for_log(systems: &[String]) -> String {
+    if systems.is_empty() {
+        "none".to_string()
+    } else {
+        systems.join(",")
+    }
 }
 
 /// Result from indexing a single year range (for parallel indexing).
@@ -1664,6 +1677,7 @@ impl Indexer {
     ) -> Result<IndexResult> {
         let total_commits = commits.len();
         let systems = &self.config.systems;
+        let systems_display = format_systems_for_log(systems);
         // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
         let _ = nixpkgs_path.as_ref();
 
@@ -1732,6 +1746,7 @@ impl Indexer {
         let mut pending_upserts: Vec<PackageVersion> = Vec::new();
         let mut checkpoints_since_gc: usize = 0;
         let mut last_processed_commit: Option<String> = resume_from.map(String::from);
+        let mut last_processed_date: Option<String> = None;
 
         // Load or create blob cache for static analysis caching
         let blob_cache_path = get_blob_cache_path();
@@ -2383,13 +2398,16 @@ impl Indexer {
 
             result.commits_processed += 1;
             last_processed_commit = Some(commit.hash.clone());
+            last_processed_date = Some(commit.date.format("%Y-%m-%d").to_string());
 
             // Update progress and log if needed
             progress.tick();
             progress.log_if_needed(&format!(
-                "pkgs={} upserted={}",
+                "pkgs={} upserted={} last_date={} systems={}",
                 result.packages_found,
-                result.packages_upserted + pending_upserts.len() as u64
+                result.packages_upserted + pending_upserts.len() as u64,
+                last_processed_date.as_deref().unwrap_or("unknown"),
+                systems_display
             ));
 
             // Checkpoint if needed
@@ -3356,6 +3374,8 @@ fn process_range_worker(
         "Starting range worker"
     );
 
+    let range_display = range.display_label();
+
     let mut result = RangeIndexResult {
         range_label: range.label.clone(),
         ..Default::default()
@@ -3408,12 +3428,22 @@ fn process_range_worker(
     }
 
     // Log progress for this range
-    let mut progress =
-        ProgressTracker::new(total_commits as u64, &format!("Range {}", range.label));
+    let progress_label = format!("Range {}", range_display);
+    let mut progress = ProgressTracker::new(total_commits as u64, &progress_label);
     if resume_from.is_some() {
-        info!(target: "nxv::index", "Range {}: resuming ({} commits)", range.label, total_commits);
+        info!(
+            target: "nxv::index",
+            "Range {}: resuming ({} commits)",
+            range_display,
+            total_commits
+        );
     } else {
-        info!(target: "nxv::index", "Range {}: processing {} commits", range.label, total_commits);
+        info!(
+            target: "nxv::index",
+            "Range {}: processing {} commits",
+            range_display,
+            total_commits
+        );
     }
 
     // Get first commit for worktree creation
@@ -3445,6 +3475,7 @@ fn process_range_worker(
 
     // Determine if we should use parallel evaluation for systems
     let systems = &config.systems;
+    let systems_display = format_systems_for_log(systems);
     let pool_mode = worker_pool_mode(worker_count, systems.len());
 
     // Acquire startup barrier to stagger heavy initialization work.
@@ -3477,6 +3508,7 @@ fn process_range_worker(
         }
     };
     let mut single_worker_pool: Option<worker::WorkerPool> = None;
+    let mut last_processed_date: Option<String> = None;
 
     // Build initial file-to-attribute map using hybrid approach
     // (static analysis + Nix fallback for low coverage)
@@ -3547,7 +3579,7 @@ fn process_range_worker(
                 tracing::warn!(error = %e, "Failed to save blob cache on interrupt");
             }
 
-            info!(target: "nxv::index", "Range {}: interrupted", range.label);
+            info!(target: "nxv::index", "Range {}: interrupted", range_display);
             return Ok(result);
         }
 
@@ -3737,7 +3769,7 @@ fn process_range_worker(
         {
             info!(
                 target: "nxv::index",
-                range = %range.label,
+                range = %range_display,
                 commit = %commit.short_hash,
                 date = %commit.date.format("%Y-%m-%d"),
                 progress = %format!("{}/{}", commit_idx + 1, total_commits),
@@ -4001,8 +4033,14 @@ fn process_range_worker(
         }
 
         result.commits_processed += 1;
+        last_processed_date = Some(commit.date.format("%Y-%m-%d").to_string());
         progress.tick();
-        progress.log_if_needed(&format!("pkgs={}", result.packages_found));
+        progress.log_if_needed(&format!(
+            "pkgs={} last_date={} systems={}",
+            result.packages_found,
+            last_processed_date.as_deref().unwrap_or("unknown"),
+            systems_display
+        ));
 
         // Release startup barrier after first commit extraction completes.
         // This ensures heavy baseline extractions are staggered across ranges.
@@ -4082,7 +4120,7 @@ fn process_range_worker(
     info!(
         target: "nxv::index",
         "Range {}: complete ({} commits, {} pkgs, {:.1}% static coverage)",
-        range.label,
+        range_display,
         result.commits_processed,
         result.packages_found,
         last_static_coverage * 100.0

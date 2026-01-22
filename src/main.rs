@@ -1226,6 +1226,11 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         .systems
         .clone()
         .unwrap_or_else(|| IndexerConfig::default().systems);
+    let systems_display = if systems.is_empty() {
+        "none".to_string()
+    } else {
+        systems.join(",")
+    };
     // Save values needed after config is moved into Indexer
     let system_count = systems.len();
     let memory_budget = args.max_memory;
@@ -1234,6 +1239,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     if !overrides.is_empty() {
         eprintln!("Using indexer overrides from NXV_INDEXER_CONFIG or data dir.");
     }
+    eprintln!("Systems: {}", systems_display);
 
     let mut config = IndexerConfig {
         systems,
@@ -1301,10 +1307,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             effective_max_workers
         );
         for range in &ranges {
-            eprintln!(
-                "  Range: {} ({} to {})",
-                range.label, range.since, range.until
-            );
+            eprintln!("  Range: {}", range.display_label());
         }
         eprintln!();
         eprintln!(

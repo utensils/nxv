@@ -5,6 +5,7 @@
 - Switched to always use batched extraction with worker pools (small lists still fall back internally).
 - Added auto worker-count logic (base = systems; scale to 2x only when memory allows) and new tests.
 - Improved memory error detection to avoid skipping due to OOM-style failures.
+- Clarified range logging and progress output with date ranges, last processed date, and systems.
 
 ## Code Changes
 - Parent batch sizing now scales from per-worker memory (divisors: 128 for metadata, 192 for store paths) with a conservative initial batch size.
@@ -15,6 +16,7 @@
   - Scale up to 2x systems only when per-worker memory after scaling is >= 8 GiB.
   - If base per-worker memory drops below 2 GiB, workers are reduced.
 - Batched extraction is now used whenever a worker pool is present; small lists shortcut inside the pool.
+- Range logs now show `since..until` instead of checkpoint labels; progress logs include `last_date` and `systems`.
 
 ## 15-Minute Debug Runs (2020-2021)
 
