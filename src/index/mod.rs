@@ -1746,7 +1746,6 @@ impl Indexer {
         let mut pending_upserts: Vec<PackageVersion> = Vec::new();
         let mut checkpoints_since_gc: usize = 0;
         let mut last_processed_commit: Option<String> = resume_from.map(String::from);
-        let mut last_processed_date: Option<String> = None;
 
         // Load or create blob cache for static analysis caching
         let blob_cache_path = get_blob_cache_path();
@@ -2398,15 +2397,14 @@ impl Indexer {
 
             result.commits_processed += 1;
             last_processed_commit = Some(commit.hash.clone());
-            last_processed_date = Some(commit.date.format("%Y-%m-%d").to_string());
-
             // Update progress and log if needed
             progress.tick();
+            let commit_date = commit.date.format("%Y-%m-%d").to_string();
             progress.log_if_needed(&format!(
                 "pkgs={} upserted={} last_date={} systems={}",
                 result.packages_found,
                 result.packages_upserted + pending_upserts.len() as u64,
-                last_processed_date.as_deref().unwrap_or("unknown"),
+                commit_date,
                 systems_display
             ));
 
@@ -3508,7 +3506,6 @@ fn process_range_worker(
         }
     };
     let mut single_worker_pool: Option<worker::WorkerPool> = None;
-    let mut last_processed_date: Option<String> = None;
 
     // Build initial file-to-attribute map using hybrid approach
     // (static analysis + Nix fallback for low coverage)
@@ -4033,13 +4030,11 @@ fn process_range_worker(
         }
 
         result.commits_processed += 1;
-        last_processed_date = Some(commit.date.format("%Y-%m-%d").to_string());
         progress.tick();
+        let commit_date = commit.date.format("%Y-%m-%d").to_string();
         progress.log_if_needed(&format!(
             "pkgs={} last_date={} systems={}",
-            result.packages_found,
-            last_processed_date.as_deref().unwrap_or("unknown"),
-            systems_display
+            result.packages_found, commit_date, systems_display
         ));
 
         // Release startup barrier after first commit extraction completes.
