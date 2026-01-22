@@ -6,6 +6,7 @@
 use super::ipc::{LineReader, LineWriter, PipeFd};
 use super::protocol::{WorkRequest, WorkResponse};
 use crate::index::extractor;
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -71,10 +72,33 @@ fn set_hard_memory_limit(limit_mib: usize) -> Result<(), String> {
     }
 }
 
+/// Read current RSS for this process in MiB (Linux only).
+#[cfg(target_os = "linux")]
+fn read_self_rss_mib() -> Option<usize> {
+    let contents = fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: u64 = contents.split_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+    let rss_bytes = resident_pages.saturating_mul(page_size as u64);
+    Some((rss_bytes / (1024 * 1024)) as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_self_rss_mib() -> Option<usize> {
+    None
+}
+
 /// Get the current memory usage in MiB.
 ///
-/// Uses `getrusage()` to get the maximum resident set size.
+/// Uses Linux RSS for current memory; falls back to `getrusage()` max RSS.
 fn get_memory_usage_mib() -> usize {
+    #[cfg(target_os = "linux")]
+    if let Some(rss) = read_self_rss_mib() {
+        return rss;
+    }
+
     use nix::sys::resource::{UsageWho, getrusage};
 
     match getrusage(UsageWho::RUSAGE_SELF) {
@@ -98,10 +122,15 @@ fn get_memory_usage_mib() -> usize {
 }
 
 /// Check if memory exceeds the threshold.
+fn effective_memory_threshold_mib(threshold: usize) -> usize {
+    let slack = (threshold / 20).max(128);
+    threshold.saturating_add(slack)
+}
+
 fn is_over_memory_threshold() -> bool {
     let current = get_memory_usage_mib();
     let threshold = MAX_MEMORY_MIB.load(Ordering::Relaxed);
-    current > threshold
+    current > effective_memory_threshold_mib(threshold)
 }
 
 /// Process a single extraction request.
@@ -318,15 +347,34 @@ mod tests {
         let original = MAX_MEMORY_MIB.load(Ordering::Relaxed);
 
         // Set a very high threshold - should not be over
-        MAX_MEMORY_MIB.store(100_000, Ordering::Relaxed);
+        let current = get_memory_usage_mib();
+        MAX_MEMORY_MIB.store(current.saturating_add(1024), Ordering::Relaxed);
         assert!(!is_over_memory_threshold());
 
-        // Set a very low threshold - should be over
-        MAX_MEMORY_MIB.store(1, Ordering::Relaxed);
-        assert!(is_over_memory_threshold());
+        // Set a very low threshold - should only be over if we exceed slack.
+        MAX_MEMORY_MIB.store(0, Ordering::Relaxed);
+        let expected = current > effective_memory_threshold_mib(0);
+        assert_eq!(is_over_memory_threshold(), expected);
 
         // Restore original value
         MAX_MEMORY_MIB.store(original, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_effective_memory_threshold_mib() {
+        assert_eq!(effective_memory_threshold_mib(0), 128);
+        assert_eq!(effective_memory_threshold_mib(100), 228);
+        assert_eq!(effective_memory_threshold_mib(1000), 1128);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_read_self_rss_mib() {
+        let rss = read_self_rss_mib();
+        assert!(rss.is_some());
+        let rss = rss.unwrap();
+        assert!(rss >= 1, "RSS too low: {} MiB", rss);
+        assert!(rss < 10 * 1024, "RSS too high: {} MiB", rss);
     }
 
     /// Test that set_hard_memory_limit works correctly.

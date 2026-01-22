@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::index::nix_ffi::with_evaluator;
 use serde::Deserialize;
+use std::env;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
@@ -14,6 +15,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const MAX_SKIP_SAMPLES: usize = 2000;
+const MIN_BATCH_SIZE: usize = 25;
+const MAX_BATCH_SIZE: usize = 500;
+const MIN_STORE_BATCH_SIZE: usize = 25;
+const MAX_STORE_BATCH_SIZE: usize = 200;
+const MEMORY_BATCH_DIVISOR: usize = 128;
+const MEMORY_STORE_BATCH_DIVISOR: usize = 192;
 
 struct SkipMetrics {
     total_skipped: AtomicU64,
@@ -46,6 +53,7 @@ pub struct SkipSummary {
 
 static SKIP_METRICS: OnceLock<SkipMetrics> = OnceLock::new();
 static EXTRACT_NIX_PATH: OnceLock<PathBuf> = OnceLock::new();
+static EXTRACT_BATCH_SIZES: OnceLock<(usize, usize)> = OnceLock::new();
 
 fn skip_metrics() -> &'static SkipMetrics {
     SKIP_METRICS.get_or_init(SkipMetrics::new)
@@ -63,6 +71,81 @@ fn extract_nix_path() -> Result<PathBuf> {
     std::fs::write(&path, EXTRACT_NIX)?;
     let _ = EXTRACT_NIX_PATH.set(path.clone());
     Ok(path)
+}
+
+fn parse_env_usize(key: &str) -> Option<usize> {
+    match env::var(key) {
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(parsed) if parsed > 0 => Some(parsed),
+            _ => {
+                debug!(key, value = %value, "Ignoring invalid batch size override");
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
+fn batch_sizes_from_inputs(
+    memory_mib: Option<usize>,
+    batch_override: Option<usize>,
+    store_override: Option<usize>,
+) -> (usize, usize) {
+    let memory_batch = memory_mib.map(|mem| {
+        let scaled = mem / MEMORY_BATCH_DIVISOR;
+        scaled.clamp(MIN_BATCH_SIZE, MAX_BATCH_SIZE)
+    });
+    let memory_store_batch = memory_mib.map(|mem| {
+        let scaled = mem / MEMORY_STORE_BATCH_DIVISOR;
+        scaled.clamp(MIN_STORE_BATCH_SIZE, MAX_STORE_BATCH_SIZE)
+    });
+
+    let mut batch_size = batch_override
+        .or(memory_batch)
+        .unwrap_or(DEFAULT_BATCH_SIZE)
+        .clamp(MIN_BATCH_SIZE, MAX_BATCH_SIZE);
+
+    let mut store_batch_size = store_override
+        .or(memory_store_batch)
+        .unwrap_or_else(|| (batch_size / 2).clamp(MIN_STORE_BATCH_SIZE, MAX_STORE_BATCH_SIZE))
+        .clamp(MIN_STORE_BATCH_SIZE, MAX_STORE_BATCH_SIZE);
+
+    if store_batch_size > batch_size {
+        store_batch_size = batch_size;
+    }
+
+    // Guard against pathological overrides that cause all batches to be 1.
+    if batch_size == 1 {
+        batch_size = DEFAULT_BATCH_SIZE.min(MAX_BATCH_SIZE);
+    }
+    if store_batch_size == 1 {
+        store_batch_size = STORE_PATH_BATCH_SIZE.min(MAX_STORE_BATCH_SIZE);
+    }
+
+    (batch_size, store_batch_size)
+}
+
+fn extract_batch_sizes() -> (usize, usize) {
+    *EXTRACT_BATCH_SIZES.get_or_init(|| {
+        let batch_override = parse_env_usize("NXV_EXTRACT_BATCH_SIZE");
+        let store_override = parse_env_usize("NXV_STORE_BATCH_SIZE");
+        let memory_mib = parse_env_usize("NXV_WORKER_MEMORY_MIB");
+
+        let sizes = batch_sizes_from_inputs(memory_mib, batch_override, store_override);
+        if batch_override.is_some()
+            || store_override.is_some()
+            || memory_mib.is_some()
+            || sizes != (DEFAULT_BATCH_SIZE, STORE_PATH_BATCH_SIZE)
+        {
+            debug!(
+                batch_size = sizes.0,
+                store_batch_size = sizes.1,
+                memory_mib = memory_mib.unwrap_or(0),
+                "Configured extractor batch sizes"
+            );
+        }
+        sizes
+    })
 }
 
 pub fn reset_skip_metrics() {
@@ -227,10 +310,11 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
     // Full extraction with 11K+ attrs can exhaust worker memory.
     // Nix has ~1.5GB baseline overhead, so with 2GB workers we need small batches.
     // Process in smaller batches when store paths are requested.
+    let (default_batch_size, store_batch_size) = extract_batch_sizes();
     let batch_size = if extract_store_paths {
-        STORE_PATH_BATCH_SIZE
+        store_batch_size
     } else {
-        DEFAULT_BATCH_SIZE
+        default_batch_size
     };
 
     if !attr_names.is_empty() && attr_names.len() > batch_size {
@@ -255,7 +339,7 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
             store_paths_only: bool,
             all_packages: &mut Vec<PackageInfo>,
             skipped: &mut Vec<String>,
-        ) {
+        ) -> Result<()> {
             match extract_packages_batch(
                 repo_path.as_ref(),
                 system,
@@ -265,8 +349,12 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
             ) {
                 Ok(batch_result) => {
                     all_packages.extend(batch_result);
+                    Ok(())
                 }
-                Err(_e) => {
+                Err(e) => {
+                    if e.is_memory_error() {
+                        return Err(e);
+                    }
                     if extract_store_paths
                         && let Ok(batch_result) = extract_packages_batch(
                             repo_path.as_ref(),
@@ -282,11 +370,11 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
                             "Retry without store paths succeeded"
                         );
                         all_packages.extend(batch_result);
-                        return;
+                        return Ok(());
                     }
                     if attrs.len() <= 1 {
                         skipped.extend(attrs.iter().cloned());
-                        return;
+                        return Ok(());
                     }
                     let mid = attrs.len() / 2;
                     extract_with_fallback(
@@ -297,7 +385,7 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
                         store_paths_only,
                         all_packages,
                         skipped,
-                    );
+                    )?;
                     extract_with_fallback(
                         repo_path.as_ref(),
                         system,
@@ -306,7 +394,8 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
                         store_paths_only,
                         all_packages,
                         skipped,
-                    );
+                    )?;
+                    Ok(())
                 }
             }
         }
@@ -340,6 +429,9 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
                     all_packages.extend(batch_result);
                 }
                 Err(e) => {
+                    if e.is_memory_error() {
+                        return Err(e);
+                    }
                     debug!(
                         system = %system,
                         batch_idx = batch_idx + 1,
@@ -358,7 +450,7 @@ pub fn extract_packages_for_attrs_with_mode<P: AsRef<Path>>(
                         store_paths_only,
                         &mut all_packages,
                         &mut skipped,
-                    );
+                    )?;
                     if !skipped.is_empty() {
                         failed_batches += 1;
                         total_failed_attrs += skipped.len();
@@ -817,6 +909,30 @@ mod tests {
         assert!(summary.total_skipped >= attrs.len() as u64);
         assert!(summary.samples.len() <= MAX_SKIP_SAMPLES);
         assert!(summary.unique_skipped >= attrs.len());
+    }
+
+    #[test]
+    fn test_batch_sizes_from_inputs_defaults() {
+        let sizes = batch_sizes_from_inputs(None, None, None);
+        assert_eq!(sizes.0, DEFAULT_BATCH_SIZE);
+        assert_eq!(sizes.1, STORE_PATH_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_batch_sizes_from_inputs_memory_scaled() {
+        let sizes = batch_sizes_from_inputs(Some(8 * 1024), None, None);
+        assert!(sizes.0 >= MIN_BATCH_SIZE);
+        assert!(sizes.0 <= DEFAULT_BATCH_SIZE);
+        assert!(sizes.1 <= sizes.0);
+        assert!(sizes.1 >= MIN_STORE_BATCH_SIZE);
+        assert!(sizes.1 <= MAX_STORE_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_batch_sizes_from_inputs_overrides() {
+        let sizes = batch_sizes_from_inputs(Some(8 * 1024), Some(333), Some(111));
+        assert_eq!(sizes.0, 333);
+        assert_eq!(sizes.1, 111);
     }
 
     #[test]

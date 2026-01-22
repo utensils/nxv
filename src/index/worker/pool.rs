@@ -13,7 +13,7 @@ use crate::error::{NxvError, Result};
 use crate::index::extractor::{AttrPosition, PackageInfo};
 use crate::memory::DEFAULT_MEMORY_BUDGET;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{instrument, trace};
@@ -65,6 +65,12 @@ struct Worker {
     watchdog: Arc<WorkerWatchdog>,
     /// Label for this worker (for watchdog registration).
     label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartPolicy {
+    Retry,
+    ReturnError,
 }
 
 impl Worker {
@@ -149,6 +155,25 @@ impl Worker {
         extract_store_paths: bool,
         store_paths_only: bool,
     ) -> Result<Vec<PackageInfo>> {
+        self.extract_with_policy(
+            system,
+            repo_path,
+            attrs,
+            extract_store_paths,
+            store_paths_only,
+            RestartPolicy::Retry,
+        )
+    }
+
+    fn extract_with_policy(
+        &mut self,
+        system: &str,
+        repo_path: &Path,
+        attrs: &[String],
+        extract_store_paths: bool,
+        store_paths_only: bool,
+        restart_policy: RestartPolicy,
+    ) -> Result<Vec<PackageInfo>> {
         let request_start = Instant::now();
         self.ensure_ready()?;
 
@@ -196,15 +221,21 @@ impl Worker {
                 memory_mib,
                 threshold_mib,
             }) => {
-                // Worker requested restart - respawn and retry
+                // Worker requested restart - respawn and retry or surface as memory error.
                 self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
-                return self.extract(
-                    system,
-                    repo_path,
-                    attrs,
-                    extract_store_paths,
-                    store_paths_only,
-                );
+                return match restart_policy {
+                    RestartPolicy::Retry => self.extract_with_policy(
+                        system,
+                        repo_path,
+                        attrs,
+                        extract_store_paths,
+                        store_paths_only,
+                        restart_policy,
+                    ),
+                    RestartPolicy::ReturnError => {
+                        Err(self.restart_error(memory_mib, threshold_mib))
+                    }
+                };
             }
             Some(WorkResponse::Ready) | Some(WorkResponse::PositionsResult { .. }) => {
                 return Err(NxvError::Worker(format!(
@@ -219,11 +250,15 @@ impl Worker {
         };
 
         // Wait for Ready or Restart signal
-        self.wait_for_ready_signal(packages)
+        self.wait_for_ready_signal(packages, restart_policy)
     }
 
     /// Wait for Ready/Restart signal after receiving a result.
-    fn wait_for_ready_signal(&mut self, packages: Vec<PackageInfo>) -> Result<Vec<PackageInfo>> {
+    fn wait_for_ready_signal(
+        &mut self,
+        packages: Vec<PackageInfo>,
+        restart_policy: RestartPolicy,
+    ) -> Result<Vec<PackageInfo>> {
         let proc = self
             .proc
             .as_mut()
@@ -240,7 +275,12 @@ impl Worker {
             }) => {
                 self.jobs_completed += 1;
                 self.handle_restart_with_memory(Some(memory_mib), Some(threshold_mib))?;
-                Ok(packages)
+                match restart_policy {
+                    RestartPolicy::Retry => Ok(packages),
+                    RestartPolicy::ReturnError => {
+                        Err(self.restart_error(memory_mib, threshold_mib))
+                    }
+                }
             }
             Some(other) => Err(NxvError::Worker(format!(
                 "Worker {} sent unexpected response: {:?}",
@@ -253,6 +293,13 @@ impl Worker {
                 Ok(packages)
             }
         }
+    }
+
+    fn restart_error(&self, memory_mib: usize, threshold_mib: usize) -> NxvError {
+        NxvError::Worker(format!(
+            "Worker {} exceeded memory limit ({} MiB > {} MiB)",
+            self.id, memory_mib, threshold_mib
+        ))
     }
 
     /// Send a positions extraction request and wait for the result.
@@ -521,6 +568,8 @@ const PARENT_BATCH_SIZE: usize = 500;
 const STORE_PATH_PARENT_BATCH_SIZE: usize = 100;
 const MIN_PARENT_BATCH_SIZE: usize = 10;
 const SUCCESS_STREAK_TO_GROW: usize = 8;
+const PARENT_BATCH_MEM_DIVISOR: usize = 128;
+const STORE_PATH_BATCH_MEM_DIVISOR: usize = 192;
 
 struct AdaptiveBatcher {
     current: AtomicUsize,
@@ -530,9 +579,10 @@ struct AdaptiveBatcher {
 }
 
 impl AdaptiveBatcher {
-    fn new(min: usize, max: usize) -> Self {
+    fn new(min: usize, max: usize, initial: usize) -> Self {
+        let initial = initial.clamp(min, max);
         Self {
-            current: AtomicUsize::new(max),
+            current: AtomicUsize::new(initial),
             min,
             max,
             success_streak: AtomicUsize::new(0),
@@ -675,12 +725,27 @@ impl WorkerPool {
 
         tracing::info!(workers = config.worker_count, "All workers ready");
 
+        let max_parent_batch = parent_batch_cap(config.per_worker_memory_mib, false);
+        let initial_parent_batch = (max_parent_batch / 2).max(MIN_PARENT_BATCH_SIZE);
+
+        tracing::debug!(
+            per_worker_mib = config.per_worker_memory_mib,
+            max_parent_batch = max_parent_batch,
+            initial_parent_batch = initial_parent_batch,
+            store_parent_batch = parent_batch_cap(config.per_worker_memory_mib, true),
+            "Configured parent batch sizing"
+        );
+
         Ok(Self {
             workers,
             config,
             next_worker: AtomicUsize::new(0),
             watchdog,
-            adaptive_batcher: AdaptiveBatcher::new(MIN_PARENT_BATCH_SIZE, PARENT_BATCH_SIZE),
+            adaptive_batcher: AdaptiveBatcher::new(
+                MIN_PARENT_BATCH_SIZE,
+                max_parent_batch,
+                initial_parent_batch,
+            ),
         })
     }
 
@@ -776,18 +841,38 @@ impl WorkerPool {
         extract_store_paths: bool,
         store_paths_only: bool,
     ) -> Result<Vec<PackageInfo>> {
+        self.extract_with_policy(
+            system,
+            repo_path,
+            attrs,
+            extract_store_paths,
+            store_paths_only,
+            RestartPolicy::Retry,
+        )
+    }
+
+    fn extract_with_policy(
+        &self,
+        system: &str,
+        repo_path: &Path,
+        attrs: &[String],
+        extract_store_paths: bool,
+        store_paths_only: bool,
+        restart_policy: RestartPolicy,
+    ) -> Result<Vec<PackageInfo>> {
         // Wait for memory pressure to clear before starting new work
         self.wait_for_memory_clear();
 
         // Find an available worker using try_lock
         for worker in &self.workers {
             if let Ok(mut w) = worker.try_lock() {
-                return w.extract(
+                return w.extract_with_policy(
                     system,
                     repo_path,
                     attrs,
                     extract_store_paths,
                     store_paths_only,
+                    restart_policy,
                 );
             }
         }
@@ -795,12 +880,13 @@ impl WorkerPool {
         // All workers busy - use round-robin to distribute wait fairly
         let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let mut w = self.workers[idx].lock().expect("worker mutex poisoned");
-        w.extract(
+        w.extract_with_policy(
             system,
             repo_path,
             attrs,
             extract_store_paths,
             store_paths_only,
+            restart_policy,
         )
     }
 
@@ -825,11 +911,8 @@ impl WorkerPool {
         // Parent-level batch size: larger than worker internal batch (100)
         // to reduce IPC overhead, but small enough that workers don't accumulate
         // too much memory before a potential restart.
-        let base_batch_size = if extract_store_paths {
-            STORE_PATH_PARENT_BATCH_SIZE
-        } else {
-            PARENT_BATCH_SIZE
-        };
+        let base_batch_size =
+            parent_batch_cap(self.config.per_worker_memory_mib, extract_store_paths);
         let batch_size = self
             .adaptive_batcher
             .batch_size(self.recommended_batch_size(base_batch_size));
@@ -867,12 +950,13 @@ impl WorkerPool {
                     "Processing parent batch"
                 );
 
-                let result = self.extract(
+                let result = self.extract_with_policy(
                     system,
                     repo_path,
                     chunk,
                     extract_store_paths,
                     store_paths_only,
+                    RestartPolicy::ReturnError,
                 );
                 if result.is_ok() {
                     self.adaptive_batcher.record_success(chunk.len());
@@ -900,6 +984,280 @@ impl WorkerPool {
 
         all_packages.shrink_to_fit();
         Ok(all_packages)
+    }
+
+    /// Extract packages for multiple systems in parallel with parent-level batching.
+    ///
+    /// This is optimized for large target lists that benefit from batching to
+    /// control memory while still leveraging multiple worker processes.
+    pub fn extract_parallel_batched(
+        &self,
+        repo_path: &Path,
+        systems: &[String],
+        attrs: &[String],
+        extract_store_paths: bool,
+        store_paths_only: bool,
+    ) -> Vec<Result<Vec<PackageInfo>>> {
+        if systems.is_empty() {
+            return Vec::new();
+        }
+
+        if systems.len() == 1 || self.workers.len() <= 1 {
+            return systems
+                .iter()
+                .map(|system| {
+                    self.extract_batched(
+                        system,
+                        repo_path,
+                        attrs,
+                        extract_store_paths,
+                        store_paths_only,
+                    )
+                })
+                .collect();
+        }
+
+        if self.workers.len() <= systems.len() {
+            return self.extract_parallel_batched_per_system(
+                repo_path,
+                systems,
+                attrs,
+                extract_store_paths,
+                store_paths_only,
+            );
+        }
+
+        self.extract_parallel_batched_queue(
+            repo_path,
+            systems,
+            attrs,
+            extract_store_paths,
+            store_paths_only,
+        )
+    }
+
+    fn extract_parallel_batched_per_system(
+        &self,
+        repo_path: &Path,
+        systems: &[String],
+        attrs: &[String],
+        extract_store_paths: bool,
+        store_paths_only: bool,
+    ) -> Vec<Result<Vec<PackageInfo>>> {
+        use std::thread;
+
+        // Wait for memory pressure to clear before starting parallel extraction
+        self.wait_for_memory_clear();
+
+        let results: Vec<_> = thread::scope(|s| {
+            let handles: Vec<_> = systems
+                .iter()
+                .map(|system| {
+                    let system = system.as_str();
+                    s.spawn(move || {
+                        self.extract_batched(
+                            system,
+                            repo_path,
+                            attrs,
+                            extract_store_paths,
+                            store_paths_only,
+                        )
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(NxvError::Worker("Worker thread panicked".into())))
+                })
+                .collect()
+        });
+
+        results
+    }
+
+    fn extract_parallel_batched_queue(
+        &self,
+        repo_path: &Path,
+        systems: &[String],
+        attrs: &[String],
+        extract_store_paths: bool,
+        store_paths_only: bool,
+    ) -> Vec<Result<Vec<PackageInfo>>> {
+        use std::collections::VecDeque;
+        use std::sync::Condvar;
+        use std::thread;
+
+        let base_batch_size =
+            parent_batch_cap(self.config.per_worker_memory_mib, extract_store_paths);
+        let batch_size = self
+            .adaptive_batcher
+            .batch_size(self.recommended_batch_size(base_batch_size));
+
+        if attrs.len() <= batch_size {
+            return self.extract_parallel(
+                repo_path,
+                systems,
+                attrs,
+                extract_store_paths,
+                store_paths_only,
+            );
+        }
+
+        #[derive(Debug)]
+        struct BatchJob {
+            system_idx: usize,
+            attrs: Vec<String>,
+        }
+
+        let mut queue: VecDeque<BatchJob> = VecDeque::new();
+        for (system_idx, system) in systems.iter().enumerate() {
+            let total_batches = attrs.len().div_ceil(batch_size);
+            tracing::debug!(
+                system = %system,
+                total_attrs = attrs.len(),
+                batch_size = batch_size,
+                batches = total_batches,
+                "Starting parent-level batched extraction"
+            );
+
+            for chunk in attrs.chunks(batch_size) {
+                queue.push_back(BatchJob {
+                    system_idx,
+                    attrs: chunk.to_vec(),
+                });
+            }
+        }
+
+        let pending = Arc::new(AtomicUsize::new(queue.len()));
+        let queue = Arc::new((Mutex::new(queue), Condvar::new()));
+        let results: Arc<Vec<Mutex<Vec<PackageInfo>>>> =
+            Arc::new((0..systems.len()).map(|_| Mutex::new(Vec::new())).collect());
+        let errors: Arc<Vec<Mutex<Option<NxvError>>>> =
+            Arc::new((0..systems.len()).map(|_| Mutex::new(None)).collect());
+        let error_flags: Arc<Vec<AtomicBool>> =
+            Arc::new((0..systems.len()).map(|_| AtomicBool::new(false)).collect());
+
+        thread::scope(|s| {
+            for _ in 0..self.workers.len() {
+                let queue = Arc::clone(&queue);
+                let pending = Arc::clone(&pending);
+                let results = Arc::clone(&results);
+                let errors = Arc::clone(&errors);
+                let error_flags = Arc::clone(&error_flags);
+
+                s.spawn(move || {
+                    loop {
+                        let job = {
+                            let (lock, cv) = &*queue;
+                            let mut guard = lock.lock().expect("queue mutex poisoned");
+                            loop {
+                                if let Some(job) = guard.pop_front() {
+                                    break Some(job);
+                                }
+                                if pending.load(Ordering::Relaxed) == 0 {
+                                    return;
+                                }
+                                guard = cv.wait(guard).expect("queue condvar poisoned");
+                            }
+                        };
+
+                        let Some(job) = job else {
+                            continue;
+                        };
+
+                        if error_flags[job.system_idx].load(Ordering::Relaxed) {
+                            pending.fetch_sub(1, Ordering::Relaxed);
+                            let (_, cv) = &*queue;
+                            cv.notify_all();
+                            continue;
+                        }
+
+                        self.wait_for_memory_clear();
+
+                        let result = self.extract_with_policy(
+                            &systems[job.system_idx],
+                            repo_path,
+                            &job.attrs,
+                            extract_store_paths,
+                            store_paths_only,
+                            RestartPolicy::ReturnError,
+                        );
+
+                        match result {
+                            Ok(items) => {
+                                results[job.system_idx]
+                                    .lock()
+                                    .expect("results mutex poisoned")
+                                    .extend(items);
+                                self.adaptive_batcher.record_success(job.attrs.len());
+                            }
+                            Err(e) => {
+                                if e.is_memory_error() {
+                                    let new_batch_size = self
+                                        .adaptive_batcher
+                                        .record_memory_failure(job.attrs.len());
+                                    tracing::debug!(
+                                        system = %systems[job.system_idx],
+                                        chunk_len = job.attrs.len(),
+                                        new_batch_size = new_batch_size,
+                                        "Reducing parent batch size after memory failure"
+                                    );
+                                }
+
+                                if job.attrs.len() <= 1 {
+                                    if !error_flags[job.system_idx].swap(true, Ordering::Relaxed) {
+                                        *errors[job.system_idx]
+                                            .lock()
+                                            .expect("errors mutex poisoned") = Some(e);
+                                        results[job.system_idx]
+                                            .lock()
+                                            .expect("results mutex poisoned")
+                                            .clear();
+                                    }
+                                } else {
+                                    let mid = job.attrs.len() / 2;
+                                    let left = job.attrs[..mid].to_vec();
+                                    let right = job.attrs[mid..].to_vec();
+                                    let (lock, cv) = &*queue;
+                                    let mut guard = lock.lock().expect("queue mutex poisoned");
+                                    guard.push_back(BatchJob {
+                                        system_idx: job.system_idx,
+                                        attrs: left,
+                                    });
+                                    guard.push_back(BatchJob {
+                                        system_idx: job.system_idx,
+                                        attrs: right,
+                                    });
+                                    pending.fetch_add(2, Ordering::Relaxed);
+                                    cv.notify_all();
+                                }
+                            }
+                        }
+
+                        pending.fetch_sub(1, Ordering::Relaxed);
+                        let (_, cv) = &*queue;
+                        cv.notify_all();
+                    }
+                });
+            }
+        });
+
+        let mut output = Vec::with_capacity(systems.len());
+        for idx in 0..systems.len() {
+            if let Some(err) = errors[idx].lock().expect("errors mutex poisoned").take() {
+                output.push(Err(err));
+            } else {
+                let mut items = results[idx].lock().expect("results mutex poisoned");
+                let mut collected = std::mem::take(&mut *items);
+                collected.shrink_to_fit();
+                output.push(Ok(collected));
+            }
+        }
+
+        output
     }
 
     /// Extract packages for multiple systems in parallel.
@@ -1008,6 +1366,54 @@ impl WorkerPool {
         w.extract_positions(system, repo_path)
     }
 
+    /// Extract attribute positions for multiple systems in parallel.
+    pub fn extract_positions_parallel(
+        &self,
+        repo_path: &Path,
+        systems: &[String],
+    ) -> Vec<Result<Vec<AttrPosition>>> {
+        use std::thread;
+
+        if systems.is_empty() {
+            return Vec::new();
+        }
+
+        if systems.len() == 1 || self.workers.len() <= 1 {
+            return systems
+                .iter()
+                .map(|system| self.extract_positions(system, repo_path))
+                .collect();
+        }
+
+        self.wait_for_memory_clear();
+
+        thread::scope(|s| {
+            let handles: Vec<_> = systems
+                .iter()
+                .enumerate()
+                .map(|(i, system)| {
+                    let worker_idx = i % self.workers.len();
+                    let worker = &self.workers[worker_idx];
+                    let repo_path = repo_path.to_path_buf();
+                    let system = system.clone();
+
+                    s.spawn(move || {
+                        let mut w = worker.lock().expect("worker mutex poisoned");
+                        w.extract_positions(&system, &repo_path)
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(NxvError::Worker("Worker thread panicked".into())))
+                })
+                .collect()
+        })
+    }
+
     /// Shutdown all workers gracefully.
     pub fn shutdown(&self) {
         for worker in &self.workers {
@@ -1050,6 +1456,23 @@ fn single_worker_config(config: &WorkerPoolConfig, label_suffix: &str) -> Worker
         .unwrap_or_else(|| label_suffix.to_string());
     single.label = Some(label);
     single
+}
+
+fn parent_batch_cap(per_worker_mib: usize, extract_store_paths: bool) -> usize {
+    let divisor = if extract_store_paths {
+        STORE_PATH_BATCH_MEM_DIVISOR
+    } else {
+        PARENT_BATCH_MEM_DIVISOR
+    };
+
+    let max = if extract_store_paths {
+        STORE_PATH_PARENT_BATCH_SIZE
+    } else {
+        PARENT_BATCH_SIZE
+    };
+
+    let scaled = per_worker_mib.saturating_div(divisor);
+    scaled.clamp(MIN_PARENT_BATCH_SIZE, max)
 }
 
 impl Drop for WorkerPool {
@@ -1199,8 +1622,8 @@ mod tests {
 
     #[test]
     fn test_adaptive_batcher_reduces_on_memory_failure() {
-        let batcher = AdaptiveBatcher::new(10, 100);
-        assert_eq!(batcher.current(), 100);
+        let batcher = AdaptiveBatcher::new(10, 100, 80);
+        assert_eq!(batcher.current(), 80);
         let next = batcher.record_memory_failure(80);
         assert!(next <= 50);
         assert_eq!(batcher.current(), next);
@@ -1208,7 +1631,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_batcher_grows_after_success_streak() {
-        let batcher = AdaptiveBatcher::new(10, 80);
+        let batcher = AdaptiveBatcher::new(10, 80, 40);
         let reduced = batcher.record_memory_failure(80);
         assert!(reduced < 80);
         let mut grew = false;
@@ -1220,6 +1643,17 @@ mod tests {
         assert!(grew);
         assert!(batcher.current() >= reduced);
         assert!(batcher.current() <= 80);
+    }
+
+    #[test]
+    fn test_parent_batch_cap_scales_with_memory() {
+        assert_eq!(parent_batch_cap(0, false), MIN_PARENT_BATCH_SIZE);
+        assert_eq!(parent_batch_cap(1024, false), MIN_PARENT_BATCH_SIZE);
+        assert_eq!(parent_batch_cap(32 * 1024, false), 256);
+        assert_eq!(
+            parent_batch_cap(32 * 1024, true),
+            STORE_PATH_PARENT_BATCH_SIZE
+        );
     }
 
     // Note: Full pool tests require the binary to support --internal-worker.

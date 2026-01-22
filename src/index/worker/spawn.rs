@@ -103,6 +103,10 @@ pub fn spawn_worker(config: &WorkerConfig) -> Result<Proc> {
 
     // Environment variables for Nix
     cmd.env("GC_DONT_GC", "1");
+    cmd.env(
+        "NXV_WORKER_MEMORY_MIB",
+        config.per_worker_memory_mib.to_string(),
+    );
 
     // Pass custom eval store path if specified (for parallel range isolation)
     if let Some(ref store_path) = config.eval_store_path {

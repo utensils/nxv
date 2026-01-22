@@ -44,7 +44,7 @@ flags.
 | Key                           | Default | Description                            |
 | ----------------------------- | ------- | -------------------------------------- |
 | `checkpoint_interval`         | `100`   | Commits between checkpoint saves       |
-| `workers`                     | (auto)  | Number of parallel worker processes    |
+| `workers`                     | (auto)  | Parallel worker processes (auto-scales) |
 | `gc_interval`                 | `5`     | Checkpoints between garbage collection |
 | `max_range_workers`           | `4`     | Maximum concurrent range workers       |
 | `max_commits`                 | -       | Limit total commits processed          |
@@ -82,11 +82,12 @@ Configure parallel ranges in `indexer.json` or `NXV_INDEXER_CONFIG`:
 }
 ```
 
-If you pass `--since` or `--until`, any `parallel_ranges` config is ignored.
+If you pass `--since` or `--until`, `parallel_ranges` are intersected with that
+window; any ranges outside the requested bounds are dropped.
 
 ::: warning Memory Allocation
-Memory is divided evenly among all concurrent workers (systems × ranges).
-With 32 GiB, 4 systems, and 4 ranges, each worker gets 2 GiB. Plan accordingly.
+Memory is divided evenly among all concurrent workers (workers × ranges).
+With 32 GiB, 4 workers, and 4 ranges, each worker gets 2 GiB. Plan accordingly.
 :::
 
 ### Memory Format
@@ -100,7 +101,8 @@ The `--max-memory` flag accepts human-readable sizes:
 | With suffix  | `1024M`, `1024MB`   | Mebibytes                           |
 | Fractional   | `1.5G`              | 1.5 gibibytes (1536 MiB)            |
 
-Memory is divided equally among all workers (default: 8G ÷ 4 workers = 2 GiB per worker).
+Memory is divided equally among all workers. The default worker count auto-scales
+based on memory/CPU (for example, 8G → 4 workers, 64G → 8 workers on a 4-system setup).
 
 ### Examples
 

@@ -81,11 +81,18 @@ impl NxvError {
     pub fn is_memory_error(&self) -> bool {
         #[cfg(feature = "indexer")]
         {
-            if let NxvError::Worker(message) = self {
+            let message = match self {
+                NxvError::Worker(message) => message.as_str(),
+                NxvError::NixEval(message) => message.as_str(),
+                _ => "",
+            };
+            if !message.is_empty() {
                 let message = message.to_lowercase();
                 return message.contains("out of memory")
                     || message.contains("exceeded memory limit")
-                    || message.contains("memory limit");
+                    || message.contains("memory limit")
+                    || message.contains("cannot allocate memory")
+                    || message.contains("oom");
             }
         }
 

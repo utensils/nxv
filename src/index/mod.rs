@@ -25,7 +25,7 @@ use crate::error::{NxvError, Result};
 use crate::index::blob_cache::BlobCache;
 use crate::index::static_analysis::StaticFileMap;
 use crate::memory::{DEFAULT_MEMORY_BUDGET, MIN_WORKER_MEMORY, MemorySize};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use git::{NixpkgsRepo, WorktreeSession};
 
 /// Cutoff date for store path extraction (2020-01-01).
@@ -70,6 +70,11 @@ use tracing::{debug, debug_span, info, instrument, trace, warn};
 /// Ranges will wait until this much memory is available before starting.
 const MIN_AVAILABLE_MEMORY_MIB: u64 = 4 * 1024; // 4 GiB
 
+/// Target list size that triggers extra memory pressure checks.
+const LARGE_EXTRACTION_THRESHOLD: usize = 1000;
+const MIN_BASE_WORKER_MIB: u64 = 2048;
+const SCALE_UP_MIN_WORKER_MIB: u64 = 8192;
+
 /// Timeout for waiting for memory before starting a batch.
 /// If memory doesn't become available, we proceed anyway (with warning).
 const MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -88,6 +93,46 @@ fn calculate_per_worker_memory(
         .divide_among(total_workers, MIN_WORKER_MEMORY)
         .map_err(|e| NxvError::Config(e.to_string()))?;
     Ok(per_worker.as_mib() as usize)
+}
+
+fn default_worker_count(
+    memory_budget: MemorySize,
+    systems_len: usize,
+    range_workers: usize,
+) -> usize {
+    if systems_len == 0 {
+        return 0;
+    }
+
+    let cpu_total = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(systems_len);
+    let range_workers = range_workers.max(1);
+    let cpu_per_range = (cpu_total / range_workers).max(1);
+    let budget_mib = memory_budget.as_mib();
+    let base_workers = systems_len.max(1);
+    let mut worker_count = base_workers;
+
+    let base_per_worker_mib = budget_mib / (base_workers as u64 * range_workers as u64);
+    if base_per_worker_mib < MIN_BASE_WORKER_MIB {
+        let max_by_mem =
+            (budget_mib / (MIN_BASE_WORKER_MIB * range_workers as u64)).max(1) as usize;
+        worker_count = worker_count.min(max_by_mem.max(1));
+    }
+
+    let scaled_workers = base_workers.saturating_mul(2);
+    let scaled_per_worker_mib = budget_mib / (scaled_workers as u64 * range_workers as u64);
+    if scaled_per_worker_mib >= SCALE_UP_MIN_WORKER_MIB {
+        worker_count = worker_count.max(scaled_workers);
+    }
+
+    worker_count.min(cpu_per_range).max(1)
+}
+
+fn resolve_worker_count(config: &IndexerConfig, systems_len: usize, range_workers: usize) -> usize {
+    config
+        .worker_count
+        .unwrap_or_else(|| default_worker_count(config.memory_budget, systems_len, range_workers))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -325,6 +370,50 @@ impl YearRange {
 
         Ok(ranges)
     }
+
+    /// Intersect this range with optional since/until date bounds.
+    ///
+    /// Returns None if the range does not overlap the bounds.
+    pub fn intersect_dates(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Option<Self>> {
+        let range_start = parse_date(&self.since)?;
+        let range_end = parse_date(&self.until)?;
+
+        let start = match since {
+            Some(date) => parse_date(date)?.max(range_start),
+            None => range_start,
+        };
+        let end = match until {
+            Some(date) => parse_date(date)?.min(range_end),
+            None => range_end,
+        };
+
+        if start >= end {
+            return Ok(None);
+        }
+
+        let since_str = start.format("%Y-%m-%d").to_string();
+        let until_str = end.format("%Y-%m-%d").to_string();
+        let label = if since_str == self.since && until_str == self.until {
+            self.label.clone()
+        } else {
+            format!("{}-{}-{}", self.label, since_str, until_str)
+        };
+
+        Ok(Some(Self {
+            label,
+            since: since_str,
+            until: until_str,
+        }))
+    }
+}
+
+fn parse_date(date: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|_| NxvError::Config(format!("Invalid date: {}", date)))
 }
 
 pub(crate) fn range_label_for_dates(since: Option<&str>, until: Option<&str>) -> String {
@@ -415,7 +504,7 @@ pub struct IndexerConfig {
     /// Optional limit on number of commits.
     pub max_commits: Option<usize>,
     /// Number of parallel worker processes for evaluation.
-    /// If None, uses the number of systems for parallel evaluation.
+    /// If None, auto-scales based on memory/CPU (up to ~2x systems).
     /// If Some(1), disables parallel evaluation (sequential mode).
     pub worker_count: Option<usize>,
     /// Total memory budget for all workers combined.
@@ -1319,10 +1408,11 @@ impl Indexer {
         let effective_max_workers = max_range_workers.max(1).min(ranges.len());
 
         // Calculate per-worker memory: total budget / (ranges × systems)
-        let worker_count = self
-            .config
-            .worker_count
-            .unwrap_or(self.config.systems.len());
+        let worker_count = resolve_worker_count(
+            &self.config,
+            self.config.systems.len(),
+            effective_max_workers,
+        );
         let per_worker_memory_mib = calculate_per_worker_memory(
             self.config.memory_budget,
             worker_count,
@@ -1406,6 +1496,7 @@ impl Indexer {
                                 db,
                                 range.clone(),
                                 &config,
+                                worker_count,
                                 per_worker_memory_mib,
                                 shutdown,
                                 &full_extraction_limiter,
@@ -1576,7 +1667,7 @@ impl Indexer {
         // Note: nixpkgs_path is unused here because we use WorktreeSession for all checkouts
         let _ = nixpkgs_path.as_ref();
 
-        let worker_count = self.config.worker_count.unwrap_or(systems.len());
+        let worker_count = resolve_worker_count(&self.config, systems.len(), 1);
         let pool_mode = worker_pool_mode(worker_count, systems.len());
 
         // Create worker pool even for single-worker mode to cap evaluator memory.
@@ -1588,9 +1679,15 @@ impl Indexer {
                     worker_count,
                     1, // single range mode
                 )?;
+                let eval_store_path = format!(
+                    "{}-{}",
+                    gc::TEMP_EVAL_STORE_PATH,
+                    range_label.unwrap_or("main")
+                );
                 let pool_config = worker::WorkerPoolConfig {
                     worker_count,
                     per_worker_memory_mib: per_worker_mib,
+                    eval_store_path: Some(eval_store_path),
                     ..Default::default()
                 };
                 match worker::WorkerPool::new(pool_config) {
@@ -2009,132 +2106,52 @@ impl Indexer {
                 )
                 .entered();
 
-                // For large target lists (full extraction), use sequential processing
-                // to avoid multiplying baseline memory across workers.
-                // Each Nix worker loads ~6-8GB just for nixpkgs baseline.
-                const SEQUENTIAL_THRESHOLD: usize = 1000;
-                let use_sequential = target_list.len() >= SEQUENTIAL_THRESHOLD;
-
                 if let Some(ref pool) = worker_pool {
-                    if use_sequential {
-                        // Large extraction: process systems ONE AT A TIME with parent-level batching.
-                        // This ensures workers can restart between batches to release memory.
-                        tracing::debug!(
-                            targets = target_list.len(),
-                            "Using sequential batched extraction for large target list"
-                        );
+                    let results = pool.extract_parallel_batched(
+                        worktree_path,
+                        systems,
+                        &target_list,
+                        base_extract_store_paths,
+                        false,
+                    );
 
-                        let mut per_system = Vec::with_capacity(systems.len());
-                        for system in systems.iter() {
-                            let mut result = if pool.worker_count() > 1 {
-                                let single_pool = match single_worker_pool.as_ref() {
-                                    Some(pool) => pool,
-                                    None => {
-                                        let pool = pool.single_worker_pool("single")?;
-                                        single_worker_pool = Some(pool);
-                                        single_worker_pool
-                                            .as_ref()
-                                            .expect("single worker pool just initialized")
-                                    }
-                                };
-                                single_pool.extract_batched(
-                                    system,
-                                    worktree_path,
-                                    &target_list,
-                                    base_extract_store_paths,
-                                    false,
-                                )
-                            } else {
-                                pool.extract_batched(
-                                    system,
-                                    worktree_path,
-                                    &target_list,
-                                    base_extract_store_paths,
-                                    false,
-                                )
+                    let mut paired: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
+                        systems.iter().cloned().zip(results).collect();
+
+                    for (system, result) in paired.iter_mut() {
+                        if let Err(err) = result.as_ref()
+                            && err.is_memory_error()
+                        {
+                            let single_pool = match single_worker_pool.as_ref() {
+                                Some(pool) => pool,
+                                None => {
+                                    let pool = pool.single_worker_pool("single")?;
+                                    single_worker_pool = Some(pool);
+                                    single_worker_pool
+                                        .as_ref()
+                                        .expect("single worker pool just initialized")
+                                }
                             };
-
-                            if let Err(ref err) = result
-                                && err.is_memory_error()
-                            {
-                                let single_pool = match single_worker_pool.as_ref() {
-                                    Some(pool) => pool,
-                                    None => {
-                                        let pool = pool.single_worker_pool("single")?;
-                                        single_worker_pool = Some(pool);
-                                        single_worker_pool
-                                            .as_ref()
-                                            .expect("single worker pool just initialized")
-                                    }
-                                };
-                                result = single_pool.extract_batched(
-                                    system,
-                                    worktree_path,
-                                    &target_list,
-                                    base_extract_store_paths,
-                                    false,
-                                );
-                            }
-
-                            if let Err(ref err) = result
-                                && err.is_memory_error()
-                            {
-                                return Err(NxvError::Worker(format!(
-                                    "Memory-limited extraction failed for {}: {}",
-                                    system, err
-                                )));
-                            }
-
-                            per_system.push((system.clone(), result));
-                        }
-                        per_system
-                    } else {
-                        // Small extraction: parallel is fine
-                        let results = pool.extract_parallel(
-                            worktree_path,
-                            systems,
-                            &target_list,
-                            base_extract_store_paths,
-                            false,
-                        );
-                        let mut paired: Vec<(String, Result<Vec<extractor::PackageInfo>>)> =
-                            systems.iter().cloned().zip(results).collect();
-
-                        for (system, result) in paired.iter_mut() {
-                            if let Err(err) = result.as_ref()
-                                && err.is_memory_error()
-                            {
-                                let single_pool = match single_worker_pool.as_ref() {
-                                    Some(pool) => pool,
-                                    None => {
-                                        let pool = pool.single_worker_pool("single")?;
-                                        single_worker_pool = Some(pool);
-                                        single_worker_pool
-                                            .as_ref()
-                                            .expect("single worker pool just initialized")
-                                    }
-                                };
-                                *result = single_pool.extract_batched(
-                                    system,
-                                    worktree_path,
-                                    &target_list,
-                                    base_extract_store_paths,
-                                    false,
-                                );
-                            }
-
-                            if let Err(err) = result.as_ref()
-                                && err.is_memory_error()
-                            {
-                                return Err(NxvError::Worker(format!(
-                                    "Memory-limited extraction failed for {}: {}",
-                                    system, err
-                                )));
-                            }
+                            *result = single_pool.extract_batched(
+                                system,
+                                worktree_path,
+                                &target_list,
+                                base_extract_store_paths,
+                                false,
+                            );
                         }
 
-                        paired
+                        if let Err(err) = result.as_ref()
+                            && err.is_memory_error()
+                        {
+                            return Err(NxvError::Worker(format!(
+                                "Memory-limited extraction failed for {}: {}",
+                                system, err
+                            )));
+                        }
                     }
+
+                    paired
                 } else {
                     // Sequential extraction (fallback)
                     systems
@@ -2621,7 +2638,7 @@ fn extract_attr_from_path(path: &str) -> Option<String> {
 /// Maximum number of lines in a diff before we fall back to full extraction.
 /// Large diffs typically indicate bulk updates where parsing individual attributes
 /// is less efficient than extracting everything.
-const DIFF_FALLBACK_THRESHOLD: usize = 100;
+const DIFF_FALLBACK_THRESHOLD: usize = 2000;
 
 /// Parse a git diff and extract affected attribute names.
 ///
@@ -2682,6 +2699,14 @@ fn extract_attrs_from_diff(diff: &str) -> Option<Vec<String>> {
             line_count,
             attrs_found = attrs.len(),
             "Large diff detected, suggesting fallback to full extraction"
+        );
+        return None;
+    }
+
+    if line_count > 0 && attrs.is_empty() {
+        tracing::debug!(
+            line_count,
+            "No attrs extracted from diff, suggesting fallback to full extraction"
         );
         return None;
     }
@@ -2878,27 +2903,38 @@ fn build_file_attr_map(
     systems: &[String],
     worker_pool: Option<&worker::WorkerPool>,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let system = systems
-        .first()
-        .ok_or_else(|| NxvError::NixEval("No systems configured".to_string()))?;
-
-    // Use worker pool if available to avoid memory accumulation in parent process
-    let positions = if let Some(pool) = worker_pool {
-        pool.extract_positions(system, repo_path)?
-    } else {
-        extractor::extract_attr_positions(repo_path, system)?
-    };
-
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
-    for position in positions {
-        if let Some(file) = position.file
-            && let Some(relative) = normalize_position_file(repo_path, &file)
-        {
-            // Include all files in the map, including infrastructure files.
-            // Infrastructure files are handled specially during incremental indexing
-            // (via diff parsing), but we need them in the map for full extraction.
-            map.entry(relative).or_default().push(position.attr_path);
+    if systems.is_empty() {
+        return Err(NxvError::NixEval("No systems configured".to_string()));
+    }
+
+    let positions_by_system = if let Some(pool) = worker_pool {
+        pool.extract_positions_parallel(repo_path, systems)
+    } else {
+        systems
+            .iter()
+            .map(|system| extractor::extract_attr_positions(repo_path, system))
+            .collect()
+    };
+
+    for (system, positions_result) in systems.iter().zip(positions_by_system) {
+        let positions = positions_result.map_err(|e| {
+            NxvError::NixEval(format!(
+                "Failed to extract attr positions for {}: {}",
+                system, e
+            ))
+        })?;
+
+        for position in positions {
+            if let Some(file) = position.file
+                && let Some(relative) = normalize_position_file(repo_path, &file)
+            {
+                // Include all files in the map, including infrastructure files.
+                // Infrastructure files are handled specially during incremental indexing
+                // (via diff parsing), but we need them in the map for full extraction.
+                map.entry(relative).or_default().push(position.attr_path);
+            }
         }
     }
 
@@ -2977,6 +3013,20 @@ fn update_file_attr_map_from_aggregates(
     }
 }
 
+fn find_attrs_for_path_prefix<'a>(
+    path: &str,
+    file_attr_map: &'a HashMap<String, Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    let mut current = path;
+    while let Some(idx) = current.rfind('/') {
+        current = &current[..idx];
+        if let Some(attrs) = file_attr_map.get(current) {
+            return Some(attrs);
+        }
+    }
+    None
+}
+
 fn add_targets_from_changed_paths(
     changed_paths: &[String],
     file_attr_map: &HashMap<String, Vec<String>>,
@@ -2985,6 +3035,13 @@ fn add_targets_from_changed_paths(
 ) {
     for path in changed_paths {
         if let Some(attr_paths) = file_attr_map.get(path) {
+            for attr in attr_paths {
+                target_attr_paths.insert(attr.clone());
+            }
+            continue;
+        }
+
+        if let Some(attr_paths) = find_attrs_for_path_prefix(path, file_attr_map) {
             for attr in attr_paths {
                 target_attr_paths.insert(attr.clone());
             }
@@ -3283,6 +3340,7 @@ fn process_range_worker(
     db: Arc<std::sync::Mutex<Database>>,
     range: YearRange,
     config: &IndexerConfig,
+    worker_count: usize,
     per_worker_memory_mib: usize,
     shutdown: Arc<AtomicBool>,
     full_extraction_limiter: &FullExtractionLimiter,
@@ -3387,7 +3445,6 @@ fn process_range_worker(
 
     // Determine if we should use parallel evaluation for systems
     let systems = &config.systems;
-    let worker_count = config.worker_count.unwrap_or(systems.len());
     let pool_mode = worker_pool_mode(worker_count, systems.len());
 
     // Acquire startup barrier to stagger heavy initialization work.
@@ -3715,7 +3772,7 @@ fn process_range_worker(
         // Check memory pressure before heavy extractions.
         // If the system is critically low on memory, wait for pressure to subside.
         // This provides backpressure to prevent OOM kills during large extractions.
-        if needs_full_extraction || target_attrs.len() > 1000 {
+        if needs_full_extraction || target_attrs.len() > LARGE_EXTRACTION_THRESHOLD {
             let pressure = memory_pressure::get_memory_pressure();
             if pressure.is_critical() {
                 tracing::info!(
@@ -3753,48 +3810,19 @@ fn process_range_worker(
         let can_extract_store_paths = is_after_store_path_cutoff(commit.date);
         let base_extract_store_paths = can_extract_store_paths && store_paths.is_empty();
 
-        // For large target lists (full extraction), use sequential processing
-        // to avoid multiplying baseline memory across workers.
-        // Each Nix worker loads ~6-8GB just for nixpkgs baseline.
-        const SEQUENTIAL_THRESHOLD: usize = 1000;
-        let use_sequential = target_attrs.len() >= SEQUENTIAL_THRESHOLD;
-
         let extraction_results: Vec<(
             String,
             std::result::Result<Vec<extractor::PackageInfo>, NxvError>,
         )> = if let Some(ref pool) = worker_pool {
-            if use_sequential {
-                // Large extraction: process systems ONE AT A TIME with parent-level batching.
-                // This ensures workers can restart between batches to release memory.
-                tracing::debug!(
-                    targets = target_attrs.len(),
-                    range = %range.label,
-                    "Using sequential batched extraction for large target list"
-                );
-                systems
-                    .iter()
-                    .map(|system| {
-                        let result = pool.extract_batched(
-                            system,
-                            worktree_path,
-                            &target_attrs,
-                            base_extract_store_paths,
-                            false,
-                        );
-                        (system.clone(), result)
-                    })
-                    .collect()
-            } else {
-                // Small extraction: parallel is fine
-                let results = pool.extract_parallel(
-                    worktree_path,
-                    systems,
-                    &target_attrs,
-                    base_extract_store_paths,
-                    false,
-                );
-                systems.iter().cloned().zip(results).collect()
-            }
+            let results = pool.extract_parallel_batched(
+                worktree_path,
+                systems,
+                &target_attrs,
+                base_extract_store_paths,
+                false,
+            );
+
+            systems.iter().cloned().zip(results).collect()
         } else {
             systems
                 .iter()
@@ -4192,11 +4220,30 @@ mod tests {
     }
 
     #[test]
+    fn test_default_worker_count_respects_limits() {
+        let systems_len = 4;
+        let memory_budget = MemorySize::from_gib(8);
+        let cpu_total = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1);
+        let count = default_worker_count(memory_budget, systems_len, 1);
+        let max_by_mem = (memory_budget.as_mib() / MIN_BASE_WORKER_MIB).max(1) as usize;
+
+        assert!(count >= 1);
+        assert!(count <= systems_len.saturating_mul(2));
+        assert!(count <= cpu_total);
+        assert!(count <= max_by_mem);
+    }
+
+    #[test]
     fn test_is_memory_error() {
         let err = NxvError::Worker("Worker died (out of memory)".to_string());
         assert!(err.is_memory_error());
 
         let err = NxvError::Worker("Worker failed: exceeded memory limit".to_string());
+        assert!(err.is_memory_error());
+
+        let err = NxvError::NixEval("out of memory while evaluating".to_string());
         assert!(err.is_memory_error());
 
         let err = NxvError::Worker("Worker failed: evaluation error".to_string());
@@ -4217,6 +4264,40 @@ mod tests {
             range_label_for_dates(Some("2017-01-01"), None),
             "custom-2017-01-01-max"
         );
+    }
+
+    #[test]
+    fn test_year_range_intersect_dates_full_overlap() {
+        let range = YearRange::new(2020, 2021);
+        let intersect = range
+            .intersect_dates(Some("2020-01-01"), Some("2021-01-01"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(intersect.since, "2020-01-01");
+        assert_eq!(intersect.until, "2021-01-01");
+        assert_eq!(intersect.label, "2020");
+    }
+
+    #[test]
+    fn test_year_range_intersect_dates_partial() {
+        let range = YearRange::new(2020, 2021);
+        let intersect = range
+            .intersect_dates(Some("2020-06-01"), Some("2021-01-01"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(intersect.since, "2020-06-01");
+        assert_eq!(intersect.until, "2021-01-01");
+        assert!(intersect.label.contains("2020-06-01"));
+        assert!(intersect.label.contains("2021-01-01"));
+    }
+
+    #[test]
+    fn test_year_range_intersect_dates_none() {
+        let range = YearRange::new(2020, 2021);
+        let intersect = range
+            .intersect_dates(Some("2021-02-01"), Some("2021-03-01"))
+            .unwrap();
+        assert!(intersect.is_none());
     }
 
     /// Creates a temporary git repository resembling a minimal nixpkgs checkout.
@@ -4489,6 +4570,31 @@ mod tests {
             extract_attr_from_path("pkgs/servers/nginx.nix"),
             Some("nginx".to_string())
         );
+    }
+
+    #[test]
+    fn test_add_targets_from_changed_paths_uses_prefix_map() {
+        let mut file_attr_map: HashMap<String, Vec<String>> = HashMap::new();
+        file_attr_map.insert(
+            "pkgs/applications/networking/browsers/firefox".to_string(),
+            vec!["firefox".to_string(), "firefox-esr".to_string()],
+        );
+
+        let changed_paths =
+            vec!["pkgs/applications/networking/browsers/firefox/packages.nix".to_string()];
+        let mut target_attr_paths: HashSet<String> = HashSet::new();
+        let mut unknown_paths: Vec<String> = Vec::new();
+
+        add_targets_from_changed_paths(
+            &changed_paths,
+            &file_attr_map,
+            &mut target_attr_paths,
+            &mut unknown_paths,
+        );
+
+        assert!(unknown_paths.is_empty());
+        assert!(target_attr_paths.contains("firefox"));
+        assert!(target_attr_paths.contains("firefox-esr"));
     }
 
     #[test]
@@ -4954,12 +5060,22 @@ index abc123..def456 100644
     fn test_extract_attrs_from_diff_large_triggers_fallback() {
         // Create a diff with more than DIFF_FALLBACK_THRESHOLD lines
         let mut diff = String::from("diff --git a/test b/test\n--- a/test\n+++ b/test\n");
-        for i in 0..150 {
+        for i in 0..(DIFF_FALLBACK_THRESHOLD + 1) {
             diff.push_str(&format!("+  pkg{} = callPackage {{ }};\n", i));
         }
 
         // Should return None to trigger fallback
         assert!(extract_attrs_from_diff(&diff).is_none());
+    }
+
+    #[test]
+    fn test_extract_attrs_from_diff_empty_triggers_fallback() {
+        let diff = r#"diff --git a/pkgs/top-level/all-packages.nix b/pkgs/top-level/all-packages.nix
+@@ -1,2 +1,2 @@
++  self = import ./pkgs;
+"#;
+
+        assert!(extract_attrs_from_diff(diff).is_none());
     }
 
     #[test]

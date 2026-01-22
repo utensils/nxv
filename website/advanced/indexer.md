@@ -100,13 +100,13 @@ Parallel year-range indexing is configured via `indexer.json` (or
 To auto-partition by count, set `parallel_ranges` to a number (e.g., `"4"`).
 
 ::: warning Range Overrides
-If you pass `--since` or `--until`, any `parallel_ranges` config is ignored to
-avoid silently overriding your requested range.
+If you pass `--since` or `--until`, `parallel_ranges` are intersected with the
+requested window; any ranges outside the bounds are dropped.
 :::
 
 ::: tip Memory Allocation
-Memory is divided evenly among all workers (systems × concurrent ranges).
-With 32 GiB, 4 systems, and 4 parallel ranges, each worker gets 32G / 16 = 2 GiB.
+Memory is divided evenly among all workers (workers × concurrent ranges).
+With 32 GiB, 4 workers, and 4 parallel ranges, each worker gets 32G / 16 = 2 GiB.
 Limit concurrency via `max_range_workers` in `indexer.json` if needed.
 :::
 
@@ -152,8 +152,8 @@ nxv index --nixpkgs-path ./nixpkgs --max-memory 32G
 
 ### Memory Budget Allocation
 
-Memory is divided among workers (systems × concurrent ranges). With 4 systems
-(default) and 1 range:
+Memory is divided among workers (workers × concurrent ranges). With 4 systems
+(default) and 1 range, this assumes 4 workers:
 
 | Total Budget | Workers | Per Worker |
 | ------------ | ------- | ---------- |
@@ -161,9 +161,12 @@ Memory is divided among workers (systems × concurrent ranges). With 4 systems
 | 16 GiB       | 4       | 4 GiB      |
 | 32 GiB       | 4       | 8 GiB      |
 
-With parallel ranges, memory is divided among all workers (systems × ranges).
+The default worker count auto-scales based on memory/CPU (up to ~2x systems).
+On larger budgets (for example 64 GiB) you may see 8 workers for the 4-system default.
+
+With parallel ranges, memory is divided among all workers (workers × ranges).
 Plan your memory budget accordingly - with many parallel ranges, per-worker
-memory decreases. For example, 32G with 4 systems × 8 ranges = 32 workers = 1 GiB each.
+memory decreases. For example, 32G with 8 workers × 4 ranges = 32 workers = 1 GiB each.
 
 The minimum per-worker allocation is 512 MiB (hard limit). Indexing will fail if
 the budget can't meet this threshold.

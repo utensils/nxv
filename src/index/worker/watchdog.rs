@@ -57,21 +57,21 @@ pub fn get_system_memory_mib() -> u64 {
 }
 
 /// Calculate dynamic critical threshold based on system memory.
-/// Returns max(1 GiB, 5% of MemTotal).
+/// Returns max(1 GiB, 2% of MemTotal).
 pub fn get_critical_threshold_mib() -> u64 {
     let total = get_system_memory_mib();
-    let five_percent = total / 20;
-    five_percent.max(1024) // At least 1 GiB
+    let two_percent = total / 50;
+    two_percent.max(1024) // At least 1 GiB
 }
 
 /// Calculate dynamic high-pressure threshold based on system memory.
-/// Returns max(2 GiB, 10% of MemTotal).
+/// Returns max(2 GiB, 5% of MemTotal).
 /// Used for adaptive batch sizing when under moderate pressure.
 #[allow(dead_code)]
 pub fn get_high_threshold_mib() -> u64 {
     let total = get_system_memory_mib();
-    let ten_percent = total / 10;
-    ten_percent.max(2048) // At least 2 GiB
+    let five_percent = total / 20;
+    five_percent.max(2048) // At least 2 GiB
 }
 
 fn effective_worker_limit_mib(limit_mib: usize) -> u64 {

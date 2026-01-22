@@ -1104,6 +1104,60 @@ fn validate_date_range(since: Option<&str>, until: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "indexer")]
+fn parse_naive_date(date: &str) -> Result<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| {
+        anyhow::anyhow!(
+            "--since/--until must be in YYYY-MM-DD format, got: {}",
+            date
+        )
+    })
+}
+
+#[cfg(feature = "indexer")]
+fn year_bounds_for_ranges(
+    since: Option<&str>,
+    until: Option<&str>,
+    default_min: u16,
+    default_max: u16,
+) -> Result<(u16, u16)> {
+    use chrono::Datelike;
+
+    let min_year = if let Some(since) = since {
+        parse_naive_date(since)?.year() as u16
+    } else {
+        default_min
+    };
+
+    let max_year = if let Some(until) = until {
+        let until_date = parse_naive_date(until)?;
+        if until_date.month() == 1 && until_date.day() == 1 {
+            until_date.year() as u16
+        } else {
+            (until_date.year() as u16).saturating_add(1)
+        }
+    } else {
+        default_max
+    };
+
+    Ok((min_year, max_year.max(min_year + 1)))
+}
+
+#[cfg(feature = "indexer")]
+fn intersect_ranges_with_dates(
+    ranges: Vec<crate::index::YearRange>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<crate::index::YearRange>> {
+    let mut filtered = Vec::new();
+    for range in ranges {
+        if let Some(intersected) = range.intersect_dates(since, until)? {
+            filtered.push(intersected);
+        }
+    }
+    Ok(filtered)
+}
+
 /// Run the indexer against a nixpkgs repository and update the local index database.
 ///
 /// This performs either a full rebuild or an incremental index (depending on `args.full`),
@@ -1208,13 +1262,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     // Check for parallel ranges mode
-    let mut ranges_spec = overrides.parallel_ranges.as_deref();
-    if ranges_spec.is_some() && (args.since.is_some() || args.until.is_some()) {
-        eprintln!(
-            "Note: ignoring parallel_ranges from indexer config because --since/--until was provided."
-        );
-        ranges_spec = None;
-    }
+    let ranges_spec = overrides.parallel_ranges.as_deref();
     let max_range_workers = overrides.max_range_workers.unwrap_or(4);
 
     let result = if let Some(ranges_spec) = ranges_spec {
@@ -1222,7 +1270,24 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         // Default year range: 2017 to current year + 1
         use chrono::Datelike;
         let current_year = chrono::Utc::now().year() as u16;
-        let ranges = YearRange::parse_ranges(ranges_spec, 2017, current_year + 1)?;
+        let (min_year, max_year) = year_bounds_for_ranges(
+            args.since.as_deref(),
+            args.until.as_deref(),
+            2017,
+            current_year + 1,
+        )?;
+        let ranges = YearRange::parse_ranges(ranges_spec, min_year, max_year)?;
+        let ranges = if args.since.is_some() || args.until.is_some() {
+            intersect_ranges_with_dates(ranges, args.since.as_deref(), args.until.as_deref())?
+        } else {
+            ranges
+        };
+
+        if ranges.is_empty() {
+            return Err(anyhow::anyhow!(
+                "parallel_ranges did not overlap the requested --since/--until window"
+            ));
+        }
 
         let effective_max_workers = max_range_workers.min(ranges.len());
 
