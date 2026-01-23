@@ -1,5 +1,6 @@
 # Rust
 /target/
+/tmp/
 
 # Nix build output
 /result
