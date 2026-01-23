@@ -1446,9 +1446,10 @@ impl WorkerPool {
 fn single_worker_config(config: &WorkerPoolConfig, label_suffix: &str) -> WorkerPoolConfig {
     let mut single = config.clone();
     single.worker_count = 1;
-    single.per_worker_memory_mib = config
-        .per_worker_memory_mib
-        .saturating_mul(config.worker_count);
+    single.per_worker_memory_mib = config.per_worker_memory_mib;
+    if let Some(base) = config.eval_store_path.as_deref() {
+        single.eval_store_path = Some(format!("{}-{}", base, label_suffix));
+    }
     let label = single
         .label
         .as_deref()
@@ -1568,7 +1569,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_worker_config_uses_total_budget() {
+    fn test_single_worker_config_preserves_per_worker_budget() {
         let config = WorkerPoolConfig {
             worker_count: 4,
             per_worker_memory_mib: 2048,
@@ -1579,9 +1580,9 @@ mod tests {
 
         let single = single_worker_config(&config, "single");
         assert_eq!(single.worker_count, 1);
-        assert_eq!(single.per_worker_memory_mib, 8192);
+        assert_eq!(single.per_worker_memory_mib, 2048);
         assert_eq!(single.timeout, config.timeout);
-        assert_eq!(single.eval_store_path, config.eval_store_path);
+        assert_eq!(single.eval_store_path.as_deref(), Some("path-single"));
         assert_eq!(single.label.as_deref(), Some("range-2017-single"));
     }
 
