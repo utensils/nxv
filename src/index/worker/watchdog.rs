@@ -6,9 +6,9 @@
 //! Unlike RLIMIT_AS (which limits virtual address space), this monitors actual
 //! physical memory usage and can terminate runaway evaluations mid-execution.
 
+use crate::index::memory_pressure;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use crate::index::memory_pressure;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
