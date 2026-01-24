@@ -75,9 +75,40 @@ const LARGE_EXTRACTION_THRESHOLD: usize = 1000;
 const MIN_BASE_WORKER_MIB: u64 = 2048;
 const SCALE_UP_MIN_WORKER_MIB: u64 = 8192;
 
+/// Minimum available memory (MiB) before starting a large extraction.
+const EXTRACTION_WAIT_MIN_MIB: u64 = 2 * 1024; // 2 GiB
+
+/// Timeout for waiting on memory before starting an extraction.
+const EXTRACTION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Timeout for waiting for memory before starting a batch.
 /// If memory doesn't become available, we proceed anyway (with warning).
 const MEMORY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryPressureAction {
+    None,
+    Warn,
+    Wait,
+}
+
+fn memory_pressure_action(
+    pressure: &memory_pressure::MemoryPressure,
+    needs_full_extraction: bool,
+    target_len: usize,
+) -> MemoryPressureAction {
+    if !needs_full_extraction && target_len <= LARGE_EXTRACTION_THRESHOLD {
+        return MemoryPressureAction::None;
+    }
+
+    if pressure.is_critical() {
+        MemoryPressureAction::Wait
+    } else if pressure.is_high() {
+        MemoryPressureAction::Warn
+    } else {
+        MemoryPressureAction::None
+    }
+}
 
 /// Calculate per-worker memory from total budget.
 ///
@@ -2108,6 +2139,32 @@ impl Indexer {
             // Extract packages for all systems
             let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
 
+            let pressure = memory_pressure::get_memory_pressure();
+            match memory_pressure_action(&pressure, needs_full_extraction, target_list.len()) {
+                MemoryPressureAction::Wait => {
+                    info!(
+                        target: "nxv::index",
+                        commit = %commit.short_hash,
+                        available_mib = pressure.available_mib,
+                        psi_full = ?pressure.psi_full,
+                        target_attrs = target_list.len(),
+                        "Critical memory pressure, waiting before extraction"
+                    );
+                    memory_pressure::wait_for_memory(
+                        EXTRACTION_WAIT_MIN_MIB,
+                        EXTRACTION_WAIT_TIMEOUT,
+                    );
+                }
+                MemoryPressureAction::Warn => {
+                    debug!(
+                        commit = %commit.short_hash,
+                        available_mib = pressure.available_mib,
+                        "Memory pressure elevated, extraction may be slow"
+                    );
+                }
+                MemoryPressureAction::None => {}
+            }
+
             let can_extract_store_paths = is_after_store_path_cutoff(commit.date);
             let base_extract_store_paths = can_extract_store_paths && store_paths.is_empty();
 
@@ -3798,12 +3855,9 @@ fn process_range_worker(
         // Extract packages for all systems
         let extract_start = std::time::Instant::now();
 
-        // Check memory pressure before heavy extractions.
-        // If the system is critically low on memory, wait for pressure to subside.
-        // This provides backpressure to prevent OOM kills during large extractions.
-        if needs_full_extraction || target_attrs.len() > LARGE_EXTRACTION_THRESHOLD {
-            let pressure = memory_pressure::get_memory_pressure();
-            if pressure.is_critical() {
+        let pressure = memory_pressure::get_memory_pressure();
+        match memory_pressure_action(&pressure, needs_full_extraction, target_attrs.len()) {
+            MemoryPressureAction::Wait => {
                 tracing::info!(
                     range = %range.label,
                     available_mib = pressure.available_mib,
@@ -3811,15 +3865,16 @@ fn process_range_worker(
                     target_attrs = target_attrs.len(),
                     "Critical memory pressure, waiting before extraction"
                 );
-                // Wait up to 30 seconds for memory to free up
-                memory_pressure::wait_for_memory(2048, Duration::from_secs(30));
-            } else if pressure.is_high() {
+                memory_pressure::wait_for_memory(EXTRACTION_WAIT_MIN_MIB, EXTRACTION_WAIT_TIMEOUT);
+            }
+            MemoryPressureAction::Warn => {
                 tracing::debug!(
                     range = %range.label,
                     available_mib = pressure.available_mib,
                     "Memory pressure elevated, extraction may be slow"
                 );
             }
+            MemoryPressureAction::None => {}
         }
 
         // Acquire limiter permit for full extractions to prevent system thrash.
@@ -6007,6 +6062,45 @@ index abc123..def456 100644
 
         tracker.mark_from_package("x86_64-linux", &pkg);
         assert!(!tracker.needs_store_path("x86_64-linux", "hello", "1.0"));
+    }
+
+    #[test]
+    fn test_memory_pressure_action() {
+        let normal = memory_pressure::MemoryPressure {
+            available_mib: 10_000,
+            under_pressure: false,
+            psi_some: None,
+            psi_full: None,
+        };
+        let high = memory_pressure::MemoryPressure {
+            available_mib: 1500,
+            under_pressure: true,
+            psi_some: Some(30.0),
+            psi_full: None,
+        };
+        let critical = memory_pressure::MemoryPressure {
+            available_mib: 900,
+            under_pressure: true,
+            psi_some: Some(30.0),
+            psi_full: Some(60.0),
+        };
+
+        assert_eq!(
+            memory_pressure_action(&normal, false, 10),
+            MemoryPressureAction::None
+        );
+        assert_eq!(
+            memory_pressure_action(&high, false, LARGE_EXTRACTION_THRESHOLD + 1),
+            MemoryPressureAction::Warn
+        );
+        assert_eq!(
+            memory_pressure_action(&critical, true, 10),
+            MemoryPressureAction::Wait
+        );
+        assert_eq!(
+            memory_pressure_action(&critical, false, 10),
+            MemoryPressureAction::None
+        );
     }
 
     #[test]

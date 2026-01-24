@@ -8,6 +8,7 @@
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use crate::index::memory_pressure;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +22,9 @@ const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Grace period before killing a worker that exceeds its limit.
 /// Allows brief spikes without immediate termination.
 const GRACE_PERIOD_MS: u64 = 500;
+
+/// PSI "full" threshold for critical memory pressure.
+const PSI_FULL_CRITICAL_THRESHOLD: f64 = 50.0;
 
 /// Global flag indicating the system is under critical memory pressure.
 /// When set, worker pools should pause new work.
@@ -246,8 +250,7 @@ fn check_system_pressure() {
     let pressure = memory_pressure::get_memory_pressure();
     let critical_threshold = get_critical_threshold_mib();
 
-    let is_critical =
-        pressure.available_mib < critical_threshold || pressure.psi_full.is_some_and(|p| p > 10.0);
+    let is_critical = is_system_memory_critical(&pressure, critical_threshold);
 
     let was_critical = MEMORY_CRITICAL.swap(is_critical, Ordering::Relaxed);
 
@@ -264,6 +267,16 @@ fn check_system_pressure() {
             "System memory pressure recovered"
         );
     }
+}
+
+fn is_system_memory_critical(
+    pressure: &memory_pressure::MemoryPressure,
+    critical_threshold: u64,
+) -> bool {
+    pressure.available_mib < critical_threshold
+        || pressure
+            .psi_full
+            .is_some_and(|p| p > PSI_FULL_CRITICAL_THRESHOLD)
 }
 
 /// Handle a worker that's over its memory limit.
@@ -356,6 +369,7 @@ fn read_process_rss_mib(_pid: u32) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::memory_pressure;
 
     #[test]
     fn test_get_system_memory() {
@@ -390,6 +404,33 @@ mod tests {
 
         let small_limit = effective_worker_limit_mib(100);
         assert!(small_limit >= 228); // 100 + min slack (128)
+    }
+
+    #[test]
+    fn test_system_memory_critical_thresholds() {
+        let threshold = 1280;
+        let ok = memory_pressure::MemoryPressure {
+            available_mib: 10_000,
+            under_pressure: false,
+            psi_some: None,
+            psi_full: Some(10.0),
+        };
+        let by_available = memory_pressure::MemoryPressure {
+            available_mib: 500,
+            under_pressure: true,
+            psi_some: None,
+            psi_full: None,
+        };
+        let by_psi = memory_pressure::MemoryPressure {
+            available_mib: 10_000,
+            under_pressure: false,
+            psi_some: None,
+            psi_full: Some(60.0),
+        };
+
+        assert!(!is_system_memory_critical(&ok, threshold));
+        assert!(is_system_memory_critical(&by_available, threshold));
+        assert!(is_system_memory_critical(&by_psi, threshold));
     }
 
     #[test]
