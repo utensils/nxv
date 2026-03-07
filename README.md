@@ -7,6 +7,7 @@
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
 [![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/utensils/nxv/badge)](https://flakehub.com/flake/utensils/nxv)
 [![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
+[![Docs](https://img.shields.io/badge/docs-utensils.io%2Fnxv-blue)](https://utensils.io/nxv/)
 
 **Find any version of any Nix package, instantly.**
 
