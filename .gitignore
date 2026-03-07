@@ -32,6 +32,13 @@ Thumbs.db
 *.key
 keys/nxv.key
 
+# Website
+website/node_modules/
+website/.vitepress/cache/
+website/.vitepress/dist/
+website/bun.lock
+website/server/
+
 # Added by cargo
 
 /target
