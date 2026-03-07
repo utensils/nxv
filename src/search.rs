@@ -211,7 +211,7 @@ pub fn filter_by_license(
 pub fn sort_results(results: &mut [PackageVersion], order: SortOrder, reverse: bool) {
     match order {
         SortOrder::Date => {
-            results.sort_by(|a, b| b.last_commit_date.cmp(&a.last_commit_date));
+            results.sort_by_key(|r| std::cmp::Reverse(r.last_commit_date));
         }
         SortOrder::Version => {
             results.sort_by(|a, b| {
@@ -228,7 +228,7 @@ pub fn sort_results(results: &mut [PackageVersion], order: SortOrder, reverse: b
             });
         }
         SortOrder::Name => {
-            results.sort_by(|a, b| a.name.cmp(&b.name));
+            results.sort_by_key(|r| r.name.clone());
         }
     }
 
