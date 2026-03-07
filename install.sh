@@ -2,7 +2,7 @@
 # nxv installer - installs the latest release of nxv
 #
 # Usage:
-#   curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
+#   curl -sSfL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 #
 # Options (via environment variables):
 #   NXV_INSTALL_DIR  - Installation directory (default: ~/.local/bin or /usr/local/bin)
@@ -11,7 +11,7 @@
 
 set -e
 
-REPO="jamesbrink/nxv"
+REPO="utensils/nxv"
 BINARY_NAME="nxv"
 
 # Colors (disabled if not a terminal)

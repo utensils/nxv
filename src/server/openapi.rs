@@ -12,7 +12,7 @@ use super::types::*;
         description = "API for querying Nix package version history. Find specific versions of packages across nixpkgs history.",
         version = "1.0.0",
         license(name = "MIT", url = "https://opensource.org/licenses/MIT"),
-        contact(name = "nxv", url = "https://github.com/jamesbrink/nxv")
+        contact(name = "nxv", url = "https://github.com/utensils/nxv")
     ),
     servers(
         (url = "/", description = "Local server")

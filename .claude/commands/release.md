@@ -81,7 +81,7 @@ CI/CD will then:
   - Build static binaries (Linux x86_64/aarch64, macOS x86_64/ARM64)
   - Create GitHub Release with binaries and checksums
   - Publish to crates.io
-  - Push Docker image to ghcr.io/jamesbrink/nxv (timestamp derived from commit)
+  - Push Docker image to ghcr.io/utensils/nxv (timestamp derived from commit)
   - Publish to FlakeHub
 
 Proceed? Enter version number to confirm, or "abort" to cancel.
@@ -160,7 +160,7 @@ git push origin vA.B.C
 Provide link to [GitHub Actions][actions] and remind user to monitor the
 release workflow.
 
-[actions]: https://github.com/jamesbrink/nxv/actions
+[actions]: https://github.com/utensils/nxv/actions
 
 ## Important Notes
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Default manifest URL.
 pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json";
+    "https://github.com/utensils/nxv/releases/download/index-latest/manifest.json";
 
 /// Check if a manifest's index is compatible with this client.
 ///

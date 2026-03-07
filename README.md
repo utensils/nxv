@@ -1,11 +1,11 @@
 # nxv — Nix Version Index
 
-[![CI](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesbrink/nxv/actions/workflows/ci.yml)
+[![CI](https://github.com/utensils/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/utensils/nxv/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/nxv.svg)](https://crates.io/crates/nxv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
-[![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/jamesbrink/nxv/badge)](https://flakehub.com/flake/jamesbrink/nxv)
+[![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/utensils/nxv/badge)](https://flakehub.com/flake/utensils/nxv)
 [![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
 
 **Find any version of any Nix package, instantly.**
@@ -27,10 +27,10 @@ No installation required — query the live API directly:
 
 ```bash
 # Search for Node.js 15.x
-NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search nodejs 15
+NXV_API_URL=https://nxv.urandom.io nix run github:utensils/nxv -- search nodejs 15
 
 # Find Python 2.7
-NXV_API_URL=https://nxv.urandom.io nix run github:jamesbrink/nxv -- search python 2.7
+NXV_API_URL=https://nxv.urandom.io nix run github:utensils/nxv -- search python 2.7
 ```
 
 Or visit **<https://nxv.urandom.io>** to search in your browser.
@@ -67,7 +67,7 @@ Users download a pre-built compressed index (~100MB) and query it locally or via
 ### Quick Install
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/jamesbrink/nxv/main/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 ```
 
 This installs a pre-built binary to `~/.local/bin`. For extra safety, download and review the script first. Set `NXV_VERIFY=1` to enforce checksum verification against GitHub Releases.
@@ -82,17 +82,17 @@ cargo install nxv
 
 ```bash
 # Run directly
-nix run github:jamesbrink/nxv -- search python
+nix run github:utensils/nxv -- search python
 
 # Install to profile
-nix profile install github:jamesbrink/nxv
+nix profile install github:utensils/nxv
 ```
 
 Or add to your flake:
 
 ```nix
 {
-  inputs.nxv.url = "github:jamesbrink/nxv";
+  inputs.nxv.url = "github:utensils/nxv";
 
   outputs = { nixpkgs, nxv, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
@@ -107,7 +107,7 @@ Or add to your flake:
 
 ### Pre-built Binaries
 
-Download from [GitHub Releases](https://github.com/jamesbrink/nxv/releases):
+Download from [GitHub Releases](https://github.com/utensils/nxv/releases):
 
 | Platform | Binary |
 | -------- | ------ |
@@ -195,7 +195,7 @@ Run the API server as a systemd service with automatic updates:
 
 ```nix
 {
-  inputs.nxv.url = "github:jamesbrink/nxv";
+  inputs.nxv.url = "github:utensils/nxv";
 
   outputs = { nixpkgs, nxv, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
@@ -244,18 +244,18 @@ Run nxv as a container using the official image from GitHub Container Registry:
 
 ```bash
 # Run the API server (default command)
-docker run -p 8080:8080 ghcr.io/jamesbrink/nxv:latest
+docker run -p 8080:8080 ghcr.io/utensils/nxv:latest
 
 # With persistent index storage
-docker run -p 8080:8080 -v nxv-data:/root/.local/share/nxv ghcr.io/jamesbrink/nxv:latest
+docker run -p 8080:8080 -v nxv-data:/root/.local/share/nxv ghcr.io/utensils/nxv:latest
 
 # Run other commands
-docker run ghcr.io/jamesbrink/nxv:latest search python
-docker run ghcr.io/jamesbrink/nxv:latest --help
+docker run ghcr.io/utensils/nxv:latest search python
+docker run ghcr.io/utensils/nxv:latest --help
 
 # Build an index (requires nixpkgs mount)
 docker run -v ./nixpkgs:/nixpkgs -v nxv-data:/root/.local/share/nxv \
-  ghcr.io/jamesbrink/nxv:latest index --nixpkgs-path /nixpkgs
+  ghcr.io/utensils/nxv:latest index --nixpkgs-path /nixpkgs
 ```
 
 **Tags:**

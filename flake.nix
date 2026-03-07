@@ -96,7 +96,7 @@
 
           meta = {
             description = "Nix Version Index";
-            homepage = "https://github.com/jamesbrink/nxv";
+            homepage = "https://github.com/utensils/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
             mainProgram = "nxv";
@@ -122,7 +122,7 @@
 
           meta = {
             description = "Nix Version Index (with indexer feature)";
-            homepage = "https://github.com/jamesbrink/nxv";
+            homepage = "https://github.com/utensils/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
             mainProgram = "nxv";
@@ -201,7 +201,7 @@
 
           meta = {
             description = "Nix Version Index (static musl binary)";
-            homepage = "https://github.com/jamesbrink/nxv";
+            homepage = "https://github.com/utensils/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
             mainProgram = "nxv";
@@ -276,7 +276,7 @@
 
           meta = {
             description = "Nix Version Index (static aarch64 musl binary)";
-            homepage = "https://github.com/jamesbrink/nxv";
+            homepage = "https://github.com/utensils/nxv";
             license = pkgs.lib.licenses.mit;
             maintainers = [ ];
             mainProgram = "nxv";
@@ -313,7 +313,7 @@
             Labels = {
               "org.opencontainers.image.title" = "nxv";
               "org.opencontainers.image.description" = "Nix Version Index - search nixpkgs package history";
-              "org.opencontainers.image.source" = "https://github.com/jamesbrink/nxv";
+              "org.opencontainers.image.source" = "https://github.com/utensils/nxv";
               "org.opencontainers.image.version" = crateInfo.version;
             };
           };

@@ -3,7 +3,7 @@
 # Example usage in a NixOS configuration:
 #
 #   {
-#     inputs.nxv.url = "github:jamesbrink/nxv";
+#     inputs.nxv.url = "github:utensils/nxv";
 #
 #     outputs = { self, nixpkgs, nxv }: {
 #       nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {

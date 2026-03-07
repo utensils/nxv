@@ -146,12 +146,12 @@ A NixOS module is provided for running nxv as a systemd service:
 
 ### Publishing the Index
 
-The default manifest URL is `https://github.com/jamesbrink/nxv/releases/download/index-latest/manifest.json`.
+The default manifest URL is `https://github.com/utensils/nxv/releases/download/index-latest/manifest.json`.
 
 To publish manually with signing:
 
 ```bash
-nxv publish --url-prefix "https://github.com/jamesbrink/nxv/releases/download/index-latest" --secret-key keys/nxv.key
+nxv publish --url-prefix "https://github.com/utensils/nxv/releases/download/index-latest" --secret-key keys/nxv.key
 ```
 
 Or trigger the workflow:

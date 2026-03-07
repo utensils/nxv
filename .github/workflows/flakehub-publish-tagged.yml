@@ -24,6 +24,6 @@ jobs:
       - uses: "DeterminateSystems/flakehub-push@main"
         with:
           visibility: "public"
-          name: "jamesbrink/nxv"
+          name: "utensils/nxv"
           tag: "${{ inputs.tag }}"
           include-output-paths: true
