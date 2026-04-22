@@ -35,19 +35,33 @@
 # The module takes an optional flakePackages argument that is passed from
 # the flake. This is a function from system to package, allowing the module
 # to work without requiring the overlay.
-{ flakePackages ? null }:
+{
+  flakePackages ? null,
+}:
 
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   cfg = config.services.nxv;
-  inherit (lib) mkEnableOption mkOption mkIf types;
+  inherit (lib)
+    mkEnableOption
+    mkOption
+    mkIf
+    types
+    ;
 
   # Use the package from the flake if provided, otherwise fall back to pkgs.nxv
   defaultPkg =
-    if flakePackages != null && flakePackages ? ${pkgs.system}
-    then flakePackages.${pkgs.system}.nxv
-    else pkgs.nxv or (throw "nxv package not found. Either use the nxv overlay or set services.nxv.package.");
+    if flakePackages != null && flakePackages ? ${pkgs.system} then
+      flakePackages.${pkgs.system}.nxv
+    else
+      pkgs.nxv
+        or (throw "nxv package not found. Either use the nxv overlay or set services.nxv.package.");
 in
 {
   options.services.nxv = {
@@ -90,7 +104,10 @@ in
       origins = mkOption {
         type = types.nullOr (types.listOf types.str);
         default = null;
-        example = [ "https://example.com" "https://app.example.com" ];
+        example = [
+          "https://example.com"
+          "https://app.example.com"
+        ];
         description = ''
           Specific CORS origins to allow. If set, only these origins
           will be permitted. If null and cors.enable is true, all
@@ -176,7 +193,10 @@ in
       };
 
       format = mkOption {
-        type = types.enum [ "text" "json" ];
+        type = types.enum [
+          "text"
+          "json"
+        ];
         default = "text";
         description = ''
           Log output format.
@@ -259,74 +279,83 @@ in
         RUST_LOG = cfg.logging.level;
         NXV_MAX_DB_CONNECTIONS = toString cfg.database.maxConnections;
         NXV_DB_TIMEOUT_SECS = toString cfg.database.timeoutSeconds;
-      } // lib.optionalAttrs (cfg.logging.format == "json") {
+      }
+      // lib.optionalAttrs (cfg.logging.format == "json") {
         NXV_LOG_FORMAT = "json";
-      } // lib.optionalAttrs cfg.rateLimit.enable {
+      }
+      // lib.optionalAttrs cfg.rateLimit.enable {
         NXV_RATE_LIMIT = toString cfg.rateLimit.requestsPerSecond;
-      } // lib.optionalAttrs (cfg.rateLimit.enable && cfg.rateLimit.burst != null) {
+      }
+      // lib.optionalAttrs (cfg.rateLimit.enable && cfg.rateLimit.burst != null) {
         NXV_RATE_LIMIT_BURST = toString cfg.rateLimit.burst;
       };
 
-      serviceConfig = let
-        manifestArgs = lib.optionalString (cfg.manifestUrl != null)
-          "--manifest-url ${cfg.manifestUrl}";
-        publicKeyArgs = lib.optionalString (cfg.publicKey != null)
-          "--public-key ${toString cfg.publicKey}";
-        skipVerifyArgs = lib.optionalString cfg.skipVerify
-          "--skip-verify";
-        updateArgs = lib.concatStringsSep " " (lib.filter (s: s != "") [
-          manifestArgs publicKeyArgs skipVerifyArgs
-        ]);
-        corsArgs =
-          if cfg.cors.origins != null then
-            "--cors-origins ${lib.concatStringsSep "," cfg.cors.origins}"
-          else if cfg.cors.enable then
-            "--cors"
-          else
-            "";
-      in {
-        Type = "simple";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStartPre = pkgs.writeShellScript "nxv-bootstrap" ''
-          if [ ! -f "${cfg.dataDir}/index.db" ]; then
-            echo "Database not found, downloading index..."
-            ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}
-          fi
-        '';
-        ExecStart = ''
-          ${cfg.package}/bin/nxv \
-            --db-path ${cfg.dataDir}/index.db \
-            serve \
-            --host ${cfg.host} \
-            --port ${toString cfg.port} \
-            ${corsArgs}
-        '';
-        Restart = "on-failure";
-        RestartSec = "5s";
+      serviceConfig =
+        let
+          manifestArgs = lib.optionalString (cfg.manifestUrl != null) "--manifest-url ${cfg.manifestUrl}";
+          publicKeyArgs = lib.optionalString (cfg.publicKey != null) "--public-key ${toString cfg.publicKey}";
+          skipVerifyArgs = lib.optionalString cfg.skipVerify "--skip-verify";
+          updateArgs = lib.concatStringsSep " " (
+            lib.filter (s: s != "") [
+              manifestArgs
+              publicKeyArgs
+              skipVerifyArgs
+            ]
+          );
+          corsArgs =
+            if cfg.cors.origins != null then
+              "--cors-origins ${lib.concatStringsSep "," cfg.cors.origins}"
+            else if cfg.cors.enable then
+              "--cors"
+            else
+              "";
+        in
+        {
+          Type = "simple";
+          User = cfg.user;
+          Group = cfg.group;
+          ExecStartPre = pkgs.writeShellScript "nxv-bootstrap" ''
+            if [ ! -f "${cfg.dataDir}/index.db" ]; then
+              echo "Database not found, downloading index..."
+              ${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}
+            fi
+          '';
+          ExecStart = ''
+            ${cfg.package}/bin/nxv \
+              --db-path ${cfg.dataDir}/index.db \
+              serve \
+              --host ${cfg.host} \
+              --port ${toString cfg.port} \
+              ${corsArgs}
+          '';
+          Restart = "on-failure";
+          RestartSec = "5s";
 
-        # Resource limits
-        LimitNOFILE = 65536;  # Increase file descriptor limit for high concurrency
+          # Resource limits
+          LimitNOFILE = 65536; # Increase file descriptor limit for high concurrency
 
-        # Hardening options
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        MemoryDenyWriteExecute = true;
-        LockPersonality = true;
-        ReadWritePaths = [ cfg.dataDir ];
-        CapabilityBoundingSet = "";
-        SystemCallFilter = [ "@system-service" "~@privileged" ];
-        SystemCallArchitectures = "native";
-      };
+          # Hardening options
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          MemoryDenyWriteExecute = true;
+          LockPersonality = true;
+          ReadWritePaths = [ cfg.dataDir ];
+          CapabilityBoundingSet = "";
+          SystemCallFilter = [
+            "@system-service"
+            "~@privileged"
+          ];
+          SystemCallArchitectures = "native";
+        };
     };
 
     # Automatic update service and timer
@@ -335,30 +364,33 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
-      serviceConfig = let
-        manifestArgs = lib.optionalString (cfg.manifestUrl != null)
-          "--manifest-url ${cfg.manifestUrl}";
-        publicKeyArgs = lib.optionalString (cfg.publicKey != null)
-          "--public-key ${toString cfg.publicKey}";
-        skipVerifyArgs = lib.optionalString cfg.skipVerify
-          "--skip-verify";
-        updateArgs = lib.concatStringsSep " " (lib.filter (s: s != "") [
-          manifestArgs publicKeyArgs skipVerifyArgs
-        ]);
-      in {
-        Type = "oneshot";
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}";
+      serviceConfig =
+        let
+          manifestArgs = lib.optionalString (cfg.manifestUrl != null) "--manifest-url ${cfg.manifestUrl}";
+          publicKeyArgs = lib.optionalString (cfg.publicKey != null) "--public-key ${toString cfg.publicKey}";
+          skipVerifyArgs = lib.optionalString cfg.skipVerify "--skip-verify";
+          updateArgs = lib.concatStringsSep " " (
+            lib.filter (s: s != "") [
+              manifestArgs
+              publicKeyArgs
+              skipVerifyArgs
+            ]
+          );
+        in
+        {
+          Type = "oneshot";
+          User = cfg.user;
+          Group = cfg.group;
+          ExecStart = "${cfg.package}/bin/nxv --db-path ${cfg.dataDir}/index.db update ${updateArgs}";
 
-        # Hardening options
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ReadWritePaths = [ cfg.dataDir ];
-      };
+          # Hardening options
+          NoNewPrivileges = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ReadWritePaths = [ cfg.dataDir ];
+        };
     };
 
     systemd.timers.nxv-update = mkIf cfg.autoUpdate.enable {
