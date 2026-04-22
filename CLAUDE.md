@@ -107,6 +107,7 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
 - `NXV_PUBLIC_KEY` — override the embedded minisign public key
 - `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT` — `nxv serve` bind/host/rate-limit
+- `NXV_FRONTEND_DIR` — serve `index.html`/`app.js`/`favicon.svg` from this directory on every request instead of the embedded copy, and disable the 24h `Cache-Control` for those routes. Used by the devshell `dev` command for live frontend reload (edit → browser refresh, no rebuild). Unset in production.
 - `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
 
 ## Data Paths
@@ -127,6 +128,24 @@ Files:
 - Integration tests in `tests/integration.rs` use `assert_cmd` to test CLI behavior
 - Tests create temporary databases using `tempfile`
 - Some indexer tests require `nix` to be installed (marked `#[ignore]`)
+
+## Accessibility (WCAG)
+
+Frontend a11y is audited by two devshell commands:
+
+- `a11y` — static, fully offline. Runs `html5validator` against `frontend/*.html`
+  (CSS validation is skipped — vnu.jar predates Tailwind v4 oklch/`@theme`/
+  `@layer`/`color-mix`) and then `scripts/a11y_check.py frontend/index.html`.
+  The Python script enforces landmarks, form labels, alt/role on images and
+  SVGs, heading hierarchy, skip-link presence, dialog semantics, and converts
+  every oklch token in the `@theme` block to sRGB to flag fg/bg pairs below
+  WCAG 2.1 AA (4.5:1 text, 3:1 large/UI). Wired into `nix flake check` as
+  `nxv-a11y`.
+- `a11y-live` — dynamic, opt-in. Runs `pa11y-ci` via `npx` against the local
+  `nxv serve` (start it first with `dev`). Config at `frontend/.pa11yci.json`
+  covers the home page (desktop + mobile), a search-populated state, and the
+  command palette open state. Not wired into `nix flake check` — needs a
+  running server and pulls from npm on first run.
 
 ## NixOS Module
 

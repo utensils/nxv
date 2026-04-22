@@ -655,6 +655,8 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Json<types::Metr
             enabled: true,
         });
 
+    let snapshot = state.metrics.snapshot();
+
     Json(types::MetricsResponse {
         server: types::ServerMetrics {
             version: version::full_version(),
@@ -667,5 +669,24 @@ pub async fn get_metrics(State(state): State<Arc<AppState>>) -> Json<types::Metr
             timeout_seconds: state.db_timeout.as_secs(),
         },
         rate_limit,
+        runtime: types::RuntimeMetrics {
+            started_at: snapshot.started_at,
+            uptime_seconds: snapshot.uptime_seconds,
+            total_requests: snapshot.total_requests,
+        },
+        latency: types::LatencyMetrics {
+            p50_ms: snapshot.p50_ms,
+            p95_ms: snapshot.p95_ms,
+            p99_ms: snapshot.p99_ms,
+            samples: snapshot.latency_samples,
+        },
+        activity: snapshot
+            .activity
+            .into_iter()
+            .map(|b| types::ActivityBucketSchema {
+                minute: b.minute,
+                count: b.count,
+            })
+            .collect(),
     })
 }

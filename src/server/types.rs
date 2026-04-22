@@ -162,6 +162,45 @@ pub struct MetricsResponse {
     /// Rate limiting metrics (if enabled).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitMetrics>,
+    /// Process runtime information (start time, uptime, total requests).
+    pub runtime: RuntimeMetrics,
+    /// Request latency percentiles over a rolling window of recent API requests.
+    pub latency: LatencyMetrics,
+    /// Request activity bucketed per minute for the last 30 minutes (oldest first).
+    pub activity: Vec<ActivityBucketSchema>,
+}
+
+/// Runtime metrics: process start time and request count.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RuntimeMetrics {
+    /// When the server process started.
+    pub started_at: DateTime<Utc>,
+    /// Seconds since the process started.
+    pub uptime_seconds: u64,
+    /// Total HTTP requests served since start (all routes).
+    pub total_requests: u64,
+}
+
+/// Latency percentile snapshot in milliseconds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LatencyMetrics {
+    /// 50th-percentile request latency, milliseconds.
+    pub p50_ms: f64,
+    /// 95th-percentile request latency, milliseconds.
+    pub p95_ms: f64,
+    /// 99th-percentile request latency, milliseconds.
+    pub p99_ms: f64,
+    /// Number of samples that back these percentiles.
+    pub samples: u64,
+}
+
+/// Per-minute request count.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ActivityBucketSchema {
+    /// Start of the minute (UTC, truncated to :00 seconds).
+    pub minute: DateTime<Utc>,
+    /// Number of requests served during that minute.
+    pub count: u64,
 }
 
 /// Server-level metrics.
