@@ -20,6 +20,7 @@ Thumbs.db
 
 # Claude Code
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Direnv
 .direnv/
