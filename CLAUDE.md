@@ -22,8 +22,8 @@ cargo build                      # Debug build
 cargo build --release            # Release build
 cargo build --features indexer   # Build with indexer feature (requires libgit2)
 cargo run -- <args>              # Run with arguments
-cargo test                       # Run tests (~56 tests)
-cargo test --features indexer    # Run all tests including indexer (~82 tests)
+cargo test                       # Run default test suite (unit + integration)
+cargo test --features indexer    # Include indexer tests (requires libgit2; some need `nix`)
 cargo test <test_name>           # Run a single test by name
 cargo test db::                  # Run tests in a specific module
 cargo clippy -- -D warnings      # Lint with errors on warnings
