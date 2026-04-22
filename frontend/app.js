@@ -413,7 +413,7 @@
         <div class="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100 transition">
           <button class="btn btn-ghost" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            cp
+            copy
           </button>
           <button class="btn btn-ghost" data-action="history" data-key="${escapeHtml(key)}" title="version history">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -479,7 +479,7 @@
               <span class="flex items-center gap-2">
                 ${v.is_insecure ? '<span class="chip danger" style="font-size:10px; padding:1px 5px;">insecure</span>' : ''}
                 ${legacy ? '<span class="chip warn" style="font-size:10px; padding:1px 5px;">pre-flakes</span>' : ''}
-                <button class="btn btn-ghost" data-history-copy="${idx}" title="copy flake ref">cp</button>
+                <button class="btn btn-ghost" data-history-copy="${idx}" title="copy flake ref">copy</button>
               </span>
             </li>`;
         })
@@ -503,7 +503,7 @@
           } catch (e) {
             showToast(`error · ${e.message}`);
           } finally {
-            b.textContent = 'cp';
+            b.textContent = 'copy';
           }
         });
       });
