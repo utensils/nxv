@@ -32,13 +32,19 @@ the index.
 
 ### Server
 
-| Variable               | Description                      | Default     |
-| ---------------------- | -------------------------------- | ----------- |
-| `NXV_HOST`             | Server bind address              | `127.0.0.1` |
-| `NXV_PORT`             | Server listen port               | `8080`      |
-| `NXV_RATE_LIMIT`       | Rate limit per IP (requests/sec) | None        |
-| `NXV_RATE_LIMIT_BURST` | Rate limit burst size            | `2x rate`   |
-| `NXV_SECRET_KEY`       | Secret key for manifest signing  | None        |
+| Variable               | Description                                                    | Default     |
+| ---------------------- | -------------------------------------------------------------- | ----------- |
+| `NXV_HOST`             | Server bind address                                            | `127.0.0.1` |
+| `NXV_PORT`             | Server listen port                                             | `8080`      |
+| `NXV_RATE_LIMIT`       | Rate limit per IP (requests/sec)                               | None        |
+| `NXV_RATE_LIMIT_BURST` | Rate limit burst size                                          | `2x rate`   |
+| `NXV_FRONTEND_DIR`     | Serve frontend assets from this directory (disables 24h cache) | Embedded    |
+| `NXV_SECRET_KEY`       | Secret key for manifest signing                                | None        |
+
+`NXV_FRONTEND_DIR` is intended for development: set it to the checkout's
+`frontend/` directory and edits to `index.html`, `app.js`, or `favicon.svg` are
+picked up on the next request without rebuilding. Leave unset in production to
+serve the embedded copy with a 24h `Cache-Control`.
 
 ### Output
 

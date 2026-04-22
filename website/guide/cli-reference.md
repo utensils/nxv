@@ -160,6 +160,27 @@ Show index statistics and metadata.
 nxv stats
 ```
 
+### dedupe
+
+Collapse duplicate `(attribute_path, version)` rows in the local index. Repairs
+databases bloated by the pre-0.1.5 incremental indexer bug. Keeps one row per
+unique pair with the earliest `first_commit_*` and the latest `last_commit_*`
+across the duplicates, then `VACUUM`s.
+
+Requires the `indexer` feature (`nxv-indexer` or
+`cargo build --features indexer`).
+
+```bash
+nxv dedupe [options]
+```
+
+**Options:**
+
+| Flag          | Description                                               |
+| ------------- | --------------------------------------------------------- |
+| `--dry-run`   | Report what would change without modifying the database   |
+| `--no-vacuum` | Skip the trailing `VACUUM` (faster, DB file won't shrink) |
+
 ### completions
 
 Generate shell completion scripts.

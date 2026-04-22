@@ -1,62 +1,768 @@
 @import 'tailwindcss';
 
-/* nxv brand colors - emerald accent */
-:root {
-  --vp-c-brand-1: #10b981;
-  --vp-c-brand-2: #059669;
-  --vp-c-brand-3: #047857;
-  --vp-c-brand-soft: rgba(16, 185, 129, 0.14);
+/* =============================================================
+ * nxv docs theme — designed to feel like a continuation of the
+ * app at frontend/index.html: a monospaced, hairline-bordered,
+ * terminal-TUI aesthetic on an oklch ink/fog palette.
+ *
+ * Dark mode ports the app's `@theme` tokens directly.
+ * Light mode keeps the same 255 hue axis with inverted lightness
+ * so the brand reads the same in either mode.
+ *
+ * Targets WCAG 2.1 AA (4.5:1 body text, 3:1 UI).
+ * =========================================================== */
 
+:root {
+  /* ---------- Typography ---------- */
+  --nxv-font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --nxv-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* ---------- Nix-blue accent (identical across modes) ---------- */
+  --nxv-nix-300: oklch(0.82 0.08 255);
+  --nxv-nix-400: oklch(0.72 0.12 258);
+  --nxv-nix-500: oklch(0.63 0.16 260);
+  --nxv-nix-600: oklch(0.55 0.17 262);
+  --nxv-nix-700: oklch(0.46 0.15 263);
+
+  /* Raw brand oklch(L C H) for transparent layering */
+  --nxv-nix-raw-500: 0.63 0.16 260;
+  --nxv-nix-raw-600: 0.55 0.17 262;
+
+  /* ---------- Phosphor cyan secondary ---------- */
+  --nxv-phos-400: oklch(0.78 0.12 195);
+  --nxv-phos-500: oklch(0.7 0.14 198);
+  --nxv-phos-600: oklch(0.55 0.13 200);
+
+  /* ---------- State colors ---------- */
+  --nxv-amber: oklch(0.62 0.15 75);
+  --nxv-red: oklch(0.52 0.2 25);
+  --nxv-green: oklch(0.52 0.14 150);
+
+  /* ---------- LIGHT MODE ink/fog ramp ---------- */
+  /* Same 255 hue axis as dark; inverted L for a cool, pale read. */
+  --nxv-bg-0: oklch(0.985 0.004 255); /* page */
+  --nxv-bg-1: oklch(0.965 0.006 255); /* panel */
+  --nxv-bg-2: oklch(0.94 0.008 255); /* elevated */
+  --nxv-bg-3: oklch(0.9 0.01 255); /* hover */
+  --nxv-bg-4: oklch(0.83 0.013 255); /* hairline border */
+  --nxv-bg-5: oklch(0.66 0.014 255); /* muted rule */
+
+  --nxv-text-0: oklch(0.14 0.015 255);
+  --nxv-text-1: oklch(0.22 0.016 255); /* body */
+  --nxv-text-2: oklch(0.38 0.018 255);
+  --nxv-text-3: oklch(0.48 0.018 255);
+  --nxv-text-4: oklch(0.58 0.016 255);
+
+  /* ---------- VitePress variable mapping ---------- */
+  --vp-c-bg: var(--nxv-bg-0);
+  --vp-c-bg-alt: var(--nxv-bg-1);
+  --vp-c-bg-elv: var(--nxv-bg-2);
+  --vp-c-bg-soft: var(--nxv-bg-3);
+
+  --vp-c-default-1: var(--nxv-text-1);
+  --vp-c-default-2: var(--nxv-text-2);
+  --vp-c-default-3: var(--nxv-text-3);
+  --vp-c-default-soft: color-mix(in oklch, var(--nxv-text-2) 10%, transparent);
+
+  --vp-c-text-1: var(--nxv-text-1);
+  --vp-c-text-2: var(--nxv-text-2);
+  --vp-c-text-3: var(--nxv-text-3);
+
+  --vp-c-border: var(--nxv-bg-4);
+  --vp-c-divider: var(--nxv-bg-4);
+  --vp-c-gutter: var(--nxv-bg-3);
+
+  /* Brand: nix-700 for AA link text on pale bg */
+  --vp-c-brand-1: var(--nxv-nix-700);
+  --vp-c-brand-2: var(--nxv-nix-600);
+  --vp-c-brand-3: var(--nxv-nix-500);
+  --vp-c-brand-soft: oklch(var(--nxv-nix-raw-500) / 0.12);
+
+  --vp-c-tip-1: var(--nxv-green);
+  --vp-c-tip-2: oklch(0.46 0.14 150);
+  --vp-c-tip-3: oklch(0.4 0.14 150);
+  --vp-c-tip-soft: color-mix(in oklch, var(--nxv-green) 14%, transparent);
+
+  --vp-c-warning-1: var(--nxv-amber);
+  --vp-c-warning-2: oklch(0.55 0.15 75);
+  --vp-c-warning-3: oklch(0.48 0.15 75);
+  --vp-c-warning-soft: color-mix(in oklch, var(--nxv-amber) 16%, transparent);
+
+  --vp-c-danger-1: var(--nxv-red);
+  --vp-c-danger-2: oklch(0.46 0.2 25);
+  --vp-c-danger-3: oklch(0.4 0.2 25);
+  --vp-c-danger-soft: color-mix(in oklch, var(--nxv-red) 14%, transparent);
+
+  --vp-c-note-1: var(--nxv-phos-600);
+  --vp-c-note-2: oklch(0.5 0.12 200);
+  --vp-c-note-3: oklch(0.44 0.12 200);
+  --vp-c-note-soft: color-mix(in oklch, var(--nxv-phos-500) 14%, transparent);
+
+  /* Typography */
+  --vp-font-family-base: var(--nxv-font-sans);
+  --vp-font-family-mono: var(--nxv-font-mono);
+
+  /* Home hero */
   --vp-home-hero-name-color: transparent;
   --vp-home-hero-name-background: linear-gradient(
     135deg,
-    #10b981 0%,
-    #059669 100%
+    var(--nxv-nix-600) 0%,
+    var(--nxv-nix-700) 100%
   );
   --vp-home-hero-image-background-image: linear-gradient(
     135deg,
-    rgba(16, 185, 129, 0.2) 0%,
-    rgba(5, 150, 105, 0.2) 100%
+    oklch(var(--nxv-nix-raw-500) / 0.22) 0%,
+    color-mix(in oklch, var(--nxv-phos-500) 18%, transparent) 100%
   );
-  --vp-home-hero-image-filter: blur(40px);
+  --vp-home-hero-image-filter: blur(56px);
+
+  /* Code blocks */
+  --vp-code-color: var(--nxv-text-1);
+  --vp-code-bg: var(--nxv-bg-2);
+  --vp-code-block-color: var(--nxv-text-1);
+  --vp-code-block-bg: var(--nxv-bg-1);
+  --vp-code-block-divider-color: var(--nxv-bg-4);
+  --vp-code-line-highlight-color: oklch(var(--nxv-nix-raw-500) / 0.12);
+  --vp-code-line-number-color: var(--nxv-text-4);
+  --vp-code-tab-bg: var(--nxv-bg-1);
+  --vp-code-tab-divider: var(--nxv-bg-4);
+  --vp-code-tab-text-color: var(--nxv-text-3);
+  --vp-code-tab-hover-text-color: var(--nxv-text-1);
+  --vp-code-tab-active-text-color: var(--nxv-nix-700);
+  --vp-code-tab-active-bar-color: var(--nxv-nix-500);
+
+  /* Buttons — match app's `.btn-primary` (nix-600 bg, nix-500 border) */
+  --vp-button-brand-border: var(--nxv-nix-500);
+  --vp-button-brand-text: oklch(0.99 0.004 255);
+  --vp-button-brand-bg: var(--nxv-nix-600);
+  --vp-button-brand-hover-border: var(--nxv-nix-400);
+  --vp-button-brand-hover-text: #ffffff;
+  --vp-button-brand-hover-bg: var(--nxv-nix-500);
+  --vp-button-brand-active-border: var(--nxv-nix-400);
+  --vp-button-brand-active-text: #ffffff;
+  --vp-button-brand-active-bg: var(--nxv-nix-700);
+
+  --vp-button-alt-border: var(--nxv-bg-4);
+  --vp-button-alt-text: var(--nxv-text-1);
+  --vp-button-alt-bg: var(--nxv-bg-1);
+  --vp-button-alt-hover-border: var(--nxv-bg-5);
+  --vp-button-alt-hover-text: var(--nxv-text-0);
+  --vp-button-alt-hover-bg: var(--nxv-bg-2);
+  --vp-button-alt-active-border: var(--nxv-bg-5);
+  --vp-button-alt-active-text: var(--nxv-text-0);
+  --vp-button-alt-active-bg: var(--nxv-bg-2);
+
+  /* Custom nxv tokens used by the component overrides */
+  --nxv-hairline: inset 0 0 0 1px var(--nxv-bg-4);
+  --nxv-focus-ring: 0 0 0 2px var(--nxv-nix-500);
 }
 
+/* ---------- DARK MODE ---------- */
+/* Direct port of the app's `@theme` tokens. */
 .dark {
-  --vp-c-brand-1: #34d399;
-  --vp-c-brand-2: #10b981;
-  --vp-c-brand-3: #059669;
-  --vp-c-brand-soft: rgba(52, 211, 153, 0.14);
+  --nxv-bg-0: oklch(0.14 0.012 255);
+  --nxv-bg-1: oklch(0.175 0.012 255);
+  --nxv-bg-2: oklch(0.215 0.013 255);
+  --nxv-bg-3: oklch(0.27 0.014 255);
+  --nxv-bg-4: oklch(0.34 0.014 255);
+  --nxv-bg-5: oklch(0.48 0.013 255);
+
+  --nxv-text-0: oklch(0.99 0.003 255);
+  --nxv-text-1: oklch(0.93 0.008 255);
+  --nxv-text-2: oklch(0.82 0.012 255);
+  --nxv-text-3: oklch(0.76 0.014 255);
+  --nxv-text-4: oklch(0.7 0.014 255);
+
+  /* Brighter state glows on dark (matches app) */
+  --nxv-amber: oklch(0.78 0.14 80);
+  --nxv-red: oklch(0.66 0.19 25);
+  --nxv-green: oklch(0.74 0.15 150);
+
+  --vp-c-bg: var(--nxv-bg-0);
+  --vp-c-bg-alt: var(--nxv-bg-1);
+  --vp-c-bg-elv: var(--nxv-bg-2);
+  --vp-c-bg-soft: var(--nxv-bg-3);
+
+  --vp-c-default-1: var(--nxv-text-1);
+  --vp-c-default-2: var(--nxv-text-2);
+  --vp-c-default-3: var(--nxv-text-3);
+  --vp-c-default-soft: color-mix(in oklch, var(--nxv-text-2) 12%, transparent);
+
+  --vp-c-text-1: var(--nxv-text-0);
+  --vp-c-text-2: var(--nxv-text-2);
+  --vp-c-text-3: var(--nxv-text-3);
+
+  --vp-c-border: var(--nxv-bg-4);
+  --vp-c-divider: var(--nxv-bg-4);
+  --vp-c-gutter: var(--nxv-bg-1);
+
+  /* Brand: nix-400 primary for bright link/accent on dark */
+  --vp-c-brand-1: var(--nxv-nix-400);
+  --vp-c-brand-2: var(--nxv-nix-500);
+  --vp-c-brand-3: var(--nxv-nix-600);
+  --vp-c-brand-soft: oklch(var(--nxv-nix-raw-600) / 0.22);
+
+  --vp-c-tip-1: var(--nxv-green);
+  --vp-c-tip-2: oklch(0.66 0.15 150);
+  --vp-c-tip-3: oklch(0.56 0.15 150);
+  --vp-c-tip-soft: color-mix(in oklch, var(--nxv-green) 14%, transparent);
+
+  --vp-c-warning-1: var(--nxv-amber);
+  --vp-c-warning-2: oklch(0.7 0.14 78);
+  --vp-c-warning-3: oklch(0.6 0.14 78);
+  --vp-c-warning-soft: color-mix(in oklch, var(--nxv-amber) 16%, transparent);
+
+  --vp-c-danger-1: var(--nxv-red);
+  --vp-c-danger-2: oklch(0.58 0.19 25);
+  --vp-c-danger-3: oklch(0.5 0.18 25);
+  --vp-c-danger-soft: color-mix(in oklch, var(--nxv-red) 16%, transparent);
+
+  --vp-c-note-1: var(--nxv-phos-400);
+  --vp-c-note-2: var(--nxv-phos-500);
+  --vp-c-note-3: oklch(0.6 0.14 200);
+  --vp-c-note-soft: color-mix(in oklch, var(--nxv-phos-500) 14%, transparent);
+
+  --vp-home-hero-name-background: linear-gradient(
+    135deg,
+    var(--nxv-nix-400) 0%,
+    var(--nxv-nix-600) 100%
+  );
+  --vp-home-hero-image-background-image: linear-gradient(
+    135deg,
+    oklch(var(--nxv-nix-raw-500) / 0.3) 0%,
+    color-mix(in oklch, var(--nxv-phos-500) 22%, transparent) 100%
+  );
+
+  --vp-code-color: var(--nxv-text-1);
+  --vp-code-bg: var(--nxv-bg-2);
+  --vp-code-block-color: var(--nxv-text-1);
+  --vp-code-block-bg: var(--nxv-bg-1);
+  --vp-code-block-divider-color: var(--nxv-bg-4);
+  --vp-code-line-highlight-color: oklch(var(--nxv-nix-raw-500) / 0.22);
+  --vp-code-line-number-color: var(--nxv-text-4);
+  --vp-code-tab-active-text-color: var(--nxv-nix-300);
+  --vp-code-tab-active-bar-color: var(--nxv-nix-400);
+
+  --vp-button-brand-border: var(--nxv-nix-500);
+  --vp-button-brand-text: oklch(0.99 0.003 255);
+  --vp-button-brand-bg: var(--nxv-nix-600);
+  --vp-button-brand-hover-border: var(--nxv-nix-400);
+  --vp-button-brand-hover-bg: var(--nxv-nix-500);
+  --vp-button-brand-active-border: var(--nxv-nix-400);
+  --vp-button-brand-active-bg: var(--nxv-nix-700);
+
+  --vp-button-alt-border: var(--nxv-bg-4);
+  --vp-button-alt-text: var(--nxv-text-1);
+  --vp-button-alt-bg: var(--nxv-bg-1);
+  --vp-button-alt-hover-border: var(--nxv-bg-5);
+  --vp-button-alt-hover-text: var(--nxv-text-0);
+  --vp-button-alt-hover-bg: var(--nxv-bg-2);
+  --vp-button-alt-active-border: var(--nxv-bg-5);
+  --vp-button-alt-active-text: var(--nxv-text-0);
+  --vp-button-alt-active-bg: var(--nxv-bg-2);
 }
 
-/* Custom button styling */
-.VPButton.brand {
-  border-color: var(--vp-c-brand-1);
-  background-color: var(--vp-c-brand-1);
+/* =============================================================
+ * Global typography — Inter body with app's feature-settings,
+ * JetBrains Mono everywhere "code-shaped" including UI chrome
+ * (buttons, kbd, nav brand mark) to echo the terminal feel.
+ * =========================================================== */
+
+html {
+  font-family: var(--nxv-font-sans);
+  font-feature-settings: 'ss01', 'cv11';
 }
 
-.VPButton.brand:hover {
-  border-color: var(--vp-c-brand-2);
-  background-color: var(--vp-c-brand-2);
+body {
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Code block styling */
-.vp-doc div[class*='language-'] {
-  border-radius: 8px;
+code,
+kbd,
+pre,
+samp,
+.vp-code,
+.vp-doc :not(pre) > code,
+div[class*='language-'] code {
+  font-family: var(--nxv-font-mono);
+  font-feature-settings: 'ss01', 'zero';
 }
 
-/* Feature cards */
-.VPFeature {
-  border-radius: 12px;
+/* Selection — brand-tinted */
+::selection {
+  background: oklch(var(--nxv-nix-raw-600) / 0.4);
+  color: oklch(0.99 0.003 255);
+}
+
+/* Focus ring — 2px nix-500 with 2px offset, matches app */
+:focus-visible {
+  outline: 2px solid var(--nxv-nix-500);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* =============================================================
+ * NAV / LAYOUT — hairline borders, terminal-style brand mark.
+ * =========================================================== */
+
+.VPNavBar {
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.VPNavBar.has-sidebar .content-body,
+.VPNavBar .divider {
+  background: transparent;
+}
+
+/* Brand mark: mono, uppercase, tracked-out */
+.VPNavBarTitle .title {
+  font-family: var(--nxv-font-mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Scale the bracket monogram up — VitePress caps img.logo at ~24px,
+ * which crushes the wordmark inside the brackets. */
+.VPNavBarTitle .logo,
+.VPImage.logo {
+  width: 36px;
+  height: 36px;
+}
+
+/* Nav menu links — small, mono uppercase for the TUI feel */
+.VPNavBarMenuLink {
+  font-family: var(--nxv-font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.VPSidebar {
+  background: var(--vp-c-bg);
+  border-right: 1px solid var(--vp-c-divider);
+}
+
+.VPSidebarItem .link .text {
+  font-family: var(--nxv-font-mono);
+  font-size: 13px;
+}
+
+.VPSidebarItem .text {
+  font-family: var(--nxv-font-mono);
+}
+
+.VPSidebarItem.level-0 > .item > .text {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11.5px;
+  color: var(--vp-c-text-3);
+}
+
+.VPSidebarItem.is-active > .item .link .text,
+.VPSidebarItem.is-active > .item .text {
+  color: var(--vp-c-brand-1);
+}
+
+/* =============================================================
+ * BUTTONS — sharp 2px radii, mono font, chip-like feel.
+ * `.brand` mirrors app `.btn-primary`; `.alt` mirrors `.btn`.
+ * Bumped specificity with `.VPButton.VPButton` to beat VP defaults.
+ * =========================================================== */
+
+.VPButton,
+.VPButton.medium,
+.VPButton.big {
+  font-family: var(--nxv-font-mono);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  border-radius: 2px !important;
+  border-width: 1px;
+  padding: 8px 18px !important;
+  line-height: 20px !important;
+  font-size: 13px !important;
+  text-transform: lowercase;
   transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease;
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
-.VPFeature:hover {
+.VPButton.VPButton.brand {
+  box-shadow: 0 1px 0 oklch(var(--nxv-nix-raw-600) / 0.4);
+}
+
+.VPButton.VPButton.brand:hover {
+  box-shadow:
+    0 1px 0 oklch(var(--nxv-nix-raw-500) / 0.5),
+    0 0 0 3px oklch(var(--nxv-nix-raw-500) / 0.15);
+}
+
+.VPButton.VPButton.alt {
+  box-shadow: var(--nxv-hairline);
+}
+
+.VPButton.VPButton.alt:hover {
+  box-shadow:
+    inset 0 0 0 1px var(--nxv-bg-5),
+    0 0 0 3px oklch(var(--nxv-nix-raw-500) / 0.1);
+}
+
+/* =============================================================
+ * HOME HERO — make it feel like a terminal splash.
+ * =========================================================== */
+
+.VPHero .name {
+  font-family: var(--nxv-font-mono);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.VPHero .text {
+  font-family: var(--nxv-font-sans);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--vp-c-text-1);
+}
+
+.VPHero .tagline {
+  font-family: var(--nxv-font-sans);
+  color: var(--vp-c-text-2);
+}
+
+.VPHome {
+  padding-bottom: 80px;
+}
+
+/* Faint scanline flourish over the hero — CRT nod from the app */
+.VPHero {
+  position: relative;
+}
+
+.VPHero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 2px,
+    oklch(1 0 0 / 0.015) 2px,
+    oklch(1 0 0 / 0.015) 3px
+  );
+  mix-blend-mode: overlay;
+  opacity: 0.6;
+}
+
+/* =============================================================
+ * FEATURE CARDS — panel style: bg-1, hairline border, 2px radius,
+ * lift + brand-tinted ring on hover (echoes `.panel` + `.chip.active`).
+ * =========================================================== */
+
+.VPFeatures .VPFeature {
+  background: var(--vp-c-bg-alt);
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.VPFeatures .VPFeature:hover {
   transform: translateY(-2px);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+  border-color: var(--vp-c-brand-3);
+  box-shadow:
+    0 8px 24px -10px oklch(var(--nxv-nix-raw-600) / 0.3),
+    0 0 0 1px oklch(var(--nxv-nix-raw-500) / 0.2);
 }
 
-.dark .VPFeature:hover {
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+.dark .VPFeatures .VPFeature:hover {
+  box-shadow:
+    0 16px 32px -14px rgba(0, 0, 0, 0.55),
+    0 0 0 1px oklch(var(--nxv-nix-raw-500) / 0.35);
+}
+
+.VPFeature .icon {
+  background: transparent;
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  font-family: var(--nxv-font-mono);
+  font-size: 22px;
+  width: 44px;
+  height: 44px;
+}
+
+.VPFeature .title {
+  font-family: var(--nxv-font-mono);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.VPFeature .details {
+  color: var(--vp-c-text-2);
+}
+
+/* =============================================================
+ * CODE — sharp radii, hairline border, mono tokens, mono tabs.
+ * =========================================================== */
+
+.vp-doc :not(pre) > code {
+  background: var(--vp-c-bg-elv);
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  padding: 0.12em 0.4em;
+  font-size: 0.9em;
+  color: var(--vp-c-text-1);
+}
+
+.vp-doc div[class*='language-'] {
+  border-radius: 2px;
+  border: 1px solid var(--vp-c-border);
+  margin: 18px 0;
+}
+
+.vp-doc div[class*='language-'] pre {
+  padding: 18px 20px;
+}
+
+.vp-code-group .tabs {
+  font-family: var(--nxv-font-mono);
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.vp-code-group .tabs label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.vp-doc [class*='language-'] .lang {
+  font-family: var(--nxv-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-3);
+}
+
+.vp-doc [class*='language-'] .copy {
+  border-radius: 2px;
+  border: 1px solid var(--vp-c-border);
+  background: var(--vp-c-bg-alt);
+}
+
+/* =============================================================
+ * KBD — match the app's `.kbd`: tight, bottom-heavy, mono.
+ * =========================================================== */
+
+kbd,
+.vp-doc kbd {
+  font-family: var(--nxv-font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--vp-c-border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--vp-c-text-2);
+  background: var(--vp-c-bg-alt);
+  line-height: 1.4;
+}
+
+/* =============================================================
+ * CUSTOM BLOCKS — chip-like left rule, tinted panel, mono label.
+ * =========================================================== */
+
+.vp-doc .custom-block {
+  border-left-width: 3px;
+  border-radius: 2px;
+  padding: 14px 18px;
+}
+
+.vp-doc .custom-block .custom-block-title {
+  font-family: var(--nxv-font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* =============================================================
+ * DOC PROSE — tighter headings, brand-tinted link underlines.
+ * =========================================================== */
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+  font-family: var(--nxv-font-sans);
+  letter-spacing: -0.01em;
+}
+
+.vp-doc h1 {
+  font-weight: 800;
+}
+
+.vp-doc h2 {
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 20px;
+  font-weight: 700;
+}
+
+.vp-doc a {
+  color: var(--vp-c-brand-1);
+  text-decoration-color: color-mix(
+    in oklch,
+    var(--vp-c-brand-1) 40%,
+    transparent
+  );
+  text-underline-offset: 3px;
+  transition:
+    color 120ms ease,
+    text-decoration-color 120ms ease;
+}
+
+.vp-doc a:hover {
+  color: var(--vp-c-brand-2);
+  text-decoration-color: var(--vp-c-brand-2);
+}
+
+/* Inline code inside links keeps the link color */
+.vp-doc a > code {
+  color: inherit;
+}
+
+/* Tables — hairline, monospace body for data feel */
+.vp-doc table {
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.vp-doc tr {
+  background: transparent;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc tr:nth-child(2n) {
+  background: var(--vp-c-bg-alt);
+}
+
+.vp-doc th {
+  font-family: var(--nxv-font-mono);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--vp-c-bg-alt);
+  color: var(--vp-c-text-2);
+}
+
+/* =============================================================
+ * LOCAL SEARCH — make the modal feel like the app's cmd palette.
+ * =========================================================== */
+
+.VPLocalSearchBox .shell {
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  background: var(--vp-c-bg-alt);
+}
+
+.VPLocalSearchBox input {
+  font-family: var(--nxv-font-mono);
+}
+
+.VPLocalSearchBox .result {
+  border-radius: 2px;
+}
+
+.VPLocalSearchBox .result.selected {
+  border-color: var(--vp-c-brand-1);
+}
+
+.VPLocalSearchBox .titles .title-icon,
+.VPLocalSearchBox .title {
+  font-family: var(--nxv-font-mono);
+}
+
+.VPNavBarSearchButton,
+.DocSearch-Button {
+  font-family: var(--nxv-font-mono);
+  border-radius: 2px;
+  border: 1px solid var(--vp-c-border);
+}
+
+/* =============================================================
+ * SCROLLBAR — thin, cool, matches app's webkit scrollbar.
+ * =========================================================== */
+
+html {
+  scrollbar-color: var(--vp-c-border) transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--vp-c-border);
+  border: 2px solid var(--vp-c-bg);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--nxv-bg-5);
+}
+
+/* =============================================================
+ * FOOTER — hairline top, muted mono copyright.
+ * =========================================================== */
+
+.VPFooter {
+  border-top: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
+}
+
+.VPFooter .message,
+.VPFooter .copyright {
+  font-family: var(--nxv-font-mono);
+  font-size: 12px;
+  color: var(--vp-c-text-3);
+}
+
+/* =============================================================
+ * MISC — editLink / lastUpdated / pagination hairlines.
+ * =========================================================== */
+
+.vp-doc .edit-info {
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 16px;
+}
+
+.VPDocFooterLastUpdated,
+.edit-link {
+  font-family: var(--nxv-font-mono);
+  font-size: 12px;
+}
+
+.pager-link {
+  border: 1px solid var(--vp-c-border);
+  border-radius: 2px;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.pager-link:hover {
+  border-color: var(--vp-c-brand-3);
+}
+
+.pager-link .title {
+  font-family: var(--nxv-font-mono);
 }

@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Docs site theme rebuilt to mirror the embedded web UI at
+  `frontend/index.html`: oklch ink/fog palette, Nix-blue accent,
+  JetBrains Mono on UI chrome, 2px radii, hairline panel borders,
+  scanline flourish on the hero. Dark mode ports the app's `@theme`
+  tokens directly; a matching light mode is designed fresh on the same
+  255 hue axis. Targets WCAG 2.1 AA.
+- Standalone SVG variants of the app's bracket monogram
+  (`website/public/nxv-logo-{light,dark}.svg`) wired into
+  `themeConfig.logo` (with `alt: "nxv"` for accessibility) and the
+  favicon.
+- Four devshell helpers — `docs-dev`, `docs-build`, `docs-preview`,
+  `docs-fmt` — for running the VitePress site locally; adds `pkgs.bun`
+  to the devshell.
+- Missing docs content: `dedupe` subcommand and `NXV_FRONTEND_DIR` env
+  var in the guide, `GET /api/v1/metrics` in the API reference.
+
+### Changed
+
+- Bumped VitePress 1.6.0 → 1.6.4, Vue 3.5.0 → 3.5.33, tailwindcss and
+  `@tailwindcss/vite` 4.1.0 → 4.2.4, prettier 3.4.0 → 3.8.3.
+- `server.strictPort: false` in the Vite config so `docs-dev` falls
+  through to the next free port instead of erroring.
+
+### Fixed
+
+- Docs: stale `/api/v1/health` response example (`version: 0.6.0` →
+  `0.1.6`).
+- Docs: wrong indexer schema description (v4 → actual v3, integer
+  commit dates, removed fabricated `version_source`/`store_path`/
+  `is_insecure` columns and the non-existent "Store Path Extraction"
+  section).
+- Docs: misleading "store paths from cache.nixos.org" claim in the
+  Getting Started guide.
+- `website/.prettierignore` now excludes the gitignored vitepress
+  server cache so `fmt:check` passes cleanly.
+- Flaky `test_batch_insert_10k_performance` threshold: was truncating
+  seconds (so 5.99s passed while 6.00s failed), now compares
+  milliseconds against a generous 30s ceiling that still detects
+  order-of-magnitude regressions but no longer trips on a busy Nix
+  sandbox.
+
 ## [0.1.6] - 2026-04-22
 
 ### Added

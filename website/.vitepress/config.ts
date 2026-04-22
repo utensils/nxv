@@ -8,12 +8,39 @@ export default defineConfig({
 
   vite: {
     plugins: [tailwindcss()],
+    server: {
+      // Fall through to the next free port if 5173 is busy.
+      strictPort: false,
+    },
   },
 
-  head: [['link', { rel: 'icon', href: '/nxv/favicon.svg' }]],
+  head: [
+    ['link', { rel: 'icon', href: '/nxv/nxv-logo-dark.svg' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    [
+      'link',
+      {
+        rel: 'preconnect',
+        href: 'https://fonts.gstatic.com',
+        crossorigin: '',
+      },
+    ],
+    [
+      'link',
+      {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap',
+      },
+    ],
+  ],
 
   themeConfig: {
-    logo: '/favicon.svg',
+    logo: {
+      light: '/nxv-logo-light.svg',
+      dark: '/nxv-logo-dark.svg',
+      alt: 'nxv',
+    },
+    siteTitle: false,
 
     nav: [
       { text: 'Guide', link: '/guide/' },
