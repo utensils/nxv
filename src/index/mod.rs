@@ -712,7 +712,7 @@ impl Indexer {
                             return Ok(IndexResult {
                                 commits_processed: 0,
                                 packages_found: 0,
-                                ranges_created: 0,
+                                ranges_written: 0,
                                 unique_names: 0,
                                 was_interrupted: false,
                             });
@@ -817,10 +817,38 @@ impl Indexer {
         // Track unique package names for bloom filter
         let mut unique_names: HashSet<String> = HashSet::new();
 
+        // Pre-populate open_ranges from the last checkpoint. Without this, incremental
+        // runs create a new row per (attribute_path, version, new first_commit_hash)
+        // tuple — the UNIQUE constraint doesn't fire because first_commit_hash differs,
+        // and each run adds a duplicate for every package that's still present.
+        if let Some(resume_hash) = resume_from {
+            for pv in db.load_open_ranges_at_commit(resume_hash)? {
+                let key = format!("{}::{}", pv.attribute_path, pv.version);
+                unique_names.insert(pv.name.clone());
+                open_ranges.insert(
+                    key,
+                    OpenRange {
+                        name: pv.name,
+                        version: pv.version,
+                        first_commit_hash: pv.first_commit_hash,
+                        first_commit_date: pv.first_commit_date,
+                        attribute_path: pv.attribute_path,
+                        description: pv.description,
+                        license: pv.license,
+                        homepage: pv.homepage,
+                        maintainers: pv.maintainers,
+                        platforms: pv.platforms,
+                        source_path: pv.source_path,
+                        known_vulnerabilities: pv.known_vulnerabilities,
+                    },
+                );
+            }
+        }
+
         let mut result = IndexResult {
             commits_processed: 0,
             packages_found: 0,
-            ranges_created: 0,
+            ranges_written: 0,
             unique_names: 0,
             was_interrupted: false,
         };
@@ -872,7 +900,7 @@ impl Indexer {
 
                 // Insert pending ranges
                 if !pending_inserts.is_empty() {
-                    result.ranges_created +=
+                    result.ranges_written +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                 }
 
@@ -894,7 +922,7 @@ impl Indexer {
                     &commit.short_hash,
                     commit.date.format("%Y-%m-%d"),
                     result.packages_found,
-                    result.ranges_created
+                    result.ranges_written
                 ));
             }
 
@@ -1093,12 +1121,24 @@ impl Indexer {
             // Record commit processing time for ETA calculation
             eta_tracker.finish_commit();
 
-            // Checkpoint if needed
+            // Checkpoint if needed.
+            // At each checkpoint we must flush the *current* state of every open range
+            // (not only ranges that have disappeared) so that a hard kill between
+            // periodic checkpoints and the final loop exit can still resume correctly:
+            // after the kill, load_open_ranges_at_commit(last_indexed_commit) will find
+            // these rows and re-seed them. Re-flushing the same range on the next
+            // checkpoint is safe because insert_package_ranges_batch is an upsert.
             if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
                 || commit_idx + 1 == commits.len()
             {
+                if let (Some(prev_hash), Some(prev_date)) = (&prev_commit_hash, prev_commit_date) {
+                    for range in open_ranges.values() {
+                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+                    }
+                }
+
                 if !pending_inserts.is_empty() {
-                    result.ranges_created +=
+                    result.ranges_written +=
                         db.insert_package_ranges_batch(&pending_inserts)? as u64;
                     pending_inserts.clear();
                 }
@@ -1122,7 +1162,7 @@ impl Indexer {
             }
 
             if !pending_inserts.is_empty() {
-                result.ranges_created += db.insert_package_ranges_batch(&pending_inserts)? as u64;
+                result.ranges_written += db.insert_package_ranges_batch(&pending_inserts)? as u64;
             }
 
             if let Some(ref last_hash) = prev_commit_hash {
@@ -1138,7 +1178,7 @@ impl Indexer {
         if let Some(ref pb) = progress_bar {
             pb.finish_with_message(format!(
                 "done | {} commits | {} pkgs | {} ranges",
-                result.commits_processed, result.packages_found, result.ranges_created
+                result.commits_processed, result.packages_found, result.ranges_written
             ));
         }
 
@@ -1217,8 +1257,8 @@ pub struct IndexResult {
     pub commits_processed: u64,
     /// Total number of package extractions (may count same package multiple times).
     pub packages_found: u64,
-    /// Number of version ranges created in the database.
-    pub ranges_created: u64,
+    /// Number of rows written to the database (inserts + upsert updates).
+    pub ranges_written: u64,
     /// Number of unique package names found.
     pub unique_names: u64,
     /// Whether the indexing was interrupted (e.g., by Ctrl+C).
@@ -1465,7 +1505,7 @@ mod tests {
         let result = IndexResult {
             commits_processed: 0,
             packages_found: 0,
-            ranges_created: 0,
+            ranges_written: 0,
             unique_names: 0,
             was_interrupted: false,
         };

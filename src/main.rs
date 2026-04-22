@@ -1145,7 +1145,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     eprintln!("Indexing complete!");
     eprintln!("  Commits processed: {}", result.commits_processed);
     eprintln!("  Total packages found: {}", result.packages_found);
-    eprintln!("  Version ranges created: {}", result.ranges_created);
+    eprintln!("  Range rows written:     {}", result.ranges_written);
     eprintln!("  Unique package names: {}", result.unique_names);
 
     // Build and save bloom filter from current database state
