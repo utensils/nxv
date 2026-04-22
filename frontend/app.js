@@ -58,7 +58,10 @@
   const predatesFlakes = (d) => (d ? new Date(d) < FLAKES_EPOCH : false);
   const shortHash = (h) => (h || '').slice(0, 7);
   const escapeHtml = (s) =>
-    String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    String(s ?? '').replace(
+      /[&<>"']/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
+    );
 
   function parseJsonArrayOrString(s) {
     if (s == null || s === '') return [];
@@ -219,12 +222,7 @@
         const label = el.textContent.split(':')[0].trim();
         el.innerHTML = `${label}: <span class="ml-1 text-[var(--color-fog-0)]">${labels[k]()}</span>`;
         const v = STATE.filters[k];
-        const isActive =
-          k === 'exact'
-            ? STATE.filters.exact
-            : k === 'sort'
-            ? v !== 'date'
-            : !!v;
+        const isActive = k === 'exact' ? STATE.filters.exact : k === 'sort' ? v !== 'date' : !!v;
         el.classList.toggle('active', !!isActive);
       }
     });
@@ -254,8 +252,7 @@
 
     // empty query + no filters → show welcome
     const noQuery = !STATE.query.trim();
-    const noFilters =
-      !STATE.filters.version && !STATE.filters.arch && !STATE.filters.license;
+    const noFilters = !STATE.filters.version && !STATE.filters.arch && !STATE.filters.license;
     if (noQuery && noFilters) {
       renderWelcome();
       return;
@@ -274,13 +271,14 @@
 
       // client-side filters that the API doesn't support: arch, includeInsecure
       let filtered = items;
-      if (STATE.filters.arch) filtered = filtered.filter((r) => r.platforms.includes(STATE.filters.arch));
+      if (STATE.filters.arch)
+        filtered = filtered.filter((r) => r.platforms.includes(STATE.filters.arch));
       if (!STATE.filters.includeInsecure) filtered = filtered.filter((r) => !r.insecure);
 
       render(filtered);
       setResultsStatus(
         `results / ${fmtNum(meta.total)}${filtered.length !== items.length ? ` (${filtered.length} shown)` : ''}`,
-        `${(latency / 1000).toFixed(3)}s · api`,
+        `${(latency / 1000).toFixed(3)}s · api`
       );
       renderPagination(meta);
     } catch (e) {
@@ -314,7 +312,7 @@
     renderPagination({ total: 0, has_more: false });
     // rewire welcome example chips
     $$('#resultsBody .chip.example').forEach((el) =>
-      el.addEventListener('click', () => runExample(el.textContent.trim())),
+      el.addEventListener('click', () => runExample(el.textContent.trim()))
     );
   }
 
@@ -348,7 +346,8 @@
         const r = rowByAttrVer.get(key);
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
-        else if (action === 'copy-run') copy(`nix run nixpkgs/${shortHash(r.hash || r.lastHash)}#${r.attr}`);
+        else if (action === 'copy-run')
+          copy(`nix run nixpkgs/${shortHash(r.hash || r.lastHash)}#${r.attr}`);
         else if (action === 'history') openDrawer(r);
       });
     });
@@ -365,7 +364,9 @@
     const flags = [];
     if (r.insecure) {
       const title = escapeHtml(r.insecure.join(' · '));
-      flags.push(`<span class="chip danger" title="${title}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`);
+      flags.push(
+        `<span class="chip danger" title="${title}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`
+      );
     }
     if (isLegacy) flags.push(`<span class="chip warn">pre-flakes</span>`);
 
@@ -455,9 +456,11 @@
     drawer.classList.remove('hidden');
     drawer.classList.add('flex');
     cache('drawerTitle').textContent = `${r.name} · ${r.attr}`;
-    cache('drawerSub').innerHTML = `${escapeHtml(r.desc || '—')} <span class="text-[var(--color-ink-4)]">│</span> ${escapeHtml(r.license || '—')}`;
+    cache('drawerSub').innerHTML =
+      `${escapeHtml(r.desc || '—')} <span class="text-[var(--color-ink-4)]">│</span> ${escapeHtml(r.license || '—')}`;
     cache('drawerCount').textContent = '…';
-    cache('drawerList').innerHTML = `<li class="px-3 py-4 mono text-[12px] text-[var(--color-fog-4)]">loading version history…</li>`;
+    cache('drawerList').innerHTML =
+      `<li class="px-3 py-4 mono text-[12px] text-[var(--color-fog-4)]">loading version history…</li>`;
     cache('timelineViz').innerHTML = '';
 
     try {
@@ -470,8 +473,8 @@
           const tag = v.is_insecure
             ? ' text-[var(--color-red-glow)]'
             : legacy
-            ? ' text-[var(--color-amber-glow)]'
-            : ' text-[var(--color-fog-0)]';
+              ? ' text-[var(--color-amber-glow)]'
+              : ' text-[var(--color-fog-0)]';
           return `
             <li class="grid grid-cols-[minmax(90px,auto)_1fr_auto] items-center gap-4 px-3 py-2 rounded-[2px] hover:bg-[var(--color-ink-2)] transition">
               <span class="mono text-[12.5px]${tag} tabular-nums">${escapeHtml(v.version)}</span>
@@ -522,7 +525,9 @@
 
   async function fetchHistory(attr) {
     if (STATE.historyCache.has(attr)) return STATE.historyCache.get(attr);
-    const { json } = await api(`${API_BASE}/packages/${encodeURIComponent(attr)}/history?limit=100`);
+    const { json } = await api(
+      `${API_BASE}/packages/${encodeURIComponent(attr)}/history?limit=100`
+    );
     const versions = (json.data || []).slice();
     STATE.historyCache.set(attr, versions);
     return versions;
@@ -532,7 +537,7 @@
     const key = `${attr}::${version}`;
     if (STATE.firstHashCache.has(key)) return STATE.firstHashCache.get(key);
     const { json } = await api(
-      `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(version)}/first`,
+      `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(version)}/first`
     );
     const hash = json?.data?.first_commit_hash || '';
     STATE.firstHashCache.set(key, hash);
@@ -577,9 +582,7 @@
       const stride = Math.max(1, Math.ceil(years.length / maxTicks));
       const shown = years.filter((_, i) => i % stride === 0);
       if (shown[shown.length - 1] !== years[years.length - 1]) shown.push(years[years.length - 1]);
-      ticksEl.innerHTML = shown
-        .map((y) => `<span>'${String(y).slice(2)}</span>`)
-        .join('');
+      ticksEl.innerHTML = shown.map((y) => `<span>'${String(y).slice(2)}</span>`).join('');
     }
 
     const rows = history.slice(0, 12);
@@ -594,7 +597,7 @@
     svg.style.height = `${totalH}px`;
 
     for (let y = startYear; y <= endYear; y++) {
-      const x = ((new Date(Date.UTC(y, 0, 1)).getTime()) - axisStart) / axisSpan * 1000;
+      const x = ((new Date(Date.UTC(y, 0, 1)).getTime() - axisStart) / axisSpan) * 1000;
       if (x < 0 || x > 1000) continue;
       const line = document.createElementNS(svgNS, 'line');
       line.setAttribute('x1', x);
@@ -623,8 +626,8 @@
     }
 
     rows.forEach((v, i) => {
-      const x1 = Math.max(0, (new Date(v.first_seen).getTime() - axisStart) / axisSpan * 1000);
-      const x2 = Math.min(1000, (new Date(v.last_seen).getTime() - axisStart) / axisSpan * 1000);
+      const x1 = Math.max(0, ((new Date(v.first_seen).getTime() - axisStart) / axisSpan) * 1000);
+      const x2 = Math.min(1000, ((new Date(v.last_seen).getTime() - axisStart) / axisSpan) * 1000);
       const w = Math.max(2, x2 - x1);
       const y = i * (rowH + gap);
       const rect = document.createElementNS(svgNS, 'rect');
@@ -700,8 +703,12 @@
 
     const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
     const commit = health?.index_commit || stats?.last_indexed_commit || '';
-    const oldest = stats?.oldest_commit_date ? new Date(stats.oldest_commit_date).toISOString().slice(0, 7) : '—';
-    const newest = stats?.newest_commit_date ? new Date(stats.newest_commit_date).toISOString().slice(0, 7) : '—';
+    const oldest = stats?.oldest_commit_date
+      ? new Date(stats.oldest_commit_date).toISOString().slice(0, 7)
+      : '—';
+    const newest = stats?.newest_commit_date
+      ? new Date(stats.newest_commit_date).toISOString().slice(0, 7)
+      : '—';
 
     strip.innerHTML = `
       <span id="headerStatus" class="flex items-center gap-1.5">
@@ -717,7 +724,7 @@
 
     // version tag in hero line — find by its original text
     const heroVer = [...document.querySelectorAll('main .mono')].find((el) =>
-      el.textContent.includes('NIX VERSION INDEX'),
+      el.textContent.includes('NIX VERSION INDEX')
     );
     if (heroVer && health?.version) {
       heroVer.innerHTML = `// NIX VERSION INDEX &nbsp;·&nbsp; v${escapeHtml(health.version)}`;
@@ -741,9 +748,8 @@
     if (!aside || !s) return;
     const oldest = s.oldest_commit_date ? new Date(s.oldest_commit_date) : null;
     const newest = s.newest_commit_date ? new Date(s.newest_commit_date) : null;
-    const years = oldest && newest
-      ? Math.max(1, Math.round((newest - oldest) / (365.25 * 24 * 3600e3)))
-      : null;
+    const years =
+      oldest && newest ? Math.max(1, Math.round((newest - oldest) / (365.25 * 24 * 3600e3))) : null;
     const histTxt = years != null ? `${years}+ yrs` : '—';
     aside.innerHTML = `
       <div class="ascii-rule text-[10px] leading-none mb-2">┌─ INDEX STATS ──────────────────────┐</div>
@@ -779,9 +785,10 @@
     const sub = panel.querySelector('.mt-5');
     if (sub) {
       const s = STATE.stats;
-      const sampleTxt = lat?.samples > 0
-        ? `from <span class="text-[var(--color-fog-0)]">${fmtNum(lat.samples)}</span> recent api requests`
-        : `awaiting traffic`;
+      const sampleTxt =
+        lat?.samples > 0
+          ? `from <span class="text-[var(--color-fog-0)]">${fmtNum(lat.samples)}</span> recent api requests`
+          : `awaiting traffic`;
       sub.innerHTML = `
         records indexed · <span class="text-[var(--color-fog-0)]">${fmtNum(s?.total_ranges)}</span><br/>
         ${sampleTxt}`;
@@ -834,22 +841,107 @@
 
   // ---------- command palette ----------
   const PALETTE_ITEMS = [
-    { cat: 'jump', label: 'python',     hint: 'popular package', action: () => runExample('python') },
-    { cat: 'jump', label: 'nodejs',     hint: 'popular package', action: () => runExample('nodejs') },
-    { cat: 'jump', label: 'ruby',       hint: 'popular package', action: () => runExample('ruby') },
-    { cat: 'jump', label: 'gcc',        hint: 'toolchain',        action: () => runExample('gcc') },
-    { cat: 'jump', label: 'postgresql', hint: 'databases',        action: () => runExample('postgresql') },
-    { cat: 'jump', label: 'ffmpeg',     hint: 'media',            action: () => runExample('ffmpeg') },
-    { cat: 'cmd',  label: 'toggle exact match',        hint: 'filter', action: () => { cycleFilter('exact'); renderFilterChips(); runSearch(); } },
-    { cat: 'cmd',  label: 'include insecure packages', hint: 'filter', action: () => { cycleFilter('includeInsecure'); renderFilterChips(); runSearch(); } },
-    { cat: 'cmd',  label: 'sort by name',  hint: 'sort', action: () => { STATE.filters.sort = 'name'; renderFilterChips(); runSearch(); } },
-    { cat: 'cmd',  label: 'sort by date',  hint: 'sort', action: () => { STATE.filters.sort = 'date'; renderFilterChips(); runSearch(); } },
-    { cat: 'cmd',  label: 'sort by version', hint: 'sort', action: () => { STATE.filters.sort = 'version'; renderFilterChips(); runSearch(); } },
-    { cat: 'cmd',  label: 'clear filters', hint: 'reset', action: () => { STATE.filters = { exact: false, version: '', arch: '', license: '', sort: 'date', includeInsecure: false }; renderFilterChips(); runSearch(); } },
-    { cat: 'go',   label: 'open api docs',   hint: '/docs',         action: () => { window.location.href = '/docs'; } },
-    { cat: 'go',   label: 'openapi spec',    hint: '/openapi.json', action: () => { window.open('/openapi.json', '_blank'); } },
-    { cat: 'go',   label: 'github',          hint: 'source',        action: () => window.open('https://github.com/utensils/nxv', '_blank') },
-    { cat: 'go',   label: 'install guide',   hint: 'docs',          action: () => window.open('https://utensils.io/nxv/', '_blank') },
+    { cat: 'jump', label: 'python', hint: 'popular package', action: () => runExample('python') },
+    { cat: 'jump', label: 'nodejs', hint: 'popular package', action: () => runExample('nodejs') },
+    { cat: 'jump', label: 'ruby', hint: 'popular package', action: () => runExample('ruby') },
+    { cat: 'jump', label: 'gcc', hint: 'toolchain', action: () => runExample('gcc') },
+    { cat: 'jump', label: 'postgresql', hint: 'databases', action: () => runExample('postgresql') },
+    { cat: 'jump', label: 'ffmpeg', hint: 'media', action: () => runExample('ffmpeg') },
+    {
+      cat: 'cmd',
+      label: 'toggle exact match',
+      hint: 'filter',
+      action: () => {
+        cycleFilter('exact');
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'include insecure packages',
+      hint: 'filter',
+      action: () => {
+        cycleFilter('includeInsecure');
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'sort by name',
+      hint: 'sort',
+      action: () => {
+        STATE.filters.sort = 'name';
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'sort by date',
+      hint: 'sort',
+      action: () => {
+        STATE.filters.sort = 'date';
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'sort by version',
+      hint: 'sort',
+      action: () => {
+        STATE.filters.sort = 'version';
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'clear filters',
+      hint: 'reset',
+      action: () => {
+        STATE.filters = {
+          exact: false,
+          version: '',
+          arch: '',
+          license: '',
+          sort: 'date',
+          includeInsecure: false,
+        };
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'go',
+      label: 'open api docs',
+      hint: '/docs',
+      action: () => {
+        window.location.href = '/docs';
+      },
+    },
+    {
+      cat: 'go',
+      label: 'openapi spec',
+      hint: '/openapi.json',
+      action: () => {
+        window.open('/openapi.json', '_blank');
+      },
+    },
+    {
+      cat: 'go',
+      label: 'github',
+      hint: 'source',
+      action: () => window.open('https://github.com/utensils/nxv', '_blank'),
+    },
+    {
+      cat: 'go',
+      label: 'install guide',
+      hint: 'docs',
+      action: () => window.open('https://utensils.io/nxv/', '_blank'),
+    },
   ];
   let paletteIndex = 0;
   let paletteItems = [];
@@ -870,7 +962,9 @@
   }
   function renderPalette(q) {
     q = q.trim().toLowerCase();
-    paletteItems = PALETTE_ITEMS.filter((it) => !q || it.label.toLowerCase().includes(q) || it.cat.includes(q));
+    paletteItems = PALETTE_ITEMS.filter(
+      (it) => !q || it.label.toLowerCase().includes(q) || it.cat.includes(q)
+    );
     // add ad-hoc "search for q" entry if user typed something
     if (q) {
       paletteItems.unshift({
@@ -886,7 +980,8 @@
     }
     paletteIndex = 0;
     cache('paletteList').innerHTML = paletteItems
-      .map((it, i) => `
+      .map(
+        (it, i) => `
         <li data-idx="${i}" class="palette-item px-4 py-2 flex items-center gap-3 cursor-pointer mono text-[12.5px] ${i === 0 ? 'bg-[var(--color-ink-2)]' : ''}">
           <span class="chip" style="min-width: 36px; justify-content: center;">${escapeHtml(it.cat)}</span>
           <span class="text-[var(--color-fog-0)]">${escapeHtml(it.label)}</span>
@@ -894,11 +989,18 @@
           <span class="flex-1"></span>
           ${i === 0 ? '<span class="mono text-[10px] text-[var(--color-fog-4)]">↵ select</span>' : ''}
         </li>
-      `)
+      `
+      )
       .join('');
     $$('#paletteList .palette-item').forEach((el, i) => {
-      el.addEventListener('click', () => { paletteItems[i].action(); closePalette(); });
-      el.addEventListener('mouseenter', () => { paletteIndex = i; highlightPalette(); });
+      el.addEventListener('click', () => {
+        paletteItems[i].action();
+        closePalette();
+      });
+      el.addEventListener('mouseenter', () => {
+        paletteIndex = i;
+        highlightPalette();
+      });
     });
   }
   function highlightPalette() {
@@ -923,7 +1025,10 @@
       t = setTimeout(() => runSearch(), 220);
     });
     cache('searchInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { clearTimeout(t); runSearch(); }
+      if (e.key === 'Enter') {
+        clearTimeout(t);
+        runSearch();
+      }
     });
 
     $$('.chip[data-filter]').forEach((el) => {
@@ -961,9 +1066,15 @@
     cache('paletteInput').addEventListener('input', (e) => renderPalette(e.target.value));
     cache('paletteInput').addEventListener('keydown', (e) => {
       const items = $$('#paletteList .palette-item');
-      if (e.key === 'ArrowDown') { e.preventDefault(); paletteIndex = Math.min(items.length - 1, paletteIndex + 1); highlightPalette(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteIndex = Math.max(0, paletteIndex - 1); highlightPalette(); }
-      else if (e.key === 'Enter') {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        paletteIndex = Math.min(items.length - 1, paletteIndex + 1);
+        highlightPalette();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        paletteIndex = Math.max(0, paletteIndex - 1);
+        highlightPalette();
+      } else if (e.key === 'Enter') {
         e.preventDefault();
         if (items[paletteIndex]) items[paletteIndex].click();
       }
@@ -972,11 +1083,14 @@
     window.addEventListener('keydown', (e) => {
       const inField = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault(); openPalette();
+        e.preventDefault();
+        openPalette();
       } else if (e.key === '/' && !inField) {
-        e.preventDefault(); cache('searchInput').focus();
+        e.preventDefault();
+        cache('searchInput').focus();
       } else if (e.key === 'Escape') {
-        closePalette(); closeDrawer();
+        closePalette();
+        closeDrawer();
       }
     });
   }

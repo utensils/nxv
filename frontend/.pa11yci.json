@@ -18,9 +18,7 @@
     {
       "url": "http://localhost:8080/",
       "viewport": { "width": 375, "height": 812 },
-      "actions": [
-        "wait for element #searchInput to be visible"
-      ]
+      "actions": ["wait for element #searchInput to be visible"]
     },
     {
       "url": "http://localhost:8080/",
