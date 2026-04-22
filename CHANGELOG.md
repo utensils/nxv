@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-04-22
+
+### Added
+
+- `nxv dedupe` subcommand (feature-gated under `indexer`) that collapses
+  duplicate `(attribute_path, version)` rows created by the pre-0.1.5
+  incremental-indexer bug. For each pair with more than one row it keeps
+  the earliest `first_commit_*` and the latest `last_commit_*` across the
+  duplicates and deletes the rest, then optionally `VACUUM`s. Supports
+  `--dry-run` for projected stats without mutation and `--no-vacuum` for
+  faster runs when disk reclaim isn't needed. Verified against the
+  currently-published bloated index: 1,745,607 → 195,071 rows (-89%),
+  1.8GB → 310MB (-82%), `search firefox` ~15s → ~100ms. (#25)
+
 ## [0.1.5] - 2026-04-21
 
 ### Fixed
@@ -183,7 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust 2024 edition
 - 10 MB release binary size
 
-[unreleased]: https://github.com/utensils/nxv/compare/v0.1.5...HEAD
+[unreleased]: https://github.com/utensils/nxv/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/utensils/nxv/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/utensils/nxv/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/utensils/nxv/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/utensils/nxv/compare/v0.1.2...v0.1.3
