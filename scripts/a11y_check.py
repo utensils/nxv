@@ -171,6 +171,7 @@ CONTRAST_PAIRS: list[tuple[str, str, str]] = [
     ("fog-4", "ink-1", "text"),
     ("fog-2", "ink-2", "text"),
     ("fog-3", "ink-2", "text"),
+    ("fog-4", "ink-2", "text"),
     # accent / semantic on ground
     ("nix-300", "ink-0", "text"),
     ("nix-400", "ink-0", "text"),

@@ -34,11 +34,11 @@
         --color-ink-4: oklch(0.34 0.014 255);   /* border */
         --color-ink-5: oklch(0.48 0.013 255);   /* muted line */
 
-        --color-fog-0: oklch(0.98 0.005 255);   /* pure text */
-        --color-fog-1: oklch(0.88 0.01 255);    /* body text */
-        --color-fog-2: oklch(0.76 0.012 255);   /* secondary */
-        --color-fog-3: oklch(0.70 0.014 255);   /* muted — AA on ink-0/1/2 */
-        --color-fog-4: oklch(0.64 0.014 255);   /* very muted — AA on ink-0/1/2 */
+        --color-fog-0: oklch(0.99 0.003 255);   /* pure text */
+        --color-fog-1: oklch(0.93 0.008 255);   /* body text */
+        --color-fog-2: oklch(0.82 0.012 255);   /* secondary */
+        --color-fog-3: oklch(0.76 0.014 255);   /* muted — AAA on ink-0/1 */
+        --color-fog-4: oklch(0.70 0.014 255);   /* very muted — AA+ on ink-0/1/2 */
 
         /* Nix blue family */
         --color-nix-300: oklch(0.82 0.08 255);
@@ -197,6 +197,15 @@
 
         /* Focus ring on interactive elements */
         :focus-visible { outline: 2px solid var(--color-nix-500); outline-offset: 2px; border-radius: 2px; }
+
+        /* Softer dim for modal backdrops — tints toward the page ink
+           rather than pitch-black, with a gentle blur so the content
+           stays visible but clearly out of focus. */
+        .overlay-dim {
+          background: color-mix(in oklch, var(--color-ink-0) 55%, transparent);
+          backdrop-filter: blur(10px) saturate(130%);
+          -webkit-backdrop-filter: blur(10px) saturate(130%);
+        }
 
         /* Skip link — hidden until focused */
         .skip-link {
@@ -425,9 +434,9 @@
 
     <!-- Version history drawer (right-side) -->
     <div id="drawerOverlay" class="fixed inset-0 z-40 hidden" aria-hidden="true">
-      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-close></div>
-      <div role="dialog" aria-modal="true" aria-labelledby="drawerTitle" class="absolute right-0 top-0 h-full w-full max-w-[640px] panel border-l overflow-y-auto flex flex-col" style="background: var(--color-ink-1)">
-        <div class="sticky top-0 z-10 px-6 py-4 hairline-b flex items-start gap-4" style="background: var(--color-ink-1)">
+      <div class="absolute inset-0 overlay-dim" data-close></div>
+      <div role="dialog" aria-modal="true" aria-labelledby="drawerTitle" class="absolute right-0 top-0 h-full w-full max-w-[640px] border-l overflow-y-auto flex flex-col shadow-2xl" style="background: var(--color-ink-2); border-color: var(--color-ink-4)">
+        <div class="sticky top-0 z-10 px-6 py-4 hairline-b flex items-start gap-4" style="background: var(--color-ink-2)">
           <div class="flex-1 min-w-0">
             <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">version history</div>
             <h2 id="drawerTitle" class="mono text-[18px] font-semibold text-[var(--color-fog-0)] mt-1 truncate">—</h2>
@@ -455,7 +464,7 @@
 
     <!-- Command palette -->
     <div id="palette" class="fixed inset-0 z-50 hidden items-start justify-center pt-[12vh] px-4" aria-hidden="true">
-      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-palette-close></div>
+      <div class="absolute inset-0 overlay-dim" data-palette-close></div>
       <div role="dialog" aria-modal="true" aria-label="Command palette" class="relative w-full max-w-[620px] panel rounded-[2px] overflow-hidden shadow-2xl">
         <div class="flex items-center gap-3 h-12 px-4 hairline-b">
           <span class="mono text-[13px] text-[var(--color-nix-400)]">»</span>
