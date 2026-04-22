@@ -540,25 +540,62 @@
   }
 
   function drawTimeline(history) {
-    const axisStart = new Date('2017-01-01').getTime();
-    const axisEnd = new Date(Date.now() + 30 * 24 * 3600e3).getTime();
-    const span = Math.max(1, axisEnd - axisStart);
     const el = cache('timelineViz');
+    el.innerHTML = '';
+
+    // Derive axis from the actual history, not a hard-coded 2017 floor.
+    const times = [];
+    for (const v of history) {
+      const f = new Date(v.first_seen).getTime();
+      const l = new Date(v.last_seen).getTime();
+      if (Number.isFinite(f)) times.push(f);
+      if (Number.isFinite(l)) times.push(l);
+    }
+    if (!times.length) return;
+
+    const rawStart = Math.min(...times);
+    const rawEnd = Math.max(...times);
+    const minSpan = 90 * 24 * 3600e3; // keep a 3-month floor so single-version histories stay legible
+    const usableSpan = Math.max(rawEnd - rawStart, minSpan);
+    const pad = Math.max(14 * 24 * 3600e3, usableSpan * 0.04);
+    const axisStart = rawStart - pad;
+    const axisEnd = rawEnd + pad;
+    const axisSpan = axisEnd - axisStart;
+
+    const startYear = new Date(axisStart).getUTCFullYear();
+    const endYear = new Date(axisEnd).getUTCFullYear();
+
+    const labelEl = document.getElementById('timelineLabel');
+    if (labelEl) labelEl.textContent = `timeline · ${startYear} → ${endYear}`;
+
+    const ticksEl = document.getElementById('timelineTicks');
+    if (ticksEl) {
+      const years = [];
+      for (let y = startYear; y <= endYear; y++) years.push(y);
+      // thin ticks to keep the row readable on long histories
+      const maxTicks = 10;
+      const stride = Math.max(1, Math.ceil(years.length / maxTicks));
+      const shown = years.filter((_, i) => i % stride === 0);
+      if (shown[shown.length - 1] !== years[years.length - 1]) shown.push(years[years.length - 1]);
+      ticksEl.innerHTML = shown
+        .map((y) => `<span>'${String(y).slice(2)}</span>`)
+        .join('');
+    }
+
     const rows = history.slice(0, 12);
     const rowH = 10;
     const gap = 2;
     const totalH = Math.max(rows.length * (rowH + gap), 100);
     const svgNS = 'http://www.w3.org/2000/svg';
-    el.innerHTML = '';
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', `0 0 1000 ${totalH}`);
     svg.setAttribute('preserveAspectRatio', 'none');
     svg.style.width = '100%';
     svg.style.height = `${totalH}px`;
 
-    const yearEnd = new Date(axisEnd).getUTCFullYear();
-    for (let y = 2017; y <= yearEnd; y++) {
-      const x = ((new Date(`${y}-01-01`).getTime()) - axisStart) / span * 1000;
+    for (let y = startYear; y <= endYear; y++) {
+      const x = ((new Date(Date.UTC(y, 0, 1)).getTime()) - axisStart) / axisSpan * 1000;
+      if (x < 0 || x > 1000) continue;
       const line = document.createElementNS(svgNS, 'line');
       line.setAttribute('x1', x);
       line.setAttribute('x2', x);
@@ -570,21 +607,24 @@
       svg.appendChild(line);
     }
 
-    const flakeX = ((FLAKES_EPOCH.getTime()) - axisStart) / span * 1000;
-    const flakeLine = document.createElementNS(svgNS, 'line');
-    flakeLine.setAttribute('x1', flakeX);
-    flakeLine.setAttribute('x2', flakeX);
-    flakeLine.setAttribute('y1', 0);
-    flakeLine.setAttribute('y2', totalH);
-    flakeLine.setAttribute('stroke', 'var(--color-amber-glow)');
-    flakeLine.setAttribute('stroke-dasharray', '3 3');
-    flakeLine.setAttribute('stroke-width', '1');
-    flakeLine.setAttribute('opacity', '0.5');
-    svg.appendChild(flakeLine);
+    const flakeT = FLAKES_EPOCH.getTime();
+    if (flakeT >= axisStart && flakeT <= axisEnd) {
+      const flakeX = ((flakeT - axisStart) / axisSpan) * 1000;
+      const flakeLine = document.createElementNS(svgNS, 'line');
+      flakeLine.setAttribute('x1', flakeX);
+      flakeLine.setAttribute('x2', flakeX);
+      flakeLine.setAttribute('y1', 0);
+      flakeLine.setAttribute('y2', totalH);
+      flakeLine.setAttribute('stroke', 'var(--color-amber-glow)');
+      flakeLine.setAttribute('stroke-dasharray', '3 3');
+      flakeLine.setAttribute('stroke-width', '1');
+      flakeLine.setAttribute('opacity', '0.5');
+      svg.appendChild(flakeLine);
+    }
 
     rows.forEach((v, i) => {
-      const x1 = Math.max(0, (new Date(v.first_seen).getTime() - axisStart) / span * 1000);
-      const x2 = Math.min(1000, (new Date(v.last_seen).getTime() - axisStart) / span * 1000);
+      const x1 = Math.max(0, (new Date(v.first_seen).getTime() - axisStart) / axisSpan * 1000);
+      const x2 = Math.min(1000, (new Date(v.last_seen).getTime() - axisStart) / axisSpan * 1000);
       const w = Math.max(2, x2 - x1);
       const y = i * (rowH + gap);
       const rect = document.createElementNS(svgNS, 'rect');

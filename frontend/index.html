@@ -447,11 +447,9 @@
 
         <!-- Timeline visualization -->
         <div class="px-6 py-5 hairline-b">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">timeline · 2017 → 2026</div>
+          <div id="timelineLabel" class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">timeline</div>
           <div id="timelineViz" class="relative h-[120px]"></div>
-          <div class="mt-2 grid grid-cols-10 mono text-[10px] text-[var(--color-fog-4)] tabular-nums">
-            <span>'17</span><span>'18</span><span>'19</span><span>'20</span><span>'21</span><span>'22</span><span>'23</span><span>'24</span><span>'25</span><span class="text-right">'26</span>
-          </div>
+          <div id="timelineTicks" class="mt-2 flex justify-between mono text-[10px] text-[var(--color-fog-4)] tabular-nums"></div>
         </div>
 
         <!-- Version list -->
