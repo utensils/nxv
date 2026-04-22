@@ -47,3 +47,7 @@ website/server/
 
 /target
 __pycache__/
+
+# Playwright MCP artifacts + ad-hoc screenshots from browser testing
+.playwright-mcp/
+*.png
