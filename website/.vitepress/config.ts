@@ -38,6 +38,7 @@ export default defineConfig({
     logo: {
       light: '/nxv-logo-light.svg',
       dark: '/nxv-logo-dark.svg',
+      alt: 'nxv',
     },
     siteTitle: false,
 
