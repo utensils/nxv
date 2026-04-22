@@ -321,6 +321,14 @@ div[class*='language-'] code {
   letter-spacing: 0.02em;
 }
 
+/* Scale the bracket monogram up — VitePress caps img.logo at ~24px,
+ * which crushes the wordmark inside the brackets. */
+.VPNavBarTitle .logo,
+.VPImage.logo {
+  width: 36px;
+  height: 36px;
+}
+
 /* Nav menu links — small, mono uppercase for the TUI feel */
 .VPNavBarMenuLink {
   font-family: var(--nxv-font-mono);
