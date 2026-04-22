@@ -500,24 +500,40 @@ impl Database {
                     row.get::<_, i64>(0)
                 })? as u64;
 
-        // Temp index makes the ordered scan below cheap on large DBs. Dropped
-        // on connection close, but we remove it explicitly once we're done.
-        self.conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS temp_idx_dedupe_sort \
-             ON package_versions (attribute_path, version, first_commit_date, id);",
-        )?;
-
         struct Plan {
             survivor_id: i64,
             canon_first_hash: String,
             canon_first_date: i64,
+            canon_last_id: i64,
             canon_last_hash: String,
             canon_last_date: i64,
             loser_ids: Vec<i64>,
         }
 
+        // Helper index to make the ordered scan below cheap on large DBs.
+        // SQLite temp indexes can't cover main-schema tables, so we create
+        // an ordinary index scoped to the read phase and use a RAII guard to
+        // drop it on any exit path (early return, error, panic). The index
+        // is gone before the write transaction starts.
         let mut plans: Vec<Plan> = Vec::new();
         {
+            struct IndexGuard<'a> {
+                conn: &'a Connection,
+            }
+            impl Drop for IndexGuard<'_> {
+                fn drop(&mut self) {
+                    let _ = self
+                        .conn
+                        .execute_batch("DROP INDEX IF EXISTS temp_idx_dedupe_sort;");
+                }
+            }
+
+            self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS temp_idx_dedupe_sort \
+                 ON package_versions (attribute_path, version, first_commit_date, id);",
+            )?;
+            let _index_guard = IndexGuard { conn: &self.conn };
+
             let mut stmt = self.conn.prepare(
                 "SELECT id, attribute_path, version, \
                         first_commit_hash, first_commit_date, \
@@ -548,6 +564,7 @@ impl Database {
                         survivor_id: id,
                         canon_first_hash: fch,
                         canon_first_date: fcd,
+                        canon_last_id: id,
                         canon_last_hash: lch,
                         canon_last_date: lcd,
                         loser_ids: Vec::new(),
@@ -556,10 +573,13 @@ impl Database {
                 } else {
                     let plan = current.as_mut().unwrap();
                     plan.loser_ids.push(id);
-                    // Tiebreak: strictly greater date OR equal date with larger id.
+                    // Deterministic tiebreak: strictly greater last_commit_date,
+                    // or equal date with a larger row id than the current holder
+                    // of canon_last_*.
                     if lcd > plan.canon_last_date
-                        || (lcd == plan.canon_last_date && id > plan.survivor_id)
+                        || (lcd == plan.canon_last_date && id > plan.canon_last_id)
                     {
+                        plan.canon_last_id = id;
                         plan.canon_last_hash = lch;
                         plan.canon_last_date = lcd;
                     }
@@ -569,10 +589,6 @@ impl Database {
                 plans.push(plan);
             }
         }
-
-        let _ = self
-            .conn
-            .execute_batch("DROP INDEX IF EXISTS temp_idx_dedupe_sort;");
 
         let groups_total = plans.len() as u64;
         let groups_with_duplicates =
