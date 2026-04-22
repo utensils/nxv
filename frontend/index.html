@@ -199,12 +199,12 @@
         :focus-visible { outline: 2px solid var(--color-nix-500); outline-offset: 2px; border-radius: 2px; }
 
         /* Softer dim for modal backdrops — tints toward the page ink
-           rather than pitch-black, with a gentle blur so the content
-           stays visible but clearly out of focus. */
+           rather than pitch-black, with a light blur so the content
+           stays readable behind an open modal. */
         .overlay-dim {
-          background: color-mix(in oklch, var(--color-ink-0) 55%, transparent);
-          backdrop-filter: blur(10px) saturate(130%);
-          -webkit-backdrop-filter: blur(10px) saturate(130%);
+          background: color-mix(in oklch, var(--color-ink-0) 35%, transparent);
+          backdrop-filter: blur(3px) saturate(115%);
+          -webkit-backdrop-filter: blur(3px) saturate(115%);
         }
 
         /* Skip link — hidden until focused */
