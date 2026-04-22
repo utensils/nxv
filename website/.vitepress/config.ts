@@ -8,6 +8,10 @@ export default defineConfig({
 
   vite: {
     plugins: [tailwindcss()],
+    server: {
+      // Fall through to the next free port if 5173 is busy.
+      strictPort: false,
+    },
   },
 
   head: [
