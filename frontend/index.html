@@ -37,8 +37,8 @@
         --color-fog-0: oklch(0.98 0.005 255);   /* pure text */
         --color-fog-1: oklch(0.88 0.01 255);    /* body text */
         --color-fog-2: oklch(0.72 0.012 255);   /* secondary */
-        --color-fog-3: oklch(0.56 0.014 255);   /* muted */
-        --color-fog-4: oklch(0.42 0.014 255);   /* very muted */
+        --color-fog-3: oklch(0.62 0.014 255);   /* muted — AA on ink-0/1/2 */
+        --color-fog-4: oklch(0.60 0.014 255);   /* very muted — AA on ink-0/1 */
 
         /* Nix blue family */
         --color-nix-300: oklch(0.82 0.08 255);
@@ -197,10 +197,24 @@
 
         /* Focus ring on interactive elements */
         :focus-visible { outline: 2px solid var(--color-nix-500); outline-offset: 2px; border-radius: 2px; }
+
+        /* Skip link — hidden until focused */
+        .skip-link {
+          position: absolute; top: 0; left: 0;
+          transform: translateY(-110%);
+          padding: 0.5rem 0.75rem;
+          font-family: var(--font-mono); font-size: 12px;
+          background: var(--color-nix-600); color: oklch(0.98 0.01 255);
+          border: 1px solid var(--color-nix-400);
+          border-radius: 2px; z-index: 100;
+          transition: transform 120ms ease;
+        }
+        .skip-link:focus { transform: translateY(0.5rem) translateX(0.5rem); }
       }
     </style>
   </head>
   <body class="min-h-screen">
+    <a class="skip-link" href="#main">Skip to main content</a>
     <!-- Top command bar -->
     <header class="hairline-b sticky top-0 z-30 backdrop-blur" style="background: color-mix(in oklch, var(--color-ink-0) 92%, transparent);">
       <div class="mx-auto max-w-[1320px] px-6 h-14 flex items-center gap-6">
@@ -226,13 +240,13 @@
         <div class="flex-1"></div>
 
         <button id="paletteTrigger" class="hidden sm:flex items-center gap-2 px-2.5 py-1.5 hairline rounded-[2px] mono text-[11px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
           <span>jump to…</span>
           <span class="kbd">⌘K</span>
         </button>
 
-        <a href="https://github.com/utensils/nxv" target="_blank" rel="noopener" class="p-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition" title="GitHub">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        <a href="https://github.com/utensils/nxv" target="_blank" rel="noopener" class="p-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition" aria-label="nxv on GitHub">
+          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
         </a>
       </div>
       <!-- Status strip -->
@@ -250,7 +264,7 @@
       </div>
     </header>
 
-    <main class="mx-auto max-w-[1320px] px-6 pb-32 relative">
+    <main id="main" tabindex="-1" class="mx-auto max-w-[1320px] px-6 pb-32 relative">
       <!-- Hero / search -->
       <section class="pt-10 md:pt-14">
         <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-10 items-end">
@@ -292,9 +306,10 @@
             <span class="mono text-[13px] text-[var(--color-fog-3)] select-none hidden sm:inline">search</span>
             <input
               id="searchInput"
-              type="text"
+              type="search"
               autocomplete="off"
               autofocus
+              aria-label="Search nixpkgs by package and version"
               placeholder="python 2.7   •   nodejs 18   •   ruby 2.6   •   gcc 12.3"
               class="mono flex-1 bg-transparent border-0 outline-none text-[15px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]"
             />
@@ -411,14 +426,14 @@
     <!-- Version history drawer (right-side) -->
     <div id="drawerOverlay" class="fixed inset-0 z-40 hidden" aria-hidden="true">
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-close></div>
-      <aside class="absolute right-0 top-0 h-full w-full max-w-[640px] panel border-l overflow-y-auto flex flex-col" style="background: var(--color-ink-1)">
+      <div role="dialog" aria-modal="true" aria-labelledby="drawerTitle" class="absolute right-0 top-0 h-full w-full max-w-[640px] panel border-l overflow-y-auto flex flex-col" style="background: var(--color-ink-1)">
         <div class="sticky top-0 z-10 px-6 py-4 hairline-b flex items-start gap-4" style="background: var(--color-ink-1)">
           <div class="flex-1 min-w-0">
             <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">version history</div>
-            <h3 id="drawerTitle" class="mono text-[18px] font-semibold text-[var(--color-fog-0)] mt-1 truncate">—</h3>
+            <h2 id="drawerTitle" class="mono text-[18px] font-semibold text-[var(--color-fog-0)] mt-1 truncate">—</h2>
             <div id="drawerSub" class="mono text-[11px] text-[var(--color-fog-3)] mt-0.5">—</div>
           </div>
-          <button class="btn btn-ghost" data-close>esc ✕</button>
+          <button class="btn btn-ghost" data-close aria-label="Close version history">esc ✕</button>
         </div>
 
         <!-- Timeline visualization -->
@@ -435,16 +450,16 @@
           <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">all versions <span id="drawerCount" class="text-[var(--color-fog-2)]"></span></div>
           <ul id="drawerList" class="space-y-1"></ul>
         </div>
-      </aside>
+      </div>
     </div>
 
     <!-- Command palette -->
     <div id="palette" class="fixed inset-0 z-50 hidden items-start justify-center pt-[12vh] px-4" aria-hidden="true">
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-palette-close></div>
-      <div class="relative w-full max-w-[620px] panel rounded-[2px] overflow-hidden shadow-2xl">
+      <div role="dialog" aria-modal="true" aria-label="Command palette" class="relative w-full max-w-[620px] panel rounded-[2px] overflow-hidden shadow-2xl">
         <div class="flex items-center gap-3 h-12 px-4 hairline-b">
           <span class="mono text-[13px] text-[var(--color-nix-400)]">»</span>
-          <input id="paletteInput" placeholder="jump to package, run command, or search…" class="mono flex-1 bg-transparent outline-none text-[14px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]" />
+          <input id="paletteInput" type="search" aria-label="Command palette — jump to package or run command" placeholder="jump to package, run command, or search…" class="mono flex-1 bg-transparent outline-none text-[14px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]" />
           <span class="kbd">esc</span>
         </div>
         <ul id="paletteList" class="max-h-[50vh] overflow-y-auto py-1"></ul>
