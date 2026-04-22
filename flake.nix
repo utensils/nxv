@@ -560,6 +560,19 @@
                 command = "miniserve --index index.html ./frontend \"$@\"";
               }
               {
+                category = "run";
+                name = "dev";
+                help = "API server + live frontend reload (cargo watch on src, disk-served HTML/JS on :8080)";
+                command = ''
+                  set -euo pipefail
+                  export NXV_FRONTEND_DIR="''${NXV_FRONTEND_DIR:-$PWD/frontend}"
+                  echo "nxv dev · serving frontend from $NXV_FRONTEND_DIR"
+                  echo "nxv dev · http://localhost:8080  (edit frontend/* → just refresh the browser)"
+                  echo "nxv dev · src/ changes → cargo-watch auto-rebuilds and restarts"
+                  exec cargo watch -q -w src -w Cargo.toml -x 'run -- serve --port 8080' "$@"
+                '';
+              }
+              {
                 category = "deps";
                 name = "deps-outdated";
                 help = "list outdated crates";

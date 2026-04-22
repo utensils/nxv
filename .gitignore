@@ -22,6 +22,9 @@ Thumbs.db
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
+# Dropped-in design zips
+*.zip
+
 # Direnv
 .direnv/
 

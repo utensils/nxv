@@ -107,6 +107,7 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
 - `NXV_PUBLIC_KEY` — override the embedded minisign public key
 - `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT` — `nxv serve` bind/host/rate-limit
+- `NXV_FRONTEND_DIR` — serve `index.html`/`app.js`/`favicon.svg` from this directory on every request instead of the embedded copy, and disable the 24h `Cache-Control` for those routes. Used by the devshell `dev` command for live frontend reload (edit → browser refresh, no rebuild). Unset in production.
 - `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
 
 ## Data Paths

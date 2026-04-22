@@ -1,1536 +1,471 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark" style="background: oklch(0.14 0.012 255);">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>nxv - Nix Version Search</title>
+    <title>nxv // nix version index</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <style>
-      :root {
-        --bg: #0d1117;
-        --bg-secondary: #161b22;
-        --bg-tertiary: #21262d;
-        --border: #30363d;
-        --text: #e6edf3;
-        --text-muted: #8b949e;
-        --accent: #58a6ff;
-        --accent-hover: #79b8ff;
-        --success: #388bfd;
-        --warning: #d29922;
-        --error: #f85149;
-        --radius: 8px;
-        --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-      }
-
-      * {
-        box-sizing: border-box;
+      /* Applied immediately — before Tailwind CDN finishes loading, to avoid FOUC */
+      html, body {
+        background: oklch(0.14 0.012 255);
+        color: oklch(0.88 0.01 255);
         margin: 0;
         padding: 0;
-      }
-
-      body {
-        font-family:
-          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-        background: var(--bg);
-        color: var(--text);
         min-height: 100vh;
-        line-height: 1.5;
+        font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.6/dist/index.global.min.js"></script>
+    <style type="text/tailwindcss">
+      @theme {
+        --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+        --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+        /* Deep, slightly cool ink — oklch for clean tonal steps */
+        --color-ink-0: oklch(0.14 0.012 255);   /* page bg */
+        --color-ink-1: oklch(0.175 0.012 255);  /* panel */
+        --color-ink-2: oklch(0.215 0.013 255);  /* elevated */
+        --color-ink-3: oklch(0.27 0.014 255);   /* hover */
+        --color-ink-4: oklch(0.34 0.014 255);   /* border */
+        --color-ink-5: oklch(0.48 0.013 255);   /* muted line */
+
+        --color-fog-0: oklch(0.98 0.005 255);   /* pure text */
+        --color-fog-1: oklch(0.88 0.01 255);    /* body text */
+        --color-fog-2: oklch(0.72 0.012 255);   /* secondary */
+        --color-fog-3: oklch(0.56 0.014 255);   /* muted */
+        --color-fog-4: oklch(0.42 0.014 255);   /* very muted */
+
+        /* Nix blue family */
+        --color-nix-300: oklch(0.82 0.08 255);
+        --color-nix-400: oklch(0.72 0.12 258);
+        --color-nix-500: oklch(0.63 0.16 260);
+        --color-nix-600: oklch(0.55 0.17 262);
+        --color-nix-700: oklch(0.46 0.15 263);
+
+        /* Phosphor/CRT secondary — cool cyan */
+        --color-phos-400: oklch(0.78 0.12 195);
+        --color-phos-500: oklch(0.70 0.14 198);
+
+        /* Warn & danger */
+        --color-amber-glow: oklch(0.78 0.14 80);
+        --color-red-glow: oklch(0.66 0.19 25);
+        --color-green-glow: oklch(0.74 0.15 150);
       }
 
-      .container {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 2rem 1rem;
-      }
-
-      header {
-        text-align: center;
-        margin-bottom: 2rem;
-      }
-
-      .logo {
-        font-size: 3rem;
-        font-weight: 700;
-        letter-spacing: -0.05em;
-        background: linear-gradient(135deg, var(--accent), #a371f7);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-      }
-
-      .tagline {
-        color: var(--text-muted);
-        margin-top: 0.5rem;
-        font-size: 1.1rem;
-      }
-
-      .search-container {
-        max-width: 700px;
-        margin: 0 auto 2rem;
-      }
-
-      .search-box {
-        display: flex;
-        gap: 0.5rem;
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 0.5rem;
-        transition: border-color 0.2s;
-      }
-
-      .search-box:focus-within {
-        border-color: var(--accent);
-      }
-
-      .search-input {
-        flex: 1;
-        background: transparent;
-        border: none;
-        color: var(--text);
-        font-size: 1.1rem;
-        padding: 0.75rem;
-        outline: none;
-      }
-
-      .search-input::placeholder {
-        color: var(--text-muted);
-      }
-
-      .search-btn {
-        background: var(--accent);
-        color: var(--bg);
-        border: none;
-        padding: 0.75rem 1.5rem;
-        border-radius: calc(var(--radius) - 2px);
-        font-weight: 600;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-
-      .search-btn:hover {
-        background: var(--accent-hover);
-      }
-
-      .search-options {
-        display: flex;
-        gap: 1rem;
-        margin-top: 0.75rem;
-        flex-wrap: wrap;
-        justify-content: center;
-      }
-
-      .search-option {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-      }
-
-      .search-option input,
-      .search-option select {
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border);
-        color: var(--text);
-        padding: 0.35rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.85rem;
-      }
-
-      .search-option select {
-        cursor: pointer;
-      }
-
-      .stats-bar {
-        display: flex;
-        justify-content: center;
-        gap: 2rem;
-        padding: 1rem;
-        background: var(--bg-secondary);
-        border-radius: var(--radius);
-        margin-bottom: 2rem;
-        flex-wrap: wrap;
-      }
-
-      .stat {
-        text-align: center;
-      }
-
-      .stat-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: var(--accent);
-      }
-
-      .stat-label {
-        font-size: 0.85rem;
-        color: var(--text-muted);
-      }
-
-      .results-info {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1rem;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-      }
-
-      .results-grid {
-        display: grid;
-        gap: 1rem;
-      }
-
-      .result-card {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        padding: 1.25rem;
-        transition: border-color 0.2s;
-      }
-
-      .result-card:hover {
-        border-color: var(--accent);
-      }
-
-      .result-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 1rem;
-        margin-bottom: 0.75rem;
-      }
-
-      .result-name {
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: var(--accent);
-        word-break: break-word;
-      }
-
-      .result-version {
-        background: var(--bg-tertiary);
-        padding: 0.25rem 0.75rem;
-        border-radius: 999px;
-        font-size: 0.85rem;
-        font-weight: 500;
-        white-space: nowrap;
-      }
-
-      .result-attr {
-        font-family: 'SF Mono', Monaco, monospace;
-        font-size: 0.85rem;
-        color: var(--text-muted);
-        margin-bottom: 0.5rem;
-      }
-
-      .result-desc {
-        color: var(--text-muted);
-        font-size: 0.9rem;
-        margin-bottom: 1rem;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-      }
-
-      .result-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1rem;
-        font-size: 0.8rem;
-        color: var(--text-muted);
-        margin-bottom: 1rem;
-      }
-
-      .result-meta-item {
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
-      }
-
-      .result-actions {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-      }
-
-      .btn {
-        background: var(--bg-tertiary);
-        border: 1px solid var(--border);
-        color: var(--text);
-        padding: 0.5rem 0.75rem;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        cursor: pointer;
-        transition: all 0.2s;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        text-decoration: none;
-      }
-
-      .btn:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-
-      .btn-primary {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: var(--bg);
-      }
-
-      .btn-primary:hover {
-        background: var(--accent-hover);
-        border-color: var(--accent-hover);
-        color: var(--bg);
-      }
-
-      .btn-copied {
-        background: var(--success);
-        border-color: var(--success);
-        color: var(--bg);
-      }
-
-      .loading {
-        text-align: center;
-        padding: 3rem;
-        color: var(--text-muted);
-      }
-
-      .spinner {
-        width: 40px;
-        height: 40px;
-        border: 3px solid var(--border);
-        border-top-color: var(--accent);
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        margin: 0 auto 1rem;
-      }
-
-      @keyframes spin {
-        to {
-          transform: rotate(360deg);
+      @layer base {
+        html { scrollbar-color: var(--color-ink-4) transparent; }
+        body {
+          background: var(--color-ink-0);
+          color: var(--color-fog-1);
+          font-family: var(--font-sans);
+          font-feature-settings: "ss01", "cv11";
+          -webkit-font-smoothing: antialiased;
         }
+        ::selection { background: oklch(0.55 0.17 262 / 0.4); color: var(--color-fog-0); }
+        /* Hairline, dense scrollbar */
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--color-ink-3); border: 2px solid var(--color-ink-0); border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--color-ink-4); }
       }
 
-      .empty-state {
-        text-align: center;
-        padding: 3rem;
-        color: var(--text-muted);
-      }
+      @layer components {
+        .mono { font-family: var(--font-mono); font-feature-settings: "ss01", "zero"; }
+        .hairline { box-shadow: inset 0 0 0 1px var(--color-ink-4); }
+        .hairline-b { border-bottom: 1px solid var(--color-ink-4); }
+        .hairline-t { border-top: 1px solid var(--color-ink-4); }
+        .hairline-r { border-right: 1px solid var(--color-ink-4); }
+        .hairline-l { border-left: 1px solid var(--color-ink-4); }
 
-      .empty-state svg {
-        width: 64px;
-        height: 64px;
-        margin-bottom: 1rem;
-        opacity: 0.5;
-      }
-
-      .error-state {
-        text-align: center;
-        padding: 2rem;
-        background: rgba(248, 81, 73, 0.1);
-        border: 1px solid var(--error);
-        border-radius: var(--radius);
-        color: var(--error);
-      }
-
-      .pagination {
-        display: flex;
-        justify-content: center;
-        gap: 0.5rem;
-        margin-top: 2rem;
-      }
-
-      .modal-overlay {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.75);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 1rem;
-        z-index: 1000;
-        opacity: 0;
-        visibility: hidden;
-        transition: all 0.2s;
-      }
-
-      .modal-overlay.active {
-        opacity: 1;
-        visibility: visible;
-      }
-
-      .modal {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        max-width: 700px;
-        width: 100%;
-        max-height: 80vh;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-        box-shadow: var(--shadow);
-        transform: scale(0.95);
-        transition: transform 0.2s;
-      }
-
-      .modal-overlay.active .modal {
-        transform: scale(1);
-      }
-
-      .modal-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1rem 1.25rem;
-        border-bottom: 1px solid var(--border);
-      }
-
-      .modal-title {
-        font-size: 1.1rem;
-        font-weight: 600;
-      }
-
-      .modal-close {
-        background: none;
-        border: none;
-        color: var(--text-muted);
-        cursor: pointer;
-        padding: 0.5rem;
-        font-size: 1.25rem;
-        line-height: 1;
-      }
-
-      .modal-close:hover {
-        color: var(--text);
-      }
-
-      .modal-body {
-        padding: 1.25rem;
-        overflow-y: auto;
-      }
-
-      .version-list {
-        display: grid;
-        gap: 0.75rem;
-      }
-
-      .version-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        padding: 0.75rem 1rem;
-        background: var(--bg-tertiary);
-        border-radius: 6px;
-        gap: 1rem;
-      }
-
-      .version-info {
-        flex: 1;
-        min-width: 0;
-      }
-
-      .version-number {
-        font-weight: 600;
-        margin-bottom: 0.25rem;
-      }
-
-      .version-dates {
-        font-size: 0.8rem;
-        color: var(--text-muted);
-      }
-
-      .version-commit {
-        font-family: 'SF Mono', Monaco, monospace;
-        font-size: 0.75rem;
-        color: var(--text-muted);
-        margin-top: 0.25rem;
-      }
-
-      .version-item .btn {
-        flex-shrink: 0;
-        margin-top: 0.25rem;
-      }
-
-      .platform-badges {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-        margin: 0.75rem 0;
-      }
-
-      .platform-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.4rem;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        padding: 0.3rem 0.6rem;
-        border-radius: 4px;
-        font-size: 0.7rem;
-        color: var(--text-muted);
-        font-family: 'SF Mono', Monaco, monospace;
-      }
-
-      .platform-badge svg {
-        opacity: 0.6;
-        flex-shrink: 0;
-      }
-
-      .platform-badge.highlighted {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: var(--bg);
-      }
-
-      .platform-badge.highlighted svg {
-        opacity: 1;
-      }
-
-      .legacy-warning {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        background: rgba(210, 153, 34, 0.15);
-        border: 1px solid var(--warning);
-        color: var(--warning);
-        padding: 0.5rem 0.75rem;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        margin: 0.75rem 0;
-      }
-
-      .legacy-warning svg {
-        flex-shrink: 0;
-      }
-
-      .insecure-warning {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.5rem;
-        background: rgba(248, 81, 73, 0.15);
-        border: 1px solid var(--error);
-        color: var(--error);
-        padding: 0.5rem 0.75rem;
-        border-radius: 6px;
-        font-size: 0.8rem;
-        margin: 0.75rem 0;
-      }
-
-      .insecure-warning svg {
-        flex-shrink: 0;
-        margin-top: 2px;
-      }
-
-      .insecure-warning-content {
-        flex: 1;
-      }
-
-      .insecure-warning-title {
-        font-weight: 600;
-        margin-bottom: 0.25rem;
-      }
-
-      .insecure-warning-list {
-        font-size: 0.75rem;
-        opacity: 0.9;
-        line-height: 1.4;
-      }
-
-      .code-block {
-        background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 1rem;
-        font-family: 'SF Mono', Monaco, monospace;
-        font-size: 0.85rem;
-        overflow-x: auto;
-        position: relative;
-      }
-
-      .code-block .copy-btn {
-        position: absolute;
-        top: 0.5rem;
-        right: 0.5rem;
-      }
-
-      footer {
-        text-align: center;
-        padding: 2rem;
-        color: var(--text-muted);
-        font-size: 0.85rem;
-      }
-
-      footer a {
-        color: var(--accent);
-        text-decoration: none;
-      }
-
-      footer a:hover {
-        text-decoration: underline;
-      }
-
-      .toast {
-        position: fixed;
-        bottom: 1.5rem;
-        right: 1.5rem;
-        background: var(--bg-secondary);
-        border: 1px solid var(--border);
-        padding: 0.75rem 1rem;
-        border-radius: var(--radius);
-        box-shadow: var(--shadow);
-        transform: translateY(100px);
-        opacity: 0;
-        transition: all 0.3s;
-        z-index: 1001;
-      }
-
-      .toast.show {
-        transform: translateY(0);
-        opacity: 1;
-      }
-
-      @media (max-width: 640px) {
-        .logo {
-          font-size: 2rem;
+        /* Terminal prompt bar */
+        .prompt-shell {
+          background: var(--color-ink-1);
+          border: 1px solid var(--color-ink-4);
+          font-family: var(--font-mono);
         }
-        .stats-bar {
-          gap: 1rem;
+        .prompt-shell:focus-within {
+          border-color: var(--color-nix-500);
+          box-shadow: 0 0 0 3px oklch(0.55 0.17 262 / 0.18);
         }
-        .stat-value {
-          font-size: 1.2rem;
+
+        /* Subtle scanline flourish — very faint */
+        .scanlines::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background-image: repeating-linear-gradient(
+            to bottom,
+            transparent 0,
+            transparent 2px,
+            oklch(1 0 0 / 0.012) 2px,
+            oklch(1 0 0 / 0.012) 3px
+          );
+          mix-blend-mode: overlay;
         }
-        .result-header {
-          flex-direction: column;
-          gap: 0.5rem;
+
+        /* ASCII divider line */
+        .ascii-rule {
+          color: var(--color-ink-4);
+          font-family: var(--font-mono);
+          user-select: none;
+          white-space: nowrap;
+          overflow: hidden;
+          letter-spacing: 0;
         }
-        .result-actions {
-          flex-direction: column;
+
+        /* Badge / chip */
+        .chip {
+          display: inline-flex; align-items: center; gap: 0.35rem;
+          padding: 0.125rem 0.5rem;
+          font-family: var(--font-mono);
+          font-size: 11px;
+          line-height: 1.6;
+          border: 1px solid var(--color-ink-4);
+          background: var(--color-ink-1);
+          color: var(--color-fog-2);
+          border-radius: 2px;
+          white-space: nowrap;
         }
+        .chip.active {
+          border-color: var(--color-nix-500);
+          color: var(--color-nix-300);
+          background: oklch(0.55 0.17 262 / 0.08);
+        }
+        .chip.danger {
+          border-color: oklch(0.66 0.19 25 / 0.6);
+          color: var(--color-red-glow);
+          background: oklch(0.66 0.19 25 / 0.08);
+        }
+        .chip.warn {
+          border-color: oklch(0.78 0.14 80 / 0.5);
+          color: var(--color-amber-glow);
+          background: oklch(0.78 0.14 80 / 0.06);
+        }
+        .chip.ok {
+          border-color: oklch(0.74 0.15 150 / 0.45);
+          color: var(--color-green-glow);
+          background: oklch(0.74 0.15 150 / 0.06);
+        }
+
         .btn {
-          width: 100%;
-          justify-content: center;
+          display: inline-flex; align-items: center; gap: 0.4rem;
+          padding: 0.35rem 0.65rem;
+          font-family: var(--font-mono);
+          font-size: 12px;
+          color: var(--color-fog-1);
+          background: var(--color-ink-2);
+          border: 1px solid var(--color-ink-4);
+          border-radius: 2px;
+          cursor: pointer;
+          transition: all 120ms ease;
         }
+        .btn:hover { border-color: var(--color-fog-4); background: var(--color-ink-3); color: var(--color-fog-0); }
+        .btn-primary { background: var(--color-nix-600); color: oklch(0.98 0.01 255); border-color: var(--color-nix-500); }
+        .btn-primary:hover { background: var(--color-nix-500); color: white; }
+        .btn-ghost { background: transparent; }
+
+        .kbd {
+          font-family: var(--font-mono);
+          font-size: 10px;
+          padding: 1px 5px;
+          border: 1px solid var(--color-ink-4);
+          border-bottom-width: 2px;
+          border-radius: 3px;
+          color: var(--color-fog-2);
+          background: var(--color-ink-1);
+          line-height: 1.4;
+        }
+
+        .panel { background: var(--color-ink-1); border: 1px solid var(--color-ink-4); }
+
+        /* Blinking caret */
+        @keyframes caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+        .caret-blink { animation: caret 1.1s steps(1) infinite; }
+
+        /* Subtle enter animation for result rows */
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .anim-in { animation: slideUp 220ms ease-out backwards; }
+
+        /* Focus ring on interactive elements */
+        :focus-visible { outline: 2px solid var(--color-nix-500); outline-offset: 2px; border-radius: 2px; }
       }
     </style>
   </head>
-  <body>
-    <div class="container">
-      <header>
-        <h1 class="logo">nxv</h1>
-        <p class="tagline">Find any version of any Nix package, instantly</p>
-      </header>
-
-      <div class="search-container">
-        <div class="search-box">
-          <input
-            type="text"
-            class="search-input"
-            id="searchInput"
-            placeholder="Search packages... (e.g., python, nodejs 18, ruby 2.7)"
-            autocomplete="off"
-          />
-          <button class="search-btn" id="searchBtn">Search</button>
-        </div>
-        <div class="search-options">
-          <label class="search-option">
-            <input type="checkbox" id="exactMatch" />
-            Exact match
-          </label>
-          <label class="search-option">
-            Version:
-            <input type="text" id="versionFilter" placeholder="e.g., 3.11" style="width: 80px" />
-          </label>
-          <label class="search-option">
-            Arch:
-            <select id="archFilter">
-              <option value="">All</option>
-              <option value="x86_64-linux">x86_64 Linux</option>
-              <option value="aarch64-linux">aarch64 Linux</option>
-              <option value="x86_64-darwin">x86_64 macOS</option>
-              <option value="aarch64-darwin">aarch64 macOS</option>
-            </select>
-          </label>
-          <label class="search-option">
-            Sort:
-            <select id="sortOrder">
-              <option value="date">Date</option>
-              <option value="name">Name</option>
-              <option value="version">Version</option>
-            </select>
-          </label>
-        </div>
-      </div>
-
-      <div class="stats-bar" id="statsBar">
-        <div class="stat">
-          <div class="stat-value" id="statPackages">-</div>
-          <div class="stat-label">Packages</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value" id="statVersions">-</div>
-          <div class="stat-label">Versions</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value" id="statRanges">-</div>
-          <div class="stat-label">Records</div>
-        </div>
-        <div class="stat">
-          <div class="stat-value" id="statHistory">-</div>
-          <div class="stat-label">Years of History</div>
-        </div>
-      </div>
-      <div
-        class="index-updated"
-        id="indexUpdated"
-        style="
-          display: none;
-          text-align: center;
-          color: var(--text-muted);
-          font-size: 0.85rem;
-          margin-top: -1rem;
-          margin-bottom: 1.5rem;
-        "
-      >
-        Index updated
-        <span id="indexUpdatedDate"></span>
-      </div>
-
-      <div id="resultsInfo" class="results-info" style="display: none">
-        <span id="resultsCount"></span>
-        <span id="resultsTime"></span>
-      </div>
-
-      <div id="resultsContainer">
-        <div class="empty-state" id="emptyState">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.35-4.35" />
+  <body class="min-h-screen">
+    <!-- Top command bar -->
+    <header class="hairline-b sticky top-0 z-30 backdrop-blur" style="background: color-mix(in oklch, var(--color-ink-0) 92%, transparent);">
+      <div class="mx-auto max-w-[1320px] px-6 h-14 flex items-center gap-6">
+        <a href="#" class="flex items-center gap-2.5 group">
+          <!-- Monogram mark: nested brackets -->
+          <svg width="28" height="28" viewBox="0 0 28 28" class="text-[var(--color-nix-400)]" aria-hidden="true">
+            <path d="M5 4 L5 24 M5 4 L10 4 M5 24 L10 24" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <path d="M23 4 L23 24 M23 4 L18 4 M23 24 L18 24" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <text x="14" y="18" text-anchor="middle" font-family="JetBrains Mono" font-size="11" font-weight="700" fill="currentColor">nxv</text>
           </svg>
-          <p>Start typing to search for Nix packages</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal-overlay" id="historyModal">
-      <div class="modal">
-        <div class="modal-header">
-          <h3 class="modal-title" id="historyTitle">Version History</h3>
-          <button class="modal-close" id="historyClose">&times;</button>
-        </div>
-        <div class="modal-body" id="historyBody">
-          <div class="loading">
-            <div class="spinner"></div>
-            <p>Loading version history...</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="toast" id="toast"></div>
-
-    <footer>
-      <p
-        style="
-          margin-bottom: 0.75rem;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 0.5rem;
-          flex-wrap: wrap;
-        "
-      >
-        <a
-          href="https://github.com/utensils/nxv"
-          target="_blank"
-          style="display: inline-flex; align-items: center; gap: 0.35rem"
-        >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            style="vertical-align: middle"
-          >
-            <path
-              d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
-            />
-          </svg>
-          GitHub
+          <span class="mono text-[13px] text-[var(--color-fog-2)] tracking-tight">
+            <span class="text-[var(--color-fog-0)] font-semibold">nxv</span><span class="text-[var(--color-fog-4)]">@</span><span>urandom.io</span>
+          </span>
         </a>
-        <span>&mdash;</span>
-        <a href="/docs">API Docs</a>
-        <span>&mdash;</span>
-        <a href="/openapi.json">OpenAPI Spec</a>
-      </p>
-      <p style="color: var(--text-muted); font-size: 0.8rem">
-        Built with love for the Nix community by
-        <a href="https://github.com/jamesbrink">James Brink</a>
-        &mdash;
-        <a href="https://github.com/utensils/nxv/blob/main/LICENSE">MIT License</a>
-      </p>
-    </footer>
 
-    <script>
-      const API_BASE = '/api/v1';
-      let searchTimeout;
-      let currentOffset = 0;
-      const LIMIT = 25;
-      let versionAutoPopulated = false; // Track if version was auto-filled
+        <nav class="ml-4 hidden md:flex items-center gap-1 mono text-[12px]">
+          <a class="px-2.5 py-1.5 text-[var(--color-fog-0)] hairline rounded-[2px]" href="/">search</a>
+          <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="#stats">stats</a>
+          <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="/docs">api</a>
+          <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="https://github.com/utensils/nxv#installation">cli</a>
+        </nav>
 
-      // Store expressions by ID to avoid HTML escaping issues
-      const expressionStore = new Map();
+        <div class="flex-1"></div>
 
-      // Parse "package version" style queries (e.g., "python 2.7", "nodejs 18.0.0")
-      const parseSearchQuery = (input) => {
-        const trimmed = input.trim();
+        <button id="paletteTrigger" class="hidden sm:flex items-center gap-2 px-2.5 py-1.5 hairline rounded-[2px] mono text-[11px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <span>jump to…</span>
+          <span class="kbd">⌘K</span>
+        </button>
 
-        // Match patterns like:
-        // - "python 2.7", "python 2.7.18"
-        // - "nodejs 18", "nodejs 18.0.0"
-        // - "gcc 12.3.0"
-        // - "ruby 2.7.6-p219", "node 18.0.0-alpha.1"
-        // - "package v1.2.3" (version with 'v' prefix)
-        // - "package 20230101" (date-based versions)
-        //
-        // Version pattern: starts with digit or 'v' followed by digit,
-        // then any combo of digits, dots, dashes, underscores, and alphanumerics
-        const match = trimmed.match(/^(.+?)\s+(v?\d[\d.]*[\w.-]*)$/i);
+        <a href="https://github.com/utensils/nxv" target="_blank" rel="noopener" class="p-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition" title="GitHub">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        </a>
+      </div>
+      <!-- Status strip -->
+      <div class="mx-auto max-w-[1320px] px-6 h-6 flex items-center gap-4 mono text-[10.5px] text-[var(--color-fog-4)] border-t" style="border-color: var(--color-ink-2)">
+        <span class="flex items-center gap-1.5">
+          <span class="inline-block w-1.5 h-1.5 rounded-full" style="background: var(--color-green-glow); box-shadow: 0 0 6px oklch(0.74 0.15 150 / 0.6);"></span>
+          api operational · p50 34ms
+        </span>
+        <span class="text-[var(--color-ink-4)]">│</span>
+        <span>index · <span class="text-[var(--color-fog-2)]">2026-04-19</span> · commit <span class="text-[var(--color-fog-2)]">a7f2c91</span></span>
+        <span class="text-[var(--color-ink-4)]">│</span>
+        <span>nixpkgs · <span class="text-[var(--color-fog-2)]">2017-01 → 2026-04</span></span>
+        <span class="flex-1"></span>
+        <span class="hidden md:inline">press <span class="kbd">/</span> to focus</span>
+      </div>
+    </header>
 
-        if (match) {
-          const [, pkg, ver] = match;
-          // Only split if the package part doesn't look like it ends with a version
-          // (e.g., don't split "python3" into "python" + "3")
-          if (pkg.length > 0 && !pkg.match(/\d$/)) {
-            return { package: pkg.trim(), version: ver };
-          }
-        }
-
-        return { package: trimmed, version: null };
-      };
-
-      // Format number with commas
-      const formatNumber = (n) => n?.toLocaleString() ?? '-';
-
-      // Get user-friendly error message for HTTP status codes
-      const getHttpErrorMessage = (status, defaultMsg = 'Request failed') => {
-        switch (status) {
-          case 502:
-            return 'Bad gateway - the server is temporarily unavailable. Please try again later.';
-          case 503:
-            return 'Service unavailable - the server is overloaded or under maintenance.';
-          case 504:
-            return 'Gateway timeout - the server took too long to respond. Please try again.';
-          default:
-            return status >= 500
-              ? `Server error (HTTP ${status}). Please try again later.`
-              : `${defaultMsg} (HTTP ${status})`;
-        }
-      };
-
-      // Format date nicely
-      const formatDate = (dateStr) => {
-        const d = new Date(dateStr);
-        return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-      };
-
-      // Check if a date predates flake.nix in nixpkgs (Feb 10, 2020)
-      const FLAKE_EPOCH = new Date('2020-02-10T00:00:00Z');
-      const predatesFlakes = (dateStr) => new Date(dateStr) < FLAKE_EPOCH;
-
-      // Parse known_vulnerabilities field into an array (handles JSON string or array)
-      const parseVulnerabilities = (pkg) => {
-        if (!pkg.known_vulnerabilities) return [];
-        try {
-          const vulns =
-            typeof pkg.known_vulnerabilities === 'string'
-              ? JSON.parse(pkg.known_vulnerabilities)
-              : pkg.known_vulnerabilities;
-          return Array.isArray(vulns) ? vulns : [];
-        } catch {
-          return [];
-        }
-      };
-
-      // Check if package has known vulnerabilities (is insecure)
-      const isInsecure = (pkg) => parseVulnerabilities(pkg).length > 0;
-
-      // Get vulnerabilities list from package
-      const getVulnerabilities = (pkg) => parseVulnerabilities(pkg);
-
-      // Safely get short commit hash (7 chars) with null/undefined handling
-      const getShortHash = (hash) => {
-        if (!hash || typeof hash !== 'string') return '';
-        return hash.substring(0, Math.min(7, hash.length));
-      };
-
-      // Format platforms into clean arch badges
-      const formatPlatforms = (platforms) => {
-        if (!platforms) return [];
-        const archMap = {
-          'x86_64-linux': 'x86_64 Linux',
-          'aarch64-linux': 'aarch64 Linux',
-          'x86_64-darwin': 'x86_64 macOS',
-          'aarch64-darwin': 'aarch64 macOS',
-          'i686-linux': 'i686 Linux',
-          'armv7l-linux': 'armv7 Linux',
-        };
-        // Parse platforms string (could be JSON array or comma-separated)
-        let platformList = [];
-        try {
-          platformList = JSON.parse(platforms);
-        } catch {
-          platformList = platforms.split(',').map((p) => p.trim());
-        }
-        return platformList
-          .map((p) => archMap[p] || p)
-          .filter((p) => p && p.length > 0)
-          .slice(0, 4); // Limit to 4 to avoid clutter
-      };
-
-      // Format platforms with raw values for matching against filter
-      const formatPlatformsWithRaw = (platforms) => {
-        if (!platforms) return [];
-        const archMap = {
-          'x86_64-linux': 'x86_64 Linux',
-          'aarch64-linux': 'aarch64 Linux',
-          'x86_64-darwin': 'x86_64 macOS',
-          'aarch64-darwin': 'aarch64 macOS',
-          'i686-linux': 'i686 Linux',
-          'armv7l-linux': 'armv7 Linux',
-        };
-        let platformList = [];
-        try {
-          platformList = JSON.parse(platforms);
-        } catch {
-          platformList = platforms.split(',').map((p) => p.trim());
-        }
-        return platformList
-          .filter((p) => p && p.length > 0)
-          .slice(0, 4)
-          .map((p) => ({ raw: p, display: archMap[p] || p }));
-      };
-
-      // Show toast notification
-      const showToast = (message) => {
-        const toast = document.getElementById('toast');
-        toast.textContent = message;
-        toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 2000);
-      };
-
-      // Copy to clipboard with fallback
-      const copyToClipboard = async (text, btn) => {
-        if (!text) {
-          showToast('Nothing to copy');
-          return;
-        }
-
-        const showSuccess = () => {
-          const originalText = btn.innerHTML;
-          btn.classList.add('btn-copied');
-          btn.innerHTML =
-            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
-          setTimeout(() => {
-            btn.classList.remove('btn-copied');
-            btn.innerHTML = originalText;
-          }, 1500);
-        };
-
-        // Try modern clipboard API first
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          try {
-            await navigator.clipboard.writeText(text);
-            showSuccess();
-            return;
-          } catch (err) {
-            // Fall through to fallback
-          }
-        }
-
-        // Fallback for older browsers or non-HTTPS
-        try {
-          const textarea = document.createElement('textarea');
-          textarea.value = text;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.select();
-          document.execCommand('copy');
-          document.body.removeChild(textarea);
-          showSuccess();
-        } catch (err) {
-          showToast('Failed to copy - try manually selecting');
-        }
-      };
-
-      // Load stats
-      const loadStats = async () => {
-        try {
-          const res = await fetch(`${API_BASE}/stats`);
-
-          if (!res.ok) {
-            console.error(`Failed to load stats: HTTP ${res.status}`);
-            return;
-          }
-
-          // Check content-type before parsing JSON
-          const contentType = res.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
-            console.error('Stats response was not JSON');
-            return;
-          }
-
-          const { data } = await res.json();
-
-          document.getElementById('statPackages').textContent = formatNumber(data.unique_names);
-          document.getElementById('statVersions').textContent = formatNumber(data.unique_versions);
-          document.getElementById('statRanges').textContent = formatNumber(data.total_ranges);
-
-          if (data.oldest_commit_date && data.newest_commit_date) {
-            const oldest = new Date(data.oldest_commit_date).getFullYear();
-            const newest = new Date(data.newest_commit_date).getFullYear();
-            document.getElementById('statHistory').textContent = `${newest - oldest}+`;
-          }
-
-          // Show index updated date (prefer last_indexed_date, fall back to newest_commit_date)
-          const indexDate = data.last_indexed_date || data.newest_commit_date;
-          if (indexDate) {
-            const updatedDate = new Date(indexDate);
-            document.getElementById('indexUpdatedDate').textContent =
-              updatedDate.toLocaleDateString('en-US', {
-                year: 'numeric',
-                month: 'short',
-                day: 'numeric',
-              });
-            document.getElementById('indexUpdated').style.display = 'block';
-          }
-        } catch (err) {
-          console.error('Failed to load stats:', err);
-        }
-      };
-
-      // Search packages
-      const search = async (query, offset = 0) => {
-        const container = document.getElementById('resultsContainer');
-        const resultsInfo = document.getElementById('resultsInfo');
-        const versionInput = document.getElementById('versionFilter');
-
-        if (!query.trim()) {
-          // Clear auto-populated version when search is cleared
-          if (versionAutoPopulated) {
-            versionInput.value = '';
-            versionAutoPopulated = false;
-          }
-          container.innerHTML = `
-          <div class="empty-state" id="emptyState">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"/>
-              <path d="m21 21-4.35-4.35"/>
-            </svg>
-            <p>Start typing to search for Nix packages</p>
+    <main class="mx-auto max-w-[1320px] px-6 pb-32 relative">
+      <!-- Hero / search -->
+      <section class="pt-10 md:pt-14">
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-10 items-end">
+          <div>
+            <div class="mono text-[11px] text-[var(--color-fog-4)] mb-3 tracking-widest">// NIX VERSION INDEX &nbsp;·&nbsp; v0.6.2</div>
+            <h1 class="text-[44px] md:text-[60px] leading-[0.95] font-semibold tracking-[-0.03em] text-[var(--color-fog-0)]">
+              Every version of every<br/>
+              <span class="mono text-[var(--color-nix-400)] font-semibold">nix</span>
+              <span class="mono text-[var(--color-fog-0)] font-semibold">package</span>,<br/>
+              <span class="text-[var(--color-fog-2)]">indexed since 2017.</span>
+            </h1>
+            <p class="mt-5 text-[15px] text-[var(--color-fog-2)] max-w-[560px] leading-relaxed">
+              Find the exact <span class="mono text-[var(--color-fog-0)]">nixpkgs</span> commit for the version you need —
+              Python 2.7 for that legacy project, or an obscure patched Ruby from 2019.
+              Query locally, via the CLI, or against <span class="mono text-[var(--color-fog-0)]">nxv serve</span>.
+            </p>
           </div>
-        `;
-          resultsInfo.style.display = 'none';
-          return;
-        }
 
-        container.innerHTML =
-          '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
-        resultsInfo.style.display = 'none';
-
-        const startTime = performance.now();
-
-        try {
-          // Smart parse: detect "python 2.7" style queries
-          const parsed = parseSearchQuery(query);
-          const currentVersion = versionInput.value.trim();
-
-          // If query contains a version (e.g., "python 2.7"), always use just the package name
-          // The version goes to the version filter (either auto-populated or manually overridden)
-          let effectiveQuery = parsed.version ? parsed.package : query;
-          let effectiveVersion = currentVersion;
-
-          if (parsed.version && (!currentVersion || versionAutoPopulated)) {
-            // Auto-populate version field when user types "python 2.7" style query
-            effectiveVersion = parsed.version;
-            versionInput.value = parsed.version;
-            versionAutoPopulated = true;
-            versionInput.style.borderColor = 'var(--accent)';
-            versionInput.style.transition = 'border-color 0.3s';
-            setTimeout(() => {
-              versionInput.style.borderColor = '';
-            }, 2000);
-          } else if (!parsed.version && versionAutoPopulated) {
-            // Clear auto-populated version if query no longer has version
-            versionInput.value = '';
-            versionAutoPopulated = false;
-            effectiveVersion = '';
-          }
-
-          const params = new URLSearchParams({
-            q: effectiveQuery,
-            limit: LIMIT,
-            offset: offset,
-            sort: document.getElementById('sortOrder').value,
-          });
-
-          if (document.getElementById('exactMatch').checked) {
-            params.append('exact', 'true');
-          }
-
-          if (effectiveVersion) {
-            params.append('version', effectiveVersion);
-          }
-
-          const res = await fetch(`${API_BASE}/search?${params}`);
-          const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
-
-          // Handle non-OK responses with user-friendly messages
-          if (!res.ok) {
-            // Check if response is JSON before trying to parse
-            const contentType = res.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-              const errorJson = await res.json().catch(() => null);
-              throw new Error(errorJson?.message || errorJson?.error || getHttpErrorMessage(res.status, 'Search failed'));
-            }
-            throw new Error(getHttpErrorMessage(res.status, 'Search failed'));
-          }
-
-          const json = await res.json();
-
-          let { data, meta } = json;
-          currentOffset = offset;
-
-          // Client-side architecture filter
-          const archFilter = document.getElementById('archFilter').value;
-          if (archFilter) {
-            data = data.filter((pkg) => {
-              if (!pkg.platforms) return false;
-              try {
-                const platforms = JSON.parse(pkg.platforms);
-                return platforms.includes(archFilter);
-              } catch {
-                return pkg.platforms.includes(archFilter);
-              }
-            });
-          }
-
-          if (data.length === 0) {
-            container.innerHTML = `
-            <div class="empty-state">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <path d="m15 9-6 6M9 9l6 6"/>
-              </svg>
-              <p>No packages found for "${escapeHtml(query)}"${archFilter ? ` on ${archFilter}` : ''}</p>
+          <!-- Stats block, minimal -->
+          <aside class="mono text-[12px] text-[var(--color-fog-3)] leading-[1.8] select-none">
+            <div class="ascii-rule text-[10px] leading-none mb-2">┌─ INDEX STATS ──────────────────────┐</div>
+            <div class="grid grid-cols-2 gap-x-6 gap-y-1 px-3">
+              <span>packages</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">186,417</span>
+              <span>versions</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">4,209,881</span>
+              <span>records</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">12,384,502</span>
+              <span>commits</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">98,317</span>
+              <span>history</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">9+ yrs</span>
             </div>
-          `;
-            resultsInfo.style.display = 'none';
-            return;
-          }
+            <div class="ascii-rule text-[10px] leading-none mt-2">└────────────────────────────────────┘</div>
+          </aside>
+        </div>
 
-          resultsInfo.style.display = 'flex';
-          const filteredNote = archFilter ? ` (filtered from ${meta?.total || '?'})` : '';
-          document.getElementById('resultsCount').textContent =
-            `Showing ${offset + 1}-${offset + data.length} of ${formatNumber(data.length)} results${filteredNote}`;
-          document.getElementById('resultsTime').textContent = `${elapsed}s`;
-
-          container.innerHTML = `
-          <div class="results-grid">
-            ${data.map((pkg) => renderPackageCard(pkg)).join('')}
-          </div>
-          ${archFilter ? '' : renderPagination(meta?.total || data.length, offset)}
-        `;
-
-          // Attach event listeners
-          attachCardListeners();
-          attachPaginationListeners(query);
-        } catch (err) {
-          container.innerHTML = `
-          <div class="error-state">
-            <p>Error: ${escapeHtml(err.message)}</p>
-          </div>
-        `;
-        }
-      };
-
-      // Escape HTML
-      const escapeHtml = (str) => {
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-      };
-
-      // Validate URL has safe protocol (http: or https: only)
-      const isSafeUrl = (url) => {
-        try {
-          const parsed = new URL(url);
-          return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-        } catch {
-          return false;
-        }
-      };
-
-      // Render a package card
-      const renderPackageCard = (pkg) => {
-        const cardId = `pkg-${pkg.id}`;
-        const isLegacy = predatesFlakes(pkg.last_commit_date);
-        const shortHash = getShortHash(pkg.last_commit_hash);
-        const hasCommitHash = shortHash.length > 0;
-
-        // Use flake syntax for modern packages, legacy fetchTarball for old ones
-        // Add NIXPKGS_ALLOW_INSECURE=1 and --impure for insecure packages
-        const pkgInsecure = isInsecure(pkg);
-        const insecurePrefix = pkgInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
-        const impureFlag = pkgInsecure ? ' --impure' : '';
-
-        // Only generate expressions if we have a valid commit hash
-        const nixExpr = hasCommitHash
-          ? (isLegacy
-              ? `(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}`
-              : `nixpkgs#${pkg.attribute_path}  # or nixpkgs/${shortHash}#${pkg.attribute_path}`)
-          : '';
-        const nixShell = hasCommitHash
-          ? (isLegacy
-              ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${pkg.attribute_path}'`
-              : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${pkg.attribute_path}`)
-          : '';
-
-        // Store expressions in the map (only if valid)
-        if (hasCommitHash) {
-          expressionStore.set(`${cardId}-expr`, nixExpr);
-          expressionStore.set(`${cardId}-shell`, nixShell);
-          expressionStore.set(`${cardId}-legacy`, isLegacy);
-        }
-
-        return `
-        <div class="result-card" data-attr="${escapeHtml(pkg.attribute_path)}">
-          <div class="result-header">
-            <span class="result-name">${escapeHtml(pkg.name)}</span>
-            <span class="result-version" ${isInsecure(pkg) ? 'style="background: rgba(248, 81, 73, 0.3); border: 1px solid var(--error);"' : ''}>${escapeHtml(pkg.version)}${isInsecure(pkg) ? ' ⚠' : ''}</span>
-          </div>
-          <div class="result-attr">${escapeHtml(pkg.attribute_path)}</div>
-          ${pkg.description ? `<div class="result-desc">${escapeHtml(pkg.description)}</div>` : ''}
-          <div class="result-meta">
-            ${pkg.license ? `<span class="result-meta-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><circle cx="12" cy="16" r="1"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> ${escapeHtml(pkg.license)}</span>` : ''}
-            <span class="result-meta-item">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-              ${formatDate(pkg.first_commit_date)} - ${formatDate(pkg.last_commit_date)}
+        <!-- Prompt-style search -->
+        <div class="mt-10 relative">
+          <div class="prompt-shell rounded-[2px] flex items-center h-14 px-4 gap-3">
+            <span class="mono text-[13px] text-[var(--color-nix-400)] select-none">
+              nxv<span class="text-[var(--color-fog-4)]">:~</span><span class="text-[var(--color-fog-0)]">$</span>
+            </span>
+            <span class="mono text-[13px] text-[var(--color-fog-3)] select-none hidden sm:inline">search</span>
+            <input
+              id="searchInput"
+              type="text"
+              autocomplete="off"
+              autofocus
+              placeholder="python 2.7   •   nodejs 18   •   ruby 2.6   •   gcc 12.3"
+              class="mono flex-1 bg-transparent border-0 outline-none text-[15px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]"
+            />
+            <span class="mono text-[15px] text-[var(--color-nix-400)] caret-blink">▌</span>
+            <span class="hidden sm:inline-flex items-center gap-1 mono text-[10px] text-[var(--color-fog-4)]">
+              <span class="kbd">↵</span>
+              run
             </span>
           </div>
-          ${(() => {
-            const platforms = formatPlatformsWithRaw(pkg.platforms);
-            if (platforms.length === 0) return '';
-            const activeArch = document.getElementById('archFilter').value;
-            return `<div class="platform-badges">${platforms
-              .map((p) => {
-                const isHighlighted = activeArch && p.raw === activeArch;
-                return `<span class="platform-badge${isHighlighted ? ' highlighted' : ''}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>${escapeHtml(p.display)}</span>`;
-              })
-              .join('')}</div>`;
-          })()}
-          ${
-            isInsecure(pkg)
-              ? `
-          <div class="insecure-warning">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <div class="insecure-warning-content">
-              <div class="insecure-warning-title">This package has known vulnerabilities</div>
-              <div class="insecure-warning-list">${getVulnerabilities(pkg)
-                .map((v) => escapeHtml(v))
-                .join(', ')}</div>
-            </div>
-          </div>
-          `
-              : ''
-          }
-          ${
-            predatesFlakes(pkg.last_commit_date)
-              ? `
-          <div class="legacy-warning">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            Very old nixpkgs (pre-2020) may not build with modern Nix
-          </div>
-          `
-              : ''
-          }
-          <div class="result-actions">
-            ${hasCommitHash ? `
-            <button class="btn copy-expr" data-id="${cardId}-expr">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              ${isLegacy ? 'Copy Nix Expression' : 'Copy Flake Ref'}
-            </button>
-            <button class="btn copy-shell" data-id="${cardId}-shell">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6M12 19h8"/></svg>
-              ${isLegacy ? 'Copy nix-shell' : 'Copy nix shell'}
-            </button>
-            ` : ''}
-            ${
-              hasCommitHash && pkg.source_path
-                ? `
-              <a class="btn" href="https://github.com/NixOS/nixpkgs/blob/${pkg.last_commit_hash}/${escapeHtml(pkg.source_path)}" target="_blank" rel="noopener" title="View source in nixpkgs">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                View Source
-              </a>
-            `
-                : hasCommitHash ? `
-              <a class="btn" href="https://github.com/NixOS/nixpkgs/tree/${pkg.last_commit_hash}" target="_blank" rel="noopener" title="View nixpkgs at this commit">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                View nixpkgs
-              </a>
-            ` : ''
-            }
-            ${
-              pkg.homepage && isSafeUrl(pkg.homepage)
-                ? `
-              <a class="btn" href="${escapeHtml(pkg.homepage)}" target="_blank" rel="noopener" title="Visit project homepage">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                Homepage
-              </a>
-            `
-                : ''
-            }
-            <button class="btn btn-primary view-history" data-attr="${escapeHtml(pkg.attribute_path)}">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              All Versions
-            </button>
+
+          <!-- Filter strip -->
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button data-filter="exact" class="chip">exact: <span class="ml-1 text-[var(--color-fog-0)]">off</span></button>
+            <button data-filter="version" class="chip">version: <span class="ml-1 text-[var(--color-fog-0)]">any</span></button>
+            <button data-filter="arch" class="chip">arch: <span class="ml-1 text-[var(--color-fog-0)]">any</span></button>
+            <button data-filter="license" class="chip">license: <span class="ml-1 text-[var(--color-fog-0)]">any</span></button>
+            <button data-filter="include-insecure" class="chip">include insecure</button>
+            <button data-filter="sort" class="chip">sort: <span class="ml-1 text-[var(--color-fog-0)]">date</span></button>
+            <div class="flex-1"></div>
+            <span class="mono text-[11px] text-[var(--color-fog-4)]">try:</span>
+            <button class="chip example">python 2.7</button>
+            <button class="chip example">nodejs 18</button>
+            <button class="chip example">gcc 4.9</button>
+            <button class="chip example">ffmpeg 5</button>
           </div>
         </div>
-      `;
-      };
+      </section>
 
-      // Render pagination
-      const renderPagination = (total, offset) => {
-        if (total <= LIMIT) return '';
-
-        const pages = Math.ceil(total / LIMIT);
-        const currentPage = Math.floor(offset / LIMIT) + 1;
-
-        return `
-        <div class="pagination">
-          <button class="btn" ${currentPage === 1 ? 'disabled' : ''} data-page="${currentPage - 1}">Previous</button>
-          <span style="padding: 0.5rem 1rem; color: var(--text-muted);">Page ${currentPage} of ${pages}</span>
-          <button class="btn" ${currentPage === pages ? 'disabled' : ''} data-page="${currentPage + 1}">Next</button>
+      <!-- Results pane -->
+      <section class="mt-10" id="resultsSection">
+        <!-- Result meta bar -->
+        <div class="flex items-center gap-4 mono text-[11.5px] text-[var(--color-fog-3)] h-8">
+          <span id="resultsCount" class="text-[var(--color-fog-1)]">results / —</span>
+          <span class="text-[var(--color-ink-4)]">│</span>
+          <span id="resultsTime">—</span>
+          <span class="flex-1"></span>
+          <span class="text-[var(--color-fog-4)]">view:</span>
+          <button data-view="rows" class="px-2 py-0.5 hairline rounded-[2px] text-[var(--color-fog-0)]">rows</button>
+          <button data-view="cards" class="px-2 py-0.5 text-[var(--color-fog-4)] hover:text-[var(--color-fog-1)]">cards</button>
         </div>
-      `;
-      };
 
-      // Attach card event listeners
-      const attachCardListeners = () => {
-        document.querySelectorAll('.copy-expr').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const text = expressionStore.get(btn.dataset.id);
-            copyToClipboard(text, btn);
-          });
-        });
+        <div class="ascii-rule text-[10px] leading-none mt-1 mb-2">
+          ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+        </div>
 
-        document.querySelectorAll('.copy-shell').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const text = expressionStore.get(btn.dataset.id);
-            copyToClipboard(text, btn);
-          });
-        });
-
-        document.querySelectorAll('.view-history').forEach((btn) => {
-          btn.addEventListener('click', () => showHistory(btn.dataset.attr));
-        });
-      };
-
-      // Attach pagination listeners
-      const attachPaginationListeners = (query) => {
-        document.querySelectorAll('.pagination .btn').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const page = parseInt(btn.dataset.page);
-            search(query, (page - 1) * LIMIT);
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          });
-        });
-      };
-
-      // Show version history modal
-      const showHistory = async (attr) => {
-        const modal = document.getElementById('historyModal');
-        const body = document.getElementById('historyBody');
-        const title = document.getElementById('historyTitle');
-
-        title.textContent = `Version History: ${attr}`;
-        body.innerHTML =
-          '<div class="loading"><div class="spinner"></div><p>Loading version history...</p></div>';
-        modal.classList.add('active');
-
-        try {
-          const res = await fetch(`${API_BASE}/packages/${encodeURIComponent(attr)}/history`);
-          if (!res.ok) {
-            body.innerHTML = `<p>${escapeHtml(getHttpErrorMessage(res.status, 'Failed to load version history'))}</p>`;
-            return;
-          }
-
-          // Check content-type before parsing JSON
-          const contentType = res.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
-            body.innerHTML = '<p>Unexpected response from server. Please try again.</p>';
-            return;
-          }
-
-          const { data } = await res.json();
-
-          if (!data || data.length === 0) {
-            body.innerHTML = '<p>No version history found.</p>';
-            return;
-          }
-
-          // Fetch full version info for each version to get commit hashes and vulnerability info
-          const versionsWithHashes = await Promise.all(
-            data.map(async (v, idx) => {
-              try {
-                const vRes = await fetch(
-                  `${API_BASE}/packages/${encodeURIComponent(attr)}/versions/${encodeURIComponent(v.version)}`
-                );
-                const vJson = await vRes.json();
-                return {
-                  ...v,
-                  commit_hash: vJson.data?.last_commit_hash,
-                  known_vulnerabilities: vJson.data?.known_vulnerabilities,
-                  idx,
-                };
-              } catch {
-                return { ...v, commit_hash: null, known_vulnerabilities: null, idx };
-              }
-            })
-          );
-
-          // Store expressions in the map for history items
-          // Use escapeHtml(attr) to match the data-id attribute in the rendered HTML
-          const escapedAttr = escapeHtml(attr);
-          versionsWithHashes.forEach((v) => {
-            if (v.commit_hash) {
-              const isLegacy = predatesFlakes(v.last_seen);
-              const shortHash = v.commit_hash.substring(0, 7);
-              const versionInsecure = isInsecure(v);
-              const insecurePrefix = versionInsecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
-              const impureFlag = versionInsecure ? ' --impure' : '';
-              const nixExpr = isLegacy
-                ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${shortHash}.tar.gz") {}).${attr}'`
-                : `${insecurePrefix}nix shell${impureFlag} nixpkgs/${shortHash}#${attr}`;
-              expressionStore.set(`history-${escapedAttr}-${v.idx}`, nixExpr);
-            }
-          });
-
-          body.innerHTML = `
-          <div class="version-list">
-            ${versionsWithHashes
-              .map((v) => {
-                const hasCommit = v.commit_hash;
-                const isLegacy = predatesFlakes(v.last_seen);
-                const versionInsecure = isInsecure(v);
-                return `
-                <div class="version-item">
-                  <div class="version-info">
-                    <div class="version-number">${escapeHtml(v.version)}${versionInsecure ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" style="vertical-align: middle" title="Has known vulnerabilities"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' : ''}${isLegacy ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" style="vertical-align: middle" title="May not build with modern Nix"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' : ''}</div>
-                    <div class="version-dates">${formatDate(v.first_seen)} - ${formatDate(v.last_seen)}</div>
-                    ${hasCommit ? `<div class="version-commit">${v.commit_hash.substring(0, 7)}</div>` : ''}
-                  </div>
-                  ${
-                    hasCommit
-                      ? `
-                    <button class="btn copy-version-expr" data-id="history-${escapeHtml(attr)}-${v.idx}">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                      Copy
-                    </button>
-                  `
-                      : '<span style="color: var(--text-muted); font-size: 0.8rem;">No commit</span>'
-                  }
-                </div>
-              `;
-              })
-              .join('')}
+        <!-- Rows view — dense terminal-ish -->
+        <div id="resultsRows" class="panel rounded-[2px] overflow-hidden">
+          <!-- Table header -->
+          <div class="grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 px-4 py-2 mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]" style="border-bottom: 1px solid var(--color-ink-4)">
+            <span>package · attr</span>
+            <span>version</span>
+            <span class="hidden md:block">description</span>
+            <span>first seen</span>
+            <span>last seen</span>
+            <span class="text-right">actions</span>
           </div>
-        `;
+          <div id="resultsBody"></div>
+        </div>
 
-          body.querySelectorAll('.copy-version-expr').forEach((btn) => {
-            btn.addEventListener('click', () => {
-              const text = expressionStore.get(btn.dataset.id);
-              copyToClipboard(text, btn);
-            });
-          });
-        } catch (err) {
-          body.innerHTML = `<div class="error-state"><p>Failed to load history: ${escapeHtml(err.message)}</p></div>`;
-        }
-      };
+        <!-- Pagination -->
+        <div id="pagination" class="mt-4 flex items-center justify-between mono text-[11px] text-[var(--color-fog-3)]">
+          <span>page <span class="text-[var(--color-fog-0)]">1</span> / <span class="text-[var(--color-fog-0)]">42</span> · showing <span class="text-[var(--color-fog-0)]">1–25</span> of <span class="text-[var(--color-fog-0)]">1,047</span></span>
+          <div class="flex items-center gap-1.5">
+            <button class="btn btn-ghost">← prev</button>
+            <button class="btn btn-ghost">next →</button>
+          </div>
+        </div>
+      </section>
 
-      // Close modal
-      document.getElementById('historyClose').addEventListener('click', () => {
-        document.getElementById('historyModal').classList.remove('active');
-      });
+      <!-- Stats / about -->
+      <section id="stats" class="mt-24 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="panel rounded-[2px] p-5 relative scanlines">
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">uptime · 30d</div>
+          <div class="mt-3 flex items-end gap-1 h-14">
+            <!-- 30 mini bars -->
+          </div>
+          <div id="uptimeBars" class="flex items-end gap-[3px] h-14 mt-3"></div>
+          <div class="mt-3 flex justify-between mono text-[10.5px] text-[var(--color-fog-3)]">
+            <span>30d</span><span class="text-[var(--color-green-glow)]">99.97% up</span><span>now</span>
+          </div>
+        </div>
+        <div class="panel rounded-[2px] p-5">
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">latency · p50 / p95 / p99</div>
+          <div class="mt-3 mono text-[28px] leading-none text-[var(--color-fog-0)] tabular-nums">
+            34<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
+            <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
+            112<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
+            <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
+            287<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
+          </div>
+          <div class="mt-5 mono text-[10.5px] text-[var(--color-fog-3)]">
+            bloom filter hit rate · <span class="text-[var(--color-fog-0)]">97.2%</span><br/>
+            fts5 queries · <span class="text-[var(--color-fog-0)]">124,918 / day</span>
+          </div>
+        </div>
+        <div class="panel rounded-[2px] p-5">
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">self-host</div>
+          <pre class="mt-3 mono text-[12px] text-[var(--color-fog-1)] leading-relaxed whitespace-pre-wrap select-all">nix run github:utensils/nxv \
+  -- serve --host 0.0.0.0</pre>
+          <a href="#" class="mt-4 btn w-full justify-center">read the guide →</a>
+        </div>
+      </section>
 
-      document.getElementById('historyModal').addEventListener('click', (e) => {
-        if (e.target.id === 'historyModal') {
-          document.getElementById('historyModal').classList.remove('active');
-        }
-      });
+      <!-- Footer -->
+      <footer class="mt-24 pt-6 hairline-t mono text-[11px] text-[var(--color-fog-4)] flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span>© 2026 utensils.io</span>
+        <span class="text-[var(--color-ink-4)]">│</span>
+        <a href="https://github.com/utensils/nxv" class="hover:text-[var(--color-fog-1)]">source</a>
+        <a href="/docs" class="hover:text-[var(--color-fog-1)]">/docs</a>
+        <a href="/openapi.json" class="hover:text-[var(--color-fog-1)]">/openapi.json</a>
+        <a href="https://github.com/utensils/nxv/blob/main/LICENSE" class="hover:text-[var(--color-fog-1)]">mit license</a>
+        <span class="flex-1"></span>
+        <span>built for the nix community by <a href="https://github.com/jamesbrink" class="text-[var(--color-fog-2)] hover:text-[var(--color-fog-0)]">@jamesbrink</a></span>
+      </footer>
+    </main>
 
-      // Search input handling
-      const searchInput = document.getElementById('searchInput');
-      const searchBtn = document.getElementById('searchBtn');
+    <!-- Version history drawer (right-side) -->
+    <div id="drawerOverlay" class="fixed inset-0 z-40 hidden" aria-hidden="true">
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-close></div>
+      <aside class="absolute right-0 top-0 h-full w-full max-w-[640px] panel border-l overflow-y-auto flex flex-col" style="background: var(--color-ink-1)">
+        <div class="sticky top-0 z-10 px-6 py-4 hairline-b flex items-start gap-4" style="background: var(--color-ink-1)">
+          <div class="flex-1 min-w-0">
+            <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">version history</div>
+            <h3 id="drawerTitle" class="mono text-[18px] font-semibold text-[var(--color-fog-0)] mt-1 truncate">—</h3>
+            <div id="drawerSub" class="mono text-[11px] text-[var(--color-fog-3)] mt-0.5">—</div>
+          </div>
+          <button class="btn btn-ghost" data-close>esc ✕</button>
+        </div>
 
-      searchInput.addEventListener('input', () => {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(() => search(searchInput.value), 300);
-      });
+        <!-- Timeline visualization -->
+        <div class="px-6 py-5 hairline-b">
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">timeline · 2017 → 2026</div>
+          <div id="timelineViz" class="relative h-[120px]"></div>
+          <div class="mt-2 grid grid-cols-10 mono text-[10px] text-[var(--color-fog-4)] tabular-nums">
+            <span>'17</span><span>'18</span><span>'19</span><span>'20</span><span>'21</span><span>'22</span><span>'23</span><span>'24</span><span>'25</span><span class="text-right">'26</span>
+          </div>
+        </div>
 
-      searchInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          clearTimeout(searchTimeout);
-          search(searchInput.value);
-        }
-      });
+        <!-- Version list -->
+        <div class="flex-1 px-6 py-5">
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">all versions <span id="drawerCount" class="text-[var(--color-fog-2)]"></span></div>
+          <ul id="drawerList" class="space-y-1"></ul>
+        </div>
+      </aside>
+    </div>
 
-      searchBtn.addEventListener('click', () => {
-        clearTimeout(searchTimeout);
-        search(searchInput.value);
-      });
+    <!-- Command palette -->
+    <div id="palette" class="fixed inset-0 z-50 hidden items-start justify-center pt-[12vh] px-4" aria-hidden="true">
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" data-palette-close></div>
+      <div class="relative w-full max-w-[620px] panel rounded-[2px] overflow-hidden shadow-2xl">
+        <div class="flex items-center gap-3 h-12 px-4 hairline-b">
+          <span class="mono text-[13px] text-[var(--color-nix-400)]">»</span>
+          <input id="paletteInput" placeholder="jump to package, run command, or search…" class="mono flex-1 bg-transparent outline-none text-[14px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]" />
+          <span class="kbd">esc</span>
+        </div>
+        <ul id="paletteList" class="max-h-[50vh] overflow-y-auto py-1"></ul>
+        <div class="px-4 py-2 hairline-t flex items-center gap-3 mono text-[10.5px] text-[var(--color-fog-4)]">
+          <span><span class="kbd">↑↓</span> navigate</span>
+          <span><span class="kbd">↵</span> select</span>
+          <span class="flex-1"></span>
+          <span>⌘K palette</span>
+        </div>
+      </div>
+    </div>
 
-      // Filter changes trigger search (dropdowns and checkbox on change)
-      ['exactMatch', 'sortOrder', 'archFilter'].forEach((id) => {
-        document.getElementById(id).addEventListener('change', () => {
-          if (searchInput.value.trim()) {
-            search(searchInput.value);
-          }
-        });
-      });
+    <!-- Toast -->
+    <div id="toast" class="fixed bottom-6 right-6 z-50 opacity-0 translate-y-4 transition mono text-[12px] px-4 py-2.5 panel rounded-[2px] pointer-events-none">
+      copied.
+    </div>
 
-      // Version filter triggers on input with debounce (like search input)
-      const versionFilter = document.getElementById('versionFilter');
-      versionFilter.addEventListener('input', () => {
-        // User is manually editing, so reset auto-populated flag
-        versionAutoPopulated = false;
-        if (searchInput.value.trim()) {
-          clearTimeout(searchTimeout);
-          searchTimeout = setTimeout(() => search(searchInput.value), 300);
-        }
-      });
-
-      // Keyboard shortcut: focus search with /
-      document.addEventListener('keydown', (e) => {
-        if (e.key === '/' && document.activeElement !== searchInput) {
-          e.preventDefault();
-          searchInput.focus();
-        }
-        if (e.key === 'Escape') {
-          document.getElementById('historyModal').classList.remove('active');
-        }
-      });
-
-      // Initialize
-      loadStats();
-      searchInput.focus();
-    </script>
+    <!-- Hide Tailwind CDN missing-source warning -->
+    <script src="./app.js" defer></script>
   </body>
 </html>

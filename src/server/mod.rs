@@ -61,6 +61,21 @@ const FRONTEND_HTML: &str = include_str!("../../frontend/index.html");
 /// Embedded favicon SVG.
 const FAVICON_SVG: &str = include_str!("../../frontend/favicon.svg");
 
+/// Embedded frontend JavaScript.
+const FRONTEND_JS: &str = include_str!("../../frontend/app.js");
+
+/// When `NXV_FRONTEND_DIR` is set, read `file_name` from disk on each request
+/// so HTML/JS changes are picked up without rebuilding. Falls back to the
+/// compile-time `embedded` constant if the env var is unset or the read fails.
+fn frontend_asset(file_name: &str, embedded: &'static str) -> String {
+    if let Ok(dir) = std::env::var("NXV_FRONTEND_DIR")
+        && let Ok(contents) = std::fs::read_to_string(PathBuf::from(dir).join(file_name))
+    {
+        return contents;
+    }
+    embedded.to_string()
+}
+
 /// Default maximum concurrent database operations.
 /// This limits file descriptor usage and prevents spawn_blocking pool exhaustion.
 /// Can be overridden via NXV_MAX_DB_CONNECTIONS environment variable.
@@ -315,7 +330,7 @@ pub(crate) fn build_router(
         .route("/metrics", get(handlers::get_metrics))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
-            no_cache,
+            no_cache.clone(),
         ));
 
     // Combine API routes
@@ -325,17 +340,41 @@ pub(crate) fn build_router(
 
     // Static assets with long cache (24 hours)
     let static_routes = Router::new()
-        .route("/", get(|| async { Html(FRONTEND_HTML) }))
+        .route(
+            "/",
+            get(|| async { Html(frontend_asset("index.html", FRONTEND_HTML)) }),
+        )
         .route(
             "/favicon.svg",
             get(|| async {
-                ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
+                (
+                    [(header::CONTENT_TYPE, "image/svg+xml")],
+                    frontend_asset("favicon.svg", FAVICON_SVG),
+                )
+                    .into_response()
             }),
         )
         .route(
             "/favicon.ico",
             get(|| async {
-                ([(header::CONTENT_TYPE, "image/svg+xml")], FAVICON_SVG).into_response()
+                (
+                    [(header::CONTENT_TYPE, "image/svg+xml")],
+                    frontend_asset("favicon.svg", FAVICON_SVG),
+                )
+                    .into_response()
+            }),
+        )
+        .route(
+            "/app.js",
+            get(|| async {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    frontend_asset("app.js", FRONTEND_JS),
+                )
+                    .into_response()
             }),
         )
         .merge(Scalar::with_url("/docs", openapi::ApiDoc::openapi()))
@@ -345,7 +384,11 @@ pub(crate) fn build_router(
         )
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
-            cache_24h,
+            if std::env::var("NXV_FRONTEND_DIR").is_ok() {
+                no_cache.clone()
+            } else {
+                cache_24h
+            },
         ));
 
     // Configure tracing layer with request/response logging
