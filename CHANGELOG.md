@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-04-21
+
+### Fixed
+
+- Incremental indexer no longer creates a duplicate row per
+  `(attribute_path, version)` on every run. Each run seeded a fresh
+  `open_ranges` map and restamped every still-present package with a new
+  `first_commit_hash`; `INSERT OR IGNORE` didn't catch it because the
+  UNIQUE constraint includes `first_commit_hash`. Over ~480 CI runs this
+  grew the published index to 1.8GB / 1.7M rows against only ~120k
+  distinct `(attribute_path, version)` pairs (some duplicated 290×),
+  making queries that used to be sub-second take ~15s. Fix seeds
+  `open_ranges` from the last checkpoint, switches batch insert to
+  `INSERT ... ON CONFLICT DO UPDATE` (with sticky `source_path`), flushes
+  all open ranges at every periodic checkpoint so a hard kill still
+  resumes correctly, and adds `idx_packages_last_commit_hash` to keep the
+  resume-seed query fast on large DBs. Existing bloated DBs still need a
+  full rebuild to actually remove the duplicate rows. (#24)
+- `load_open_ranges_at_commit` collapses duplicate
+  `(attribute_path, version)` pairs deterministically via
+  `MIN(id) GROUP BY` so seeding from an already-bloated DB picks a stable
+  row.
+
+### Changed
+
+- `IndexResult::ranges_created` renamed to `ranges_written`; CLI now
+  reports "Range rows written" since the count now includes upsert
+  updates, not only inserts.
+- Flake modernized: migrated from `flake-utils` to `flake-parts`, added
+  `numtide/devshell` with categorized commands and an motd, added
+  `treefmt-nix` (`nixfmt` + `rustfmt`). Bumped all flake inputs, refreshed
+  the Rust toolchain to `stable.latest` with `rust-src` /
+  `rust-analyzer` / `rustfmt` / `clippy`. Added `cargo-outdated`,
+  `cargo-audit`, and `cargo-llvm-cov` to the devshell. Fixed Darwin
+  `libiconv` linking (`LIBRARY_PATH` + `NIX_LDFLAGS` in `commonArgs`) and
+  replaced `pkgs.nodePackages.prettier` with `pkgs.prettier` (nodePackages
+  removed upstream). All existing outputs preserved: `overlays.default`,
+  `nixosModules.default`/`nxv`, packages, apps, checks. (#24)
+- Migrated repository references from `jamesbrink/nxv` to `utensils/nxv`.
+- `publish-index` workflow: deep-fallback recovery, improved error
+  handling, and `errexit` fix around GitHub API calls.
+- Bumped `actions/checkout` to v6 in the FlakeHub workflow.
+- CLAUDE.md: documented the local vs. remote backend abstraction,
+  enumerated `NXV_*` environment variables, clarified that the indexer
+  lives at `src/index/` while the Cargo feature is named `indexer`, and
+  added `cargo bench`.
+
+### Added
+
+- VitePress documentation site with GitHub Pages deploy. (#22)
+- Documentation badge in the README.
+
 ## [0.1.4] - 2026-01-08
 
 ### Added
@@ -131,7 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rust 2024 edition
 - 10 MB release binary size
 
-[unreleased]: https://github.com/utensils/nxv/compare/v0.1.4...HEAD
+[unreleased]: https://github.com/utensils/nxv/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/utensils/nxv/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/utensils/nxv/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/utensils/nxv/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/utensils/nxv/compare/v0.1.1...v0.1.2
