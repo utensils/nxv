@@ -26,6 +26,24 @@ pub struct Database {
     conn: Connection,
 }
 
+/// Statistics from a `dedupe_ranges` run.
+#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DedupeStats {
+    /// Distinct `(attribute_path, version)` pairs found.
+    pub groups_total: u64,
+    /// Pairs that had more than one row.
+    pub groups_with_duplicates: u64,
+    /// Total row count before dedupe.
+    pub rows_before: u64,
+    /// Total row count after dedupe.
+    pub rows_after: u64,
+    /// Survivor rows that were updated with coalesced range metadata.
+    pub rows_updated: u64,
+    /// Duplicate rows that were deleted.
+    pub rows_deleted: u64,
+}
+
 impl Database {
     /// Open or create a database at the given path.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
@@ -458,6 +476,192 @@ impl Database {
         Ok(out)
     }
 
+    /// Collapse duplicate `(attribute_path, version)` rows into one.
+    ///
+    /// For every pair with more than one row, keep the row with the earliest
+    /// `first_commit_date` (ties broken by smallest `id`), extend its
+    /// `last_commit_*` fields to the latest values seen across the group, and
+    /// delete the losers. Used to repair databases bloated by the pre-0.1.5
+    /// incremental-indexer bug.
+    ///
+    /// Metadata (description, license, homepage, maintainers, platforms,
+    /// source_path, known_vulnerabilities) is retained from the surviving row.
+    /// A subsequent incremental indexing run will refresh those fields via
+    /// upsert as packages appear in new commits.
+    ///
+    /// Returns statistics about the operation. Does not VACUUM — callers that
+    /// want to reclaim disk space should run `VACUUM` separately. If `dry_run`
+    /// is true the computation is performed but no rows are modified.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn dedupe_ranges(&mut self, dry_run: bool) -> Result<DedupeStats> {
+        let rows_before: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                    row.get::<_, i64>(0)
+                })? as u64;
+
+        struct Plan {
+            survivor_id: i64,
+            canon_first_hash: String,
+            canon_first_date: i64,
+            canon_last_id: i64,
+            canon_last_hash: String,
+            canon_last_date: i64,
+            loser_ids: Vec<i64>,
+        }
+
+        // Helper index to make the ordered scan below cheap on large DBs.
+        // SQLite temp indexes can't cover main-schema tables, so we create
+        // an ordinary index scoped to the read phase and use a RAII guard to
+        // drop it on any exit path (early return, error, panic). The index
+        // is gone before the write transaction starts.
+        let mut plans: Vec<Plan> = Vec::new();
+        {
+            struct IndexGuard<'a> {
+                conn: &'a Connection,
+            }
+            impl Drop for IndexGuard<'_> {
+                fn drop(&mut self) {
+                    let _ = self
+                        .conn
+                        .execute_batch("DROP INDEX IF EXISTS temp_idx_dedupe_sort;");
+                }
+            }
+
+            self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS temp_idx_dedupe_sort \
+                 ON package_versions (attribute_path, version, first_commit_date, id);",
+            )?;
+            let _index_guard = IndexGuard { conn: &self.conn };
+
+            let mut stmt = self.conn.prepare(
+                "SELECT id, attribute_path, version, \
+                        first_commit_hash, first_commit_date, \
+                        last_commit_hash, last_commit_date \
+                   FROM package_versions \
+                  ORDER BY attribute_path, version, first_commit_date ASC, id ASC",
+            )?;
+            let mut rows = stmt.query([])?;
+
+            let mut current_key: Option<(String, String)> = None;
+            let mut current: Option<Plan> = None;
+
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let ap: String = row.get(1)?;
+                let ver: String = row.get(2)?;
+                let fch: String = row.get(3)?;
+                let fcd: i64 = row.get(4)?;
+                let lch: String = row.get(5)?;
+                let lcd: i64 = row.get(6)?;
+                let key = (ap, ver);
+
+                if current_key.as_ref() != Some(&key) {
+                    if let Some(plan) = current.take() {
+                        plans.push(plan);
+                    }
+                    current = Some(Plan {
+                        survivor_id: id,
+                        canon_first_hash: fch,
+                        canon_first_date: fcd,
+                        canon_last_id: id,
+                        canon_last_hash: lch,
+                        canon_last_date: lcd,
+                        loser_ids: Vec::new(),
+                    });
+                    current_key = Some(key);
+                } else {
+                    let plan = current.as_mut().unwrap();
+                    plan.loser_ids.push(id);
+                    // Deterministic tiebreak: strictly greater last_commit_date,
+                    // or equal date with a larger row id than the current holder
+                    // of canon_last_*.
+                    if lcd > plan.canon_last_date
+                        || (lcd == plan.canon_last_date && id > plan.canon_last_id)
+                    {
+                        plan.canon_last_id = id;
+                        plan.canon_last_hash = lch;
+                        plan.canon_last_date = lcd;
+                    }
+                }
+            }
+            if let Some(plan) = current.take() {
+                plans.push(plan);
+            }
+        }
+
+        let groups_total = plans.len() as u64;
+        let groups_with_duplicates =
+            plans.iter().filter(|p| !p.loser_ids.is_empty()).count() as u64;
+
+        if dry_run {
+            let projected_deletes: u64 = plans.iter().map(|p| p.loser_ids.len() as u64).sum();
+            return Ok(DedupeStats {
+                groups_total,
+                groups_with_duplicates,
+                rows_before,
+                rows_after: rows_before - projected_deletes,
+                rows_updated: groups_with_duplicates,
+                rows_deleted: projected_deletes,
+            });
+        }
+
+        let mut rows_updated: u64 = 0;
+        let mut rows_deleted: u64 = 0;
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut update_stmt = tx.prepare_cached(
+                "UPDATE package_versions \
+                    SET first_commit_hash = ?, \
+                        first_commit_date = ?, \
+                        last_commit_hash = ?, \
+                        last_commit_date = ? \
+                  WHERE id = ?",
+            )?;
+            let mut delete_stmt = tx.prepare_cached("DELETE FROM package_versions WHERE id = ?")?;
+
+            for plan in &plans {
+                if plan.loser_ids.is_empty() {
+                    continue;
+                }
+                rows_updated += update_stmt.execute(rusqlite::params![
+                    plan.canon_first_hash,
+                    plan.canon_first_date,
+                    plan.canon_last_hash,
+                    plan.canon_last_date,
+                    plan.survivor_id,
+                ])? as u64;
+                for loser_id in &plan.loser_ids {
+                    rows_deleted += delete_stmt.execute([loser_id])? as u64;
+                }
+            }
+        }
+        tx.commit()?;
+
+        let rows_after: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                    row.get::<_, i64>(0)
+                })? as u64;
+
+        Ok(DedupeStats {
+            groups_total,
+            groups_with_duplicates,
+            rows_before,
+            rows_after,
+            rows_updated,
+            rows_deleted,
+        })
+    }
+
+    /// Run `VACUUM` to reclaim disk space after a dedupe.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
     /// Update the last_commit fields for an existing package version range.
     ///
     /// Used during incremental indexing to extend a range's end point.
@@ -843,5 +1047,136 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 10_000);
+    }
+
+    #[test]
+    fn test_dedupe_collapses_duplicates_and_coalesces_range() {
+        use chrono::{Duration, Utc};
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let t0 = Utc::now();
+        let mk = |first_hash: &str,
+                  first_offset_days: i64,
+                  last_hash: &str,
+                  last_offset_days: i64|
+         -> PackageVersion {
+            PackageVersion {
+                id: 0,
+                name: "firefox".to_string(),
+                version: "100.0".to_string(),
+                first_commit_hash: first_hash.to_string(),
+                first_commit_date: t0 + Duration::days(first_offset_days),
+                last_commit_hash: last_hash.to_string(),
+                last_commit_date: t0 + Duration::days(last_offset_days),
+                attribute_path: "firefox".to_string(),
+                description: Some("browser".to_string()),
+                license: None,
+                homepage: None,
+                maintainers: None,
+                platforms: None,
+                source_path: None,
+                known_vulnerabilities: None,
+            }
+        };
+
+        // Three duplicate rows with overlapping ranges. Earliest first_date is
+        // at offset 0; latest last_date is at offset 30.
+        db.insert_package_ranges_batch(&[
+            mk("c0", 0, "c10", 10),
+            mk("c5", 5, "c20", 20),
+            mk("c15", 15, "c30", 30),
+        ])
+        .unwrap();
+
+        // Unrelated single-row group — must not be touched.
+        db.insert_package_ranges_batch(&[PackageVersion {
+            id: 0,
+            name: "chromium".to_string(),
+            version: "90.0".to_string(),
+            first_commit_hash: "x0".to_string(),
+            first_commit_date: t0,
+            last_commit_hash: "x1".to_string(),
+            last_commit_date: t0,
+            attribute_path: "chromium".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }])
+        .unwrap();
+
+        // Dry run: report stats but don't mutate.
+        let dry = db.dedupe_ranges(true).unwrap();
+        assert_eq!(dry.groups_total, 2);
+        assert_eq!(dry.groups_with_duplicates, 1);
+        assert_eq!(dry.rows_before, 4);
+        assert_eq!(dry.rows_after, 2);
+        assert_eq!(dry.rows_deleted, 2);
+
+        let rows_after_dry: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows_after_dry, 4, "dry run must not delete rows");
+
+        // Real run.
+        let stats = db.dedupe_ranges(false).unwrap();
+        assert_eq!(stats.groups_total, 2);
+        assert_eq!(stats.groups_with_duplicates, 1);
+        assert_eq!(stats.rows_before, 4);
+        assert_eq!(stats.rows_after, 2);
+        assert_eq!(stats.rows_updated, 1);
+        assert_eq!(stats.rows_deleted, 2);
+
+        // Survivor must carry earliest-first and latest-last.
+        let (first_hash, first_ts, last_hash, last_ts): (String, i64, String, i64) = db
+            .conn
+            .query_row(
+                "SELECT first_commit_hash, first_commit_date, last_commit_hash, last_commit_date \
+                   FROM package_versions WHERE attribute_path = 'firefox'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(first_hash, "c0", "earliest first_commit_hash must survive");
+        assert_eq!(first_ts, (t0 + Duration::days(0)).timestamp());
+        assert_eq!(last_hash, "c30", "latest last_commit_hash must win");
+        assert_eq!(last_ts, (t0 + Duration::days(30)).timestamp());
+
+        // Unrelated row untouched.
+        let chromium_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM package_versions WHERE attribute_path = 'chromium'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chromium_count, 1);
+
+        // Running dedupe again on a clean DB must be a no-op.
+        let again = db.dedupe_ranges(false).unwrap();
+        assert_eq!(again.rows_deleted, 0);
+        assert_eq!(again.rows_updated, 0);
+    }
+
+    #[test]
+    fn test_dedupe_noop_on_empty_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let stats = db.dedupe_ranges(false).unwrap();
+        assert_eq!(stats.groups_total, 0);
+        assert_eq!(stats.rows_before, 0);
+        assert_eq!(stats.rows_after, 0);
     }
 }

@@ -64,6 +64,8 @@ fn main() {
         #[cfg(feature = "indexer")]
         Commands::Reset(args) => cmd_reset(&cli, args),
         #[cfg(feature = "indexer")]
+        Commands::Dedupe(args) => cmd_dedupe(&cli, args),
+        #[cfg(feature = "indexer")]
         Commands::Publish(args) => cmd_publish(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Keygen(args) => cmd_keygen(&cli, args),
@@ -1317,6 +1319,69 @@ fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
     // Show current HEAD
     if let Ok(head) = repo.head_commit() {
         eprintln!("  HEAD: {}", &head[..12.min(head.len())]);
+    }
+
+    Ok(())
+}
+
+/// Collapse duplicate (attribute_path, version) rows in the index.
+///
+/// Intended for repairing databases bloated by the pre-0.1.5 incremental
+/// indexer bug. Regenerating the bloom filter is not strictly required because
+/// dedupe only drops redundant rows (the set of unique package names is
+/// unchanged), but a subsequent `nxv publish` will produce a fresh one.
+#[cfg(feature = "indexer")]
+fn cmd_dedupe(cli: &Cli, args: &cli::DedupeArgs) -> Result<()> {
+    use crate::db::Database;
+
+    let mut db = Database::open(&cli.db_path)?;
+
+    if !cli.quiet {
+        eprintln!(
+            "Dedupe {} (db: {:?})",
+            if args.dry_run {
+                "(dry run)"
+            } else {
+                "starting"
+            },
+            &cli.db_path
+        );
+    }
+
+    let stats = db.dedupe_ranges(args.dry_run)?;
+
+    if !cli.quiet {
+        eprintln!("  Groups total:           {}", stats.groups_total);
+        eprintln!("  Groups with duplicates: {}", stats.groups_with_duplicates);
+        eprintln!("  Rows before:            {}", stats.rows_before);
+        eprintln!(
+            "  Rows {}:  {}",
+            if args.dry_run {
+                "after (projected) "
+            } else {
+                "after            "
+            },
+            stats.rows_after
+        );
+        eprintln!("  Rows updated:           {}", stats.rows_updated);
+        eprintln!("  Rows deleted:           {}", stats.rows_deleted);
+    }
+
+    if args.dry_run {
+        if !cli.quiet {
+            eprintln!("Dry run — no changes committed.");
+        }
+        return Ok(());
+    }
+
+    if !args.no_vacuum {
+        if !cli.quiet {
+            eprintln!("Running VACUUM to reclaim disk space...");
+        }
+        db.vacuum()?;
+        if !cli.quiet {
+            eprintln!("VACUUM complete.");
+        }
     }
 
     Ok(())

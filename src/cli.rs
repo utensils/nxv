@@ -67,6 +67,15 @@ pub enum Commands {
     #[cfg(feature = "indexer")]
     Reset(ResetArgs),
 
+    /// Collapse duplicate `(attribute_path, version)` rows in the index.
+    ///
+    /// Repairs databases bloated by the pre-0.1.5 incremental indexer bug
+    /// (see CHANGELOG). Keeps one row per unique pair with the earliest
+    /// `first_commit_*` and the latest `last_commit_*` across the duplicates,
+    /// then VACUUMs.
+    #[cfg(feature = "indexer")]
+    Dedupe(DedupeArgs),
+
     /// Generate publishable index artifacts (compressed DB, bloom filter, manifest).
     #[cfg(feature = "indexer")]
     Publish(PublishArgs),
@@ -434,6 +443,19 @@ pub struct ResetArgs {
     /// Also fetch from origin before resetting.
     #[arg(long)]
     pub fetch: bool,
+}
+
+/// Arguments for the dedupe command (feature-gated).
+#[cfg(feature = "indexer")]
+#[derive(Parser, Debug)]
+pub struct DedupeArgs {
+    /// Report what would change without modifying the database.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip the trailing VACUUM (faster, but the DB file won't shrink).
+    #[arg(long)]
+    pub no_vacuum: bool,
 }
 
 /// Arguments for the publish command (feature-gated).
