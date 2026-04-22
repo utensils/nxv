@@ -31,17 +31,20 @@
 
 pub mod error;
 pub mod handlers;
+pub mod metrics;
 pub mod openapi;
 pub mod types;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
+    extract::{Request, State},
     http::{HeaderValue, header},
-    response::{Html, IntoResponse},
+    middleware::Next,
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use tokio::sync::Semaphore;
@@ -155,6 +158,8 @@ pub struct AppState {
     pub db_timeout: Duration,
     /// Rate limit configuration (for metrics). None if rate limiting is disabled.
     pub rate_limit_config: Option<RateLimitConfig>,
+    /// In-memory runtime metrics (activity + latency + uptime).
+    pub metrics: metrics::MetricsStore,
 }
 
 impl AppState {
@@ -188,6 +193,7 @@ impl AppState {
             max_db_connections: max_connections,
             db_timeout: Duration::from_secs(timeout_secs),
             rate_limit_config: None,
+            metrics: metrics::MetricsStore::new(),
         }
     }
 
@@ -206,6 +212,7 @@ impl AppState {
             max_db_connections: max_connections,
             db_timeout: timeout,
             rate_limit_config: None,
+            metrics: metrics::MetricsStore::new(),
         }
     }
 
@@ -401,6 +408,10 @@ pub(crate) fn build_router(
         .merge(static_routes)
         .nest("/api/v1", api_routes)
         .layer(trace_layer)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            record_request_metrics,
+        ))
         .with_state(state);
 
     if let Some(cors_layer) = cors {
@@ -560,6 +571,21 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("Failed to install CTRL+C signal handler");
+}
+
+/// Record every HTTP request in the metrics store. Latency samples are
+/// limited to `/api/v1/*` so that static-asset responses (sub-ms) don't
+/// distort the reported API percentiles; activity bars count all traffic.
+async fn record_request_metrics(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let is_api = req.uri().path().starts_with("/api/v1/");
+    let start = Instant::now();
+    let response = next.run(req).await;
+    state.metrics.record(start.elapsed().as_micros(), is_api);
+    response
 }
 
 #[cfg(test)]

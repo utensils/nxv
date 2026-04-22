@@ -576,43 +576,45 @@
 
   // ---------- stats / header populate ----------
   async function loadBoot() {
-    // fetch health + stats in parallel
-    const samples = [];
-    const tHealth = performance.now();
     const healthP = api(`${API_BASE}/health`)
-      .then(({ json, latency }) => {
-        samples.push(latency);
+      .then(({ json }) => {
         STATE.health = json;
       })
       .catch(() => {});
     const statsP = api(`${API_BASE}/stats`)
-      .then(({ json, latency }) => {
-        samples.push(latency);
+      .then(({ json }) => {
         STATE.stats = json.data || json;
       })
       .catch(() => {});
     await Promise.all([healthP, statsP]);
 
-    // one more health ping to stabilize a small latency sample
-    try {
-      const { latency } = await api(`${API_BASE}/health`);
-      samples.push(latency);
-    } catch {}
-
-    renderHeaderStrip(samples);
+    await refreshMetrics();
+    renderHeaderStrip();
     renderHeroStats();
-    renderLatencyCard(samples);
-    renderUptimeCard();
     renderSelfhostCard();
+
+    // keep metrics live — cheap in-memory query, no db work
+    setInterval(refreshMetrics, 30_000);
   }
 
-  function renderHeaderStrip(samples) {
+  async function refreshMetrics() {
+    try {
+      const { json } = await api(`${API_BASE}/metrics`);
+      STATE.metrics = json;
+      renderActivityCard(json);
+      renderLatencyCard(json);
+      refreshHeaderLatency(json);
+    } catch {
+      // leave previous values in place if a poll fails
+    }
+  }
+
+  function renderHeaderStrip() {
     const stats = STATE.stats;
     const health = STATE.health;
     const strip = document.querySelector('header .h-6');
     if (!strip) return;
 
-    const p50 = samples.length ? Math.round(samples.sort((a, b) => a - b)[Math.floor(samples.length / 2)]) : null;
     const operational = !!health;
     const dot = operational
       ? '<span class="inline-block w-1.5 h-1.5 rounded-full" style="background: var(--color-green-glow); box-shadow: 0 0 6px oklch(0.74 0.15 150 / 0.6);"></span>'
@@ -625,9 +627,9 @@
     const newest = stats?.newest_commit_date ? new Date(stats.newest_commit_date).toISOString().slice(0, 7) : '—';
 
     strip.innerHTML = `
-      <span class="flex items-center gap-1.5">
+      <span id="headerStatus" class="flex items-center gap-1.5">
         ${dot}
-        ${opTxt}${p50 != null ? ` · p50 ${p50}ms` : ''}
+        ${opTxt}
       </span>
       <span class="text-[var(--color-ink-4)]">│</span>
       <span>index · <span class="text-[var(--color-fog-2)]">${lastDate}</span>${commit ? ` · commit <span class="text-[var(--color-fog-2)]">${shortHash(commit)}</span>` : ''}</span>
@@ -643,6 +645,17 @@
     if (heroVer && health?.version) {
       heroVer.innerHTML = `// NIX VERSION INDEX &nbsp;·&nbsp; v${escapeHtml(health.version)}`;
     }
+  }
+
+  function refreshHeaderLatency(metrics) {
+    const el = document.getElementById('headerStatus');
+    const p50 = metrics?.latency?.p50_ms;
+    if (!el || p50 == null) return;
+    const dot = el.querySelector('span') || null;
+    const dotHtml = dot ? dot.outerHTML : '';
+    const operational = STATE.health ? 'api operational' : 'api unreachable';
+    const latencyTxt = metrics.latency.samples > 0 ? ` · p50 ${p50.toFixed(1)}ms` : '';
+    el.innerHTML = `${dotHtml} ${operational}${latencyTxt}`;
   }
 
   function renderHeroStats() {
@@ -667,53 +680,68 @@
       <div class="ascii-rule text-[10px] leading-none mt-2">└────────────────────────────────────┘</div>`;
   }
 
-  function renderLatencyCard(samples) {
+  function renderLatencyCard(metrics) {
     const panel = document.querySelectorAll('#stats .panel')[1];
     if (!panel) return;
-    // Find the big latency readout by its distinctive tabular-nums class;
-    // there is only one such element inside the latency panel.
+    // The big three-number readout is the first .tabular-nums inside the panel.
     const main = [...panel.querySelectorAll('.tabular-nums')][0];
-    if (samples.length < 1) {
-      if (main) main.textContent = '—';
-      return;
-    }
-    const sorted = [...samples].sort((a, b) => a - b);
-    const p = (q) => Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] || 0);
-    const p50 = p(0.5);
-    const p95 = p(0.95);
-    const p99 = p(0.99);
+    const lat = metrics?.latency;
     if (main) {
-      main.innerHTML = `
-        ${p50}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-        <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-        ${p95}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-        <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-        ${p99}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>`;
+      if (!lat || lat.samples === 0) {
+        main.innerHTML = `<span class="text-[var(--color-fog-4)] text-[18px]">waiting for samples…</span>`;
+      } else {
+        const fmt = (v) => (v < 10 ? v.toFixed(1) : Math.round(v));
+        main.innerHTML = `
+          ${fmt(lat.p50_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
+          <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
+          ${fmt(lat.p95_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
+          <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
+          ${fmt(lat.p99_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>`;
+      }
     }
     const sub = panel.querySelector('.mt-5');
     if (sub) {
       const s = STATE.stats;
+      const sampleTxt = lat?.samples > 0
+        ? `from <span class="text-[var(--color-fog-0)]">${fmtNum(lat.samples)}</span> recent api requests`
+        : `awaiting traffic`;
       sub.innerHTML = `
         records indexed · <span class="text-[var(--color-fog-0)]">${fmtNum(s?.total_ranges)}</span><br/>
-        packages · <span class="text-[var(--color-fog-0)]">${fmtNum(s?.unique_names)}</span>`;
+        ${sampleTxt}`;
     }
   }
 
-  function renderUptimeCard() {
-    // no historical metric available; show a stable synthesized 30-bar sparkline
-    // seeded on the commit hash so it is stable per-index
-    const seed = (STATE.stats?.last_indexed_commit || 'nxv').split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
-    let s = seed;
-    const rand = () => {
-      s = (s * 1103515245 + 12345) & 0x7fffffff;
-      return s / 0x7fffffff;
-    };
-    const bars = Array.from({ length: 30 }).map(() => {
-      const ok = rand() > 0.02;
-      const h = ok ? 28 + rand() * 26 : 8 + rand() * 12;
-      return `<span class="inline-block rounded-[1px] transition" style="width:6px; height:${h.toFixed(1)}px; background:${ok ? 'var(--color-green-glow)' : 'var(--color-amber-glow)'}; opacity:${ok ? (0.55 + (h / 54) * 0.4).toFixed(2) : 0.9};"></span>`;
-    }).join('');
-    cache('uptimeBars').innerHTML = bars;
+  function renderActivityCard(metrics) {
+    const buckets = metrics?.activity || [];
+    const counts = buckets.map((b) => b.count || 0);
+    const max = Math.max(1, ...counts);
+    const bars = counts
+      .map((c) => {
+        const h = c === 0 ? 3 : 6 + (c / max) * 48;
+        const idle = c === 0;
+        return `<span class="inline-block rounded-[1px] transition" style="width:6px; height:${h.toFixed(1)}px; background:${idle ? 'var(--color-ink-4)' : 'var(--color-green-glow)'}; opacity:${idle ? 0.5 : (0.55 + (h / 54) * 0.4).toFixed(2)};" title="${c} req${c === 1 ? '' : 's'}"></span>`;
+      })
+      .join('');
+    cache('activityBars').innerHTML = bars;
+
+    const summary = document.getElementById('activitySummary');
+    if (summary) {
+      const total = metrics?.runtime?.total_requests ?? 0;
+      const uptime = fmtDuration(metrics?.runtime?.uptime_seconds ?? 0);
+      summary.innerHTML = `uptime <span class="text-[var(--color-fog-0)]">${uptime}</span> · <span class="text-[var(--color-fog-0)]">${fmtNum(total)}</span> req${total === 1 ? '' : 's'}`;
+    }
+  }
+
+  function fmtDuration(totalSeconds) {
+    if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '—';
+    const s = Math.floor(totalSeconds);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${s % 60}s`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    const d = Math.floor(h / 24);
+    return `${d}d ${h % 24}h`;
   }
 
   function renderSelfhostCard() {
@@ -721,7 +749,7 @@
     if (!panel) return;
     const link = panel.querySelector('a.btn');
     if (link) {
-      link.href = 'https://github.com/utensils/nxv#readme';
+      link.href = 'https://utensils.io/nxv/';
       link.target = '_blank';
       link.rel = 'noopener';
     }
@@ -744,7 +772,7 @@
     { cat: 'go',   label: 'open api docs',   hint: '/docs',         action: () => { window.location.href = '/docs'; } },
     { cat: 'go',   label: 'openapi spec',    hint: '/openapi.json', action: () => { window.open('/openapi.json', '_blank'); } },
     { cat: 'go',   label: 'github',          hint: 'source',        action: () => window.open('https://github.com/utensils/nxv', '_blank') },
-    { cat: 'go',   label: 'install guide',   hint: 'readme',        action: () => window.open('https://github.com/utensils/nxv#readme', '_blank') },
+    { cat: 'go',   label: 'install guide',   hint: 'docs',          action: () => window.open('https://utensils.io/nxv/', '_blank') },
   ];
   let paletteIndex = 0;
   let paletteItems = [];

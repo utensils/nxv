@@ -220,7 +220,7 @@
           <a class="px-2.5 py-1.5 text-[var(--color-fog-0)] hairline rounded-[2px]" href="/">search</a>
           <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="#stats">stats</a>
           <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="/docs">api</a>
-          <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="https://github.com/utensils/nxv#installation">cli</a>
+          <a class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]" href="https://utensils.io/nxv/">cli</a>
         </nav>
 
         <div class="flex-1"></div>
@@ -367,13 +367,10 @@
       <!-- Stats / about -->
       <section id="stats" class="mt-24 grid grid-cols-1 md:grid-cols-3 gap-4">
         <div class="panel rounded-[2px] p-5 relative scanlines">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">uptime · 30d</div>
-          <div class="mt-3 flex items-end gap-1 h-14">
-            <!-- 30 mini bars -->
-          </div>
-          <div id="uptimeBars" class="flex items-end gap-[3px] h-14 mt-3"></div>
+          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">activity · 30m</div>
+          <div id="activityBars" class="flex items-end gap-[3px] h-14 mt-3"></div>
           <div class="mt-3 flex justify-between mono text-[10.5px] text-[var(--color-fog-3)]">
-            <span>30d</span><span class="text-[var(--color-green-glow)]">99.97% up</span><span>now</span>
+            <span>30m ago</span><span id="activitySummary" class="text-[var(--color-green-glow)]">—</span><span>now</span>
           </div>
         </div>
         <div class="panel rounded-[2px] p-5">
@@ -394,7 +391,7 @@
           <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">self-host</div>
           <pre class="mt-3 mono text-[12px] text-[var(--color-fog-1)] leading-relaxed whitespace-pre-wrap select-all">nix run github:utensils/nxv \
   -- serve --host 0.0.0.0</pre>
-          <a href="#" class="mt-4 btn w-full justify-center">read the guide →</a>
+          <a href="https://utensils.io/nxv/" target="_blank" rel="noopener" class="mt-4 btn w-full justify-center">read the guide →</a>
         </div>
       </section>
 
