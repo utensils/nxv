@@ -28,6 +28,7 @@ cargo test <test_name>           # Run a single test by name
 cargo test db::                  # Run tests in a specific module
 cargo clippy -- -D warnings      # Lint with errors on warnings
 cargo fmt                        # Format code
+cargo bench                      # Run benchmarks (bloom, search, indexer)
 nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
 ```
 
@@ -50,18 +51,22 @@ nix run .#nxv-indexer            # Run with indexer feature
 2. **Search** (`db/queries.rs`): Queries go through bloom filter first (fast negative lookup), then SQLite with FTS5
 3. **Output** (`output/`): Results formatted as table (default), JSON, or plain text
 
+### Backend Abstraction (`backend.rs`, `client.rs`)
+
+The CLI transparently runs against either a local index or a remote `nxv serve` instance. `main.rs` branches on `NXV_API_URL` — if set, `ApiClient` (HTTP) is used; otherwise the local SQLite/bloom backend is used. Both implement the same backend trait, so command handlers are backend-agnostic.
+
 ### API Server (`server/`)
 
 The `nxv serve` command runs an HTTP API server with:
 
 - REST API at `/api/v1/*` (search, package info, version history, stats)
-- Web frontend at `/` (embedded HTML/JS)
-- OpenAPI documentation at `/docs`
+- Web frontend at `/` served from `frontend/` (static HTML/CSS/JS, embedded at build time)
+- OpenAPI documentation at `/docs` (generated in `server/openapi.rs`)
 - Configurable CORS support
 
-### Indexer (feature-gated)
+### Indexer (`src/index/`, feature-gated)
 
-The `indexer` feature enables building indexes from a local nixpkgs clone:
+Note the directory is `src/index/` even though the Cargo feature is named `indexer`. The `indexer` feature enables building indexes from a local nixpkgs clone:
 
 - `git.rs`: Walks nixpkgs git history (commits from 2017+)
 - `extractor.rs`: Runs `nix eval` to extract package metadata per commit
@@ -90,6 +95,19 @@ The `indexer` feature enables building indexes from a local nixpkgs clone:
 ```bash
 cargo search <crate>           # Find latest version
 ```
+
+## Environment Variables
+
+Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for tests and deployment.
+
+- `NXV_API_URL` — point the CLI at a remote `nxv serve` instead of the local DB
+- `NXV_API_TIMEOUT` — HTTP client timeout in seconds (default 30)
+- `NXV_DB_PATH` — override local SQLite path
+- `NXV_MANIFEST_URL` — override the manifest URL for `nxv update`
+- `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
+- `NXV_PUBLIC_KEY` — override the embedded minisign public key
+- `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT` — `nxv serve` bind/host/rate-limit
+- `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
 
 ## Data Paths
 

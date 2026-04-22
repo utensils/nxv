@@ -175,6 +175,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
+            -- Used by the incremental indexer's resume path (load_open_ranges_at_commit)
+            -- to avoid a full table scan at the start of every run on large DBs.
+            CREATE INDEX IF NOT EXISTS idx_packages_last_commit_hash ON package_versions(last_commit_hash);
             "#,
         )?;
 
@@ -339,14 +342,18 @@ impl Database {
         &self.conn
     }
 
-    /// Inserts multiple package version records in a single transaction.
+    /// Upserts multiple package version records in a single transaction.
     ///
-    /// Uses a transaction for performance and atomicity. Duplicate entries (same
-    /// `attribute_path`, `version`, and `first_commit_hash`) are ignored.
+    /// On conflict against UNIQUE(attribute_path, version, first_commit_hash) the
+    /// existing row is extended: `last_commit_hash` / `last_commit_date` and most
+    /// metadata fields are overwritten with the incoming values, while `source_path`
+    /// is preserved if the DB already has one (mirrors `OpenRange::update_metadata`).
     ///
     /// # Returns
     ///
-    /// The number of rows that were actually inserted.
+    /// The number of rows written (inserts *and* conflict-driven updates). SQLite
+    /// reports `1` for both paths, so the returned count is the total number of
+    /// successful row operations, not strictly new rows.
     ///
     /// # Examples
     ///
@@ -354,24 +361,38 @@ impl Database {
     /// # use crate::db::Database;
     /// # use crate::db::queries::PackageVersion;
     /// # fn example(mut db: Database, packages: Vec<PackageVersion>) {
-    /// let inserted = db.insert_package_ranges_batch(&packages).unwrap();
-    /// assert!(inserted <= packages.len());
+    /// let written = db.insert_package_ranges_batch(&packages).unwrap();
+    /// assert!(written <= packages.len());
     /// # }
     /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let mut inserted = 0;
+        let mut written = 0;
 
         {
+            // Upsert keyed on the UNIQUE(attribute_path, version, first_commit_hash)
+            // constraint. On conflict we extend the existing range (last_commit_hash /
+            // last_commit_date) and refresh metadata. source_path is sticky: once a
+            // row has one, we never overwrite it with NULL, matching OpenRange::update_metadata.
             let mut stmt = tx.prepare_cached(
                 r#"
-                INSERT OR IGNORE INTO package_versions
+                INSERT INTO package_versions
                     (name, version, first_commit_hash, first_commit_date,
                      last_commit_hash, last_commit_date, attribute_path,
                      description, license, homepage, maintainers, platforms, source_path,
                      known_vulnerabilities)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attribute_path, version, first_commit_hash) DO UPDATE SET
+                    last_commit_hash = excluded.last_commit_hash,
+                    last_commit_date = excluded.last_commit_date,
+                    description = excluded.description,
+                    license = excluded.license,
+                    homepage = excluded.homepage,
+                    maintainers = excluded.maintainers,
+                    platforms = excluded.platforms,
+                    source_path = COALESCE(source_path, excluded.source_path),
+                    known_vulnerabilities = excluded.known_vulnerabilities
                 "#,
             )?;
 
@@ -392,12 +413,49 @@ impl Database {
                     pkg.source_path,
                     pkg.known_vulnerabilities,
                 ])?;
-                inserted += changes;
+                written += changes;
             }
         }
 
         tx.commit()?;
-        Ok(inserted)
+        Ok(written)
+    }
+
+    /// Load the "open" ranges at a given checkpoint commit — one row per
+    /// (attribute_path, version) still present in nixpkgs as of `commit_hash`.
+    ///
+    /// Used to seed the in-memory `open_ranges` map at the start of an incremental
+    /// indexing run so that subsequent commits *extend* existing rows instead of
+    /// creating duplicates stamped with a new `first_commit_hash`.
+    ///
+    /// Already-bloated databases can hold several rows for the same
+    /// `(attribute_path, version)` pair but different `first_commit_hash` values
+    /// — this function picks the row with the smallest `id` per pair via
+    /// `GROUP BY` so seeding is deterministic. A full rebuild is still required
+    /// to actually remove the duplicate rows.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn load_open_ranges_at_commit(&self, commit_hash: &str) -> Result<Vec<PackageVersion>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, name, version, first_commit_hash, first_commit_date,
+                   last_commit_hash, last_commit_date, attribute_path,
+                   description, license, homepage, maintainers, platforms,
+                   source_path, known_vulnerabilities
+              FROM package_versions
+             WHERE last_commit_hash = ?1
+               AND id IN (
+                   SELECT MIN(id) FROM package_versions
+                    WHERE last_commit_hash = ?1
+                    GROUP BY attribute_path, version
+               )
+            "#,
+        )?;
+        let rows = stmt.query_map([commit_hash], PackageVersion::from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Update the last_commit fields for an existing package version range.
@@ -561,24 +619,101 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert_duplicate_handling() {
+    fn test_batch_insert_extends_existing_range() {
         use chrono::Utc;
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut db = Database::open(&db_path).unwrap();
 
-        let now = Utc::now();
-        let pkg = PackageVersion {
+        let t0 = Utc::now();
+        let mut pkg = PackageVersion {
             id: 0,
             name: "python".to_string(),
             version: "3.11.0".to_string(),
-            first_commit_hash: "abc1234567890".to_string(),
-            first_commit_date: now,
-            last_commit_hash: "def1234567890".to_string(),
-            last_commit_date: now,
+            first_commit_hash: "first_commit".to_string(),
+            first_commit_date: t0,
+            last_commit_hash: "last_commit_a".to_string(),
+            last_commit_date: t0,
             attribute_path: "python311".to_string(),
             description: Some("Python interpreter".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: Some("pkgs/development/interpreters/python".to_string()),
+            known_vulnerabilities: None,
+        };
+
+        let written1 = db
+            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
+            .unwrap();
+        assert_eq!(written1, 1);
+
+        // Second write with same unique key but extended last_commit_hash should
+        // update the existing row, not create a duplicate.
+        let t1 = t0 + chrono::Duration::days(30);
+        pkg.last_commit_hash = "last_commit_b".to_string();
+        pkg.last_commit_date = t1;
+        pkg.description = Some("Python 3.11 interpreter".to_string());
+        // source_path arriving as None must not clobber the existing value.
+        pkg.source_path = None;
+
+        let written2 = db
+            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
+            .unwrap();
+        assert_eq!(written2, 1);
+
+        let count: i32 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "upsert must not create a duplicate row");
+
+        let (last_hash, last_ts, description, source_path): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .conn
+            .query_row(
+                "SELECT last_commit_hash, last_commit_date, description, source_path FROM package_versions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(last_hash, "last_commit_b");
+        assert_eq!(last_ts, t1.timestamp());
+        assert_eq!(description.as_deref(), Some("Python 3.11 interpreter"));
+        assert_eq!(
+            source_path.as_deref(),
+            Some("pkgs/development/interpreters/python"),
+            "source_path must be sticky (preserved when new value is NULL)"
+        );
+    }
+
+    #[test]
+    fn test_load_open_ranges_at_commit() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let t0 = Utc::now();
+        let make = |name: &str, version: &str, first: &str, last: &str| PackageVersion {
+            id: 0,
+            name: name.to_string(),
+            version: version.to_string(),
+            first_commit_hash: first.to_string(),
+            first_commit_date: t0,
+            last_commit_hash: last.to_string(),
+            last_commit_date: t0,
+            attribute_path: name.to_string(),
+            description: None,
             license: None,
             homepage: None,
             maintainers: None,
@@ -587,26 +722,35 @@ mod tests {
             known_vulnerabilities: None,
         };
 
-        // First insert should succeed
-        let inserted1 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
-        assert_eq!(inserted1, 1);
+        let pkgs = vec![
+            make("firefox", "100.0", "c1", "checkpoint"),
+            make("firefox", "99.0", "c0", "checkpoint"),
+            make("chromium", "90.0", "c1", "older"),
+            // Simulate a bloated DB: same (attribute_path, version) with
+            // different first_commit_hash values — the previous indexer bug.
+            make("firefox", "100.0", "c2", "checkpoint"),
+            make("firefox", "100.0", "c3", "checkpoint"),
+        ];
+        db.insert_package_ranges_batch(&pkgs).unwrap();
 
-        // Second insert of same package should be ignored (no error)
-        let inserted2 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
-        assert_eq!(inserted2, 0);
+        let open = db.load_open_ranges_at_commit("checkpoint").unwrap();
+        assert_eq!(
+            open.len(),
+            2,
+            "must collapse duplicate (attribute_path, version) tuples"
+        );
+        assert!(open.iter().all(|p| p.last_commit_hash == "checkpoint"));
 
-        // Verify only one row exists
-        let count: i32 = db
-            .conn
-            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
-                row.get(0)
-            })
+        // Deterministic: the row with the smallest id per key should win
+        // (i.e. the first inserted, which has first_commit_hash = "c1").
+        let firefox_100 = open
+            .iter()
+            .find(|p| p.attribute_path == "firefox" && p.version == "100.0")
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(firefox_100.first_commit_hash, "c1");
+
+        let none = db.load_open_ranges_at_commit("does_not_exist").unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
