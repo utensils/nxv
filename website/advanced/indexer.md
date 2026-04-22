@@ -179,9 +179,6 @@ sources:
 | 3        | `pkg.passthru.unwrapped.version` | Passthru metadata         |
 | 4        | Parse from `pkg.name`            | `"hello-2.12"` → `"2.12"` |
 
-The `version_source` field in the database tracks which method was used,
-enabling debugging without re-indexing.
-
 ### all-packages.nix Optimization
 
 The file `pkgs/top-level/all-packages.nix` changes frequently but usually
@@ -206,17 +203,18 @@ Progress is saved every 100 commits (configurable via `--checkpoint-interval`):
 
 ## Database Schema
 
-The index uses SQLite with this schema (version 4):
+The index uses SQLite with this schema (version 3):
 
 ```sql
 CREATE TABLE package_versions (
-    attribute_path TEXT,           -- e.g., "python311"
-    version TEXT,                  -- e.g., "3.11.4"
-    version_source TEXT,           -- direct/unwrapped/passthru/name
-    first_commit_hash TEXT,        -- Earliest commit with this version
-    first_commit_date TEXT,        -- RFC3339 timestamp
-    last_commit_hash TEXT,         -- Latest commit with this version
-    last_commit_date TEXT,         -- RFC3339 timestamp
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,            -- Short package name, e.g. "python3"
+    version TEXT NOT NULL,         -- e.g., "3.11.4"
+    first_commit_hash TEXT NOT NULL,  -- Earliest commit with this version
+    first_commit_date INTEGER NOT NULL,  -- Unix timestamp (seconds)
+    last_commit_hash TEXT NOT NULL,      -- Latest commit with this version
+    last_commit_date INTEGER NOT NULL,   -- Unix timestamp (seconds)
+    attribute_path TEXT NOT NULL,  -- e.g., "python311"
     description TEXT,
     license TEXT,                  -- JSON array
     homepage TEXT,
@@ -224,9 +222,7 @@ CREATE TABLE package_versions (
     platforms TEXT,                -- JSON array
     source_path TEXT,              -- e.g., "pkgs/tools/foo/default.nix"
     known_vulnerabilities TEXT,    -- JSON array of CVEs
-    store_path TEXT,               -- Only for commits >= 2020-01-01
-    is_insecure BOOLEAN,
-    UNIQUE(attribute_path, version)
+    UNIQUE(attribute_path, version, first_commit_hash)
 );
 
 -- Full-text search index (auto-synced via triggers)
@@ -239,21 +235,24 @@ CREATE TABLE meta (
 );
 ```
 
-### Key Design: One Row Per Version
+### Key Design: Merged Version Ranges
 
-Each `(attribute_path, version)` pair has exactly one row. When the same version
-appears in multiple commits:
+Rows are merged so that a given `(attribute_path, version)` pair collapses into
+a single range per indexing run. When the same version appears in multiple
+commits:
 
 - `first_commit_*` tracks the earliest appearance
 - `last_commit_*` tracks the latest appearance
 
-This provides version timeline information without row explosion.
+The `UNIQUE(attribute_path, version, first_commit_hash)` constraint tolerates
+re-runs that discover an earlier `first_commit_hash`; `nxv dedupe` can collapse
+any residual duplicates left behind by older indexer versions (pre-0.1.5).
 
-### Store Path Extraction
+### Insecure Packages
 
-Store paths are only extracted for commits after 2020-01-01, when
-cache.nixos.org availability became reliable. Earlier commits may have packages
-that aren't in the binary cache.
+`is_insecure` is not stored as a column — it's derived at query time from
+`known_vulnerabilities` (a non-empty JSON array means the package is flagged
+insecure). The HTTP API's version-history endpoint surfaces this as a boolean.
 
 ## Troubleshooting
 

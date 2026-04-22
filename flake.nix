@@ -467,6 +467,7 @@
                 ps.wcag-contrast-ratio
               ]))
               pkgs.nodejs_22
+              pkgs.bun # VitePress docs site runtime
             ];
 
             env = [
@@ -639,6 +640,30 @@
                   echo "nxv dev · src/ changes → cargo-watch auto-rebuilds and restarts"
                   exec cargo watch -q -w src -w Cargo.toml -x 'run -- serve --port 8080' "$@"
                 '';
+              }
+              {
+                category = "docs";
+                name = "docs-dev";
+                help = "start VitePress dev server for the docs site";
+                command = "cd website && bun install && bun run dev \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "docs-build";
+                help = "build the documentation site";
+                command = "cd website && bun install && bun run build";
+              }
+              {
+                category = "docs";
+                name = "docs-preview";
+                help = "preview the built documentation site";
+                command = "cd website && bun run preview \"$@\"";
+              }
+              {
+                category = "docs";
+                name = "docs-fmt";
+                help = "format documentation with prettier";
+                command = "cd website && bun run fmt";
               }
               {
                 category = "deps";

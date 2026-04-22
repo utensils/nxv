@@ -208,9 +208,24 @@ GET /api/v1/health
 ```json
 {
   "status": "ok",
-  "version": "0.6.0",
+  "version": "0.1.6",
   "index_commit": "abc123..."
 }
+```
+
+### Metrics
+
+```
+GET /api/v1/metrics
+```
+
+Returns server, database, rate-limit, runtime, latency, and per-minute activity
+metrics. Intended for monitoring dashboards; responses are never cached.
+
+**Example:**
+
+```bash
+curl "http://localhost:8080/api/v1/metrics"
 ```
 
 ## Error Responses

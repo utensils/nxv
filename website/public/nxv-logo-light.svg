@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="38" height="38" viewBox="0 0 38 38" role="img" aria-label="nxv">
+  <style>
+    .stroke { stroke: #3a55a3; }
+    .fill { fill: #3a55a3; }
+    .wordmark { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-weight: 700; letter-spacing: -0.3px; }
+  </style>
+  <path class="stroke" d="M4 6 L4 32 M4 6 L10 6 M4 32 L10 32" stroke-width="1.75" stroke-linecap="square" fill="none"/>
+  <path class="stroke" d="M34 6 L34 32 M34 6 L28 6 M34 32 L28 32" stroke-width="1.75" stroke-linecap="square" fill="none"/>
+  <text class="wordmark fill" x="19" y="23.5" text-anchor="middle">nxv</text>
+</svg>

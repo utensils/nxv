@@ -11,11 +11,11 @@
     "postinstall": "command -v bun2nix >/dev/null && bun2nix -o bun.nix || true"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.1.0",
-    "prettier": "^3.4.0",
-    "tailwindcss": "^4.1.0",
-    "vitepress": "^1.6.0",
-    "vue": "^3.5.0"
+    "@tailwindcss/vite": "^4.2.4",
+    "prettier": "^3.8.3",
+    "tailwindcss": "^4.2.4",
+    "vitepress": "^1.6.4",
+    "vue": "^3.5.33"
   },
   "prettier": {
     "semi": false,

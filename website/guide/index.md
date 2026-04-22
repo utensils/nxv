@@ -38,8 +38,8 @@ For each package version, nxv provides:
 
 - **Version history** - When each version was first and last available
 - **Commit hashes** - Exact nixpkgs commits for reproducibility
-- **Store paths** - Pre-built binary paths from cache.nixos.org
-- **Flake references** - Copy-paste flake refs for any version
+- **Ready-to-run commands** - `nix shell` / `nix run` invocations pinned to the
+  right commit (or `nix-shell` with `fetchTarball` for pre-flake commits)
 - **Security info** - CVE warnings and insecure package markers
 
 ## How It Works

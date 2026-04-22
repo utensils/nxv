@@ -147,6 +147,17 @@ Frontend a11y is audited by two devshell commands:
   command palette open state. Not wired into `nix flake check` — needs a
   running server and pulls from npm on first run.
 
+## Docs Site (VitePress)
+
+The VitePress site under `website/` is managed by four devshell commands
+(they `cd website` and delegate to `bun`, which is provided in the shell):
+
+- `docs-dev` — start the local dev server (`bun run dev`). Default port is
+  5173; the site is served under `/nxv/` to match the GitHub Pages base.
+- `docs-build` — build the static site into `website/.vitepress/dist`.
+- `docs-preview` — serve the already-built site for a final look.
+- `docs-fmt` — run Prettier over `website/`.
+
 ## NixOS Module
 
 A NixOS module is provided for running nxv as a systemd service:
