@@ -1,0 +1,42 @@
+{
+  "defaults": {
+    "standard": "WCAG2AA",
+    "timeout": 30000,
+    "wait": 500,
+    "chromeLaunchConfig": {
+      "args": ["--no-sandbox"]
+    },
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    },
+    "runners": ["axe", "htmlcs"],
+    "ignore": []
+  },
+  "urls": [
+    "http://localhost:8080/",
+    {
+      "url": "http://localhost:8080/",
+      "viewport": { "width": 375, "height": 812 },
+      "actions": [
+        "wait for element #searchInput to be visible"
+      ]
+    },
+    {
+      "url": "http://localhost:8080/",
+      "actions": [
+        "wait for element #searchInput to be visible",
+        "set field #searchInput to python",
+        "wait for 600"
+      ]
+    },
+    {
+      "url": "http://localhost:8080/",
+      "actions": [
+        "wait for element #paletteTrigger to be visible",
+        "click element #paletteTrigger",
+        "wait for 300"
+      ]
+    }
+  ]
+}

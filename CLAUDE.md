@@ -129,6 +129,24 @@ Files:
 - Tests create temporary databases using `tempfile`
 - Some indexer tests require `nix` to be installed (marked `#[ignore]`)
 
+## Accessibility (WCAG)
+
+Frontend a11y is audited by two devshell commands:
+
+- `a11y` — static, fully offline. Runs `html5validator` against `frontend/*.html`
+  (CSS validation is skipped — vnu.jar predates Tailwind v4 oklch/`@theme`/
+  `@layer`/`color-mix`) and then `scripts/a11y_check.py frontend/index.html`.
+  The Python script enforces landmarks, form labels, alt/role on images and
+  SVGs, heading hierarchy, skip-link presence, dialog semantics, and converts
+  every oklch token in the `@theme` block to sRGB to flag fg/bg pairs below
+  WCAG 2.1 AA (4.5:1 text, 3:1 large/UI). Wired into `nix flake check` as
+  `nxv-a11y`.
+- `a11y-live` — dynamic, opt-in. Runs `pa11y-ci` via `npx` against the local
+  `nxv serve` (start it first with `dev`). Config at `frontend/.pa11yci.json`
+  covers the home page (desktop + mobile), a search-populated state, and the
+  command palette open state. Not wired into `nix flake check` — needs a
+  running server and pulls from npm on first run.
+
 ## NixOS Module
 
 A NixOS module is provided for running nxv as a systemd service:

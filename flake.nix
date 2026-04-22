@@ -409,6 +409,32 @@
             );
 
             nxv-fmt = craneLib.cargoFmt { inherit src; };
+
+            # Static accessibility audit: html5 validity + custom WCAG script.
+            # Runs fully offline, so safe for `nix flake check` / CI.
+            nxv-a11y =
+              let
+                pythonWithDeps = pkgs.python3.withPackages (ps: [
+                  ps.beautifulsoup4
+                  ps.wcag-contrast-ratio
+                ]);
+              in
+              pkgs.runCommand "nxv-a11y"
+                {
+                  nativeBuildInputs = [
+                    pkgs.html5validator
+                    pythonWithDeps
+                  ];
+                }
+                ''
+                  cp -r ${./frontend} frontend
+                  cp ${./scripts/a11y_check.py} a11y_check.py
+                  html5validator --root frontend --match "*.html" \
+                    --ignore 'error: CSS:' \
+                            'The only allowed value for the "type" attribute for the "style" element'
+                  python3 a11y_check.py frontend/index.html
+                  touch $out
+                '';
           };
 
           devshells.default = {
@@ -433,6 +459,14 @@
               pkgs.prettier # HTML/JS/CSS formatter
               pkgs.markdownlint-cli # Markdown linter
               pkgs.k6 # Load testing tool
+              # Accessibility tooling — static checks run offline, the dynamic
+              # pa11y-ci check uses `npx` which fetches from npm on first run.
+              pkgs.html5validator
+              (pkgs.python3.withPackages (ps: [
+                ps.beautifulsoup4
+                ps.wcag-contrast-ratio
+              ]))
+              pkgs.nodejs_22
             ];
 
             env = [
@@ -517,6 +551,40 @@
                 name = "flake-check";
                 help = "nix flake check (full Nix CI checks)";
                 command = "nix flake check \"$@\"";
+              }
+              {
+                category = "check";
+                name = "a11y";
+                help = "static WCAG + HTML5 validation of frontend/index.html";
+                command = ''
+                  set -euo pipefail
+                  # Ignore CSS messages — the bundled vnu.jar predates Tailwind v4
+                  # (oklch, @theme, @layer, color-mix). Our static WCAG script
+                  # handles the design-token checks instead.
+                  # Ignore CSS messages — the bundled vnu.jar predates Tailwind v4
+                  # (oklch, @theme, @layer, color-mix). Our static WCAG script
+                  # handles the design-token checks instead. Also skip the
+                  # `type="text/tailwindcss"` style-attribute complaint.
+                  html5validator --root frontend --match "*.html" \
+                    --ignore 'error: CSS:' \
+                            'The only allowed value for the "type" attribute for the "style" element' \
+                    "$@"
+                  python3 scripts/a11y_check.py frontend/index.html
+                '';
+              }
+              {
+                category = "check";
+                name = "a11y-live";
+                help = "run pa11y-ci against a running nxv serve (needs `dev` in another terminal)";
+                command = ''
+                  set -euo pipefail
+                  if ! command -v curl >/dev/null 2>&1 || ! curl -sf http://localhost:8080/ >/dev/null; then
+                    echo "a11y-live: no server on http://localhost:8080" >&2
+                    echo "           start one first with: dev" >&2
+                    exit 1
+                  fi
+                  exec npx --yes pa11y-ci --config frontend/.pa11yci.json "$@"
+                '';
               }
               {
                 category = "check";
