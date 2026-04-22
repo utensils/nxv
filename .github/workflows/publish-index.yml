@@ -10,6 +10,11 @@ on:
 
   # Allow manual triggering
   workflow_dispatch:
+    inputs:
+      dedupe:
+        description: "Run `nxv dedupe` on the index before publish (one-shot repair for pre-0.1.5 bloat)"
+        type: boolean
+        default: false
 
 concurrency:
   group: publish-index
@@ -164,7 +169,7 @@ jobs:
           echo "strategy=shallow" >> $GITHUB_OUTPUT
 
       - name: Skip if already up to date
-        if: ${{ steps.clone-strategy.outputs.strategy == 'skip' }}
+        if: ${{ steps.clone-strategy.outputs.strategy == 'skip' && inputs.dedupe != true }}
         run: |
           echo "Index is already up to date, nothing to do!"
           echo "## Index Already Current" >> $GITHUB_STEP_SUMMARY
@@ -211,8 +216,21 @@ jobs:
           echo "new_packages=${NEW_PACKAGES}" >> $GITHUB_OUTPUT
           echo "New packages: ${NEW_PACKAGES}"
 
+      # One-shot repair path: collapse duplicate (attribute_path, version) rows
+      # produced by the pre-0.1.5 incremental-indexer bug. Runs only when the
+      # workflow was dispatched manually with `dedupe: true`, before publish
+      # so the republished artifact is clean.
+      - name: Dedupe existing index
+        if: ${{ inputs.dedupe == true && steps.download-index.outputs.index_exists == 'true' }}
+        run: |
+          echo "Rows before dedupe:"
+          ./target/release/nxv stats 2>/dev/null | grep "Total version ranges" || true
+          ./target/release/nxv --db-path ~/.local/share/nxv/index.db dedupe
+          echo "Rows after dedupe:"
+          ./target/release/nxv stats 2>/dev/null | grep "Total version ranges" || true
+
       - name: Generate publishable artifacts
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
+        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
         env:
           NXV_SECRET_KEY: ${{ secrets.NXV_SIGNING_KEY }}
         run: |
@@ -222,7 +240,7 @@ jobs:
             --sign
 
       - name: Upload workflow artifacts
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
+        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
         uses: actions/upload-artifact@v4
         with:
           name: nxv-index
@@ -230,7 +248,7 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub Release
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
+        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -254,13 +272,16 @@ jobs:
             --clobber
 
       - name: Summary
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
+        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.dedupe }}" = "true" ]; then
+            echo "- **Dedupe:** enabled (one-shot repair)" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "- **Clone depth:** ${{ steps.clone-strategy.outputs.depth }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **New packages:** ${{ steps.stats-after.outputs.new_packages }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total packages:** ${{ steps.stats-after.outputs.packages_after }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New packages:** ${{ steps.stats-after.outputs.new_packages || 'n/a (no index run)' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total packages:** ${{ steps.stats-after.outputs.packages_after || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
           echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
