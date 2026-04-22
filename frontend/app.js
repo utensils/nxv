@@ -142,6 +142,42 @@
       : `${insecurePrefix}nix shell${impure} nixpkgs/${ref}#${r.attr}`;
   }
 
+  // ---------- URL state (refresh-safe, shareable) ----------
+  function serializeState() {
+    const p = new URLSearchParams();
+    if (STATE.query) p.set('q', STATE.query);
+    if (STATE.filters.exact) p.set('exact', '1');
+    if (STATE.filters.version) p.set('version', STATE.filters.version);
+    if (STATE.filters.arch) p.set('arch', STATE.filters.arch);
+    if (STATE.filters.license) p.set('license', STATE.filters.license);
+    if (STATE.filters.sort && STATE.filters.sort !== 'date') p.set('sort', STATE.filters.sort);
+    if (STATE.filters.includeInsecure) p.set('insecure', '1');
+    if (STATE.view && STATE.view !== 'rows') p.set('view', STATE.view);
+    if (STATE.page > 1) p.set('page', String(STATE.page));
+    return p;
+  }
+
+  function syncUrl() {
+    const qs = serializeState().toString();
+    const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    // replaceState so every keystroke doesn't bloat browser history
+    window.history.replaceState(null, '', url);
+  }
+
+  function hydrateFromUrl() {
+    const p = new URLSearchParams(window.location.search);
+    STATE.query = p.get('q') || '';
+    STATE.filters.exact = p.get('exact') === '1';
+    STATE.filters.version = p.get('version') || '';
+    STATE.filters.arch = p.get('arch') || '';
+    STATE.filters.license = p.get('license') || '';
+    STATE.filters.sort = p.get('sort') || 'date';
+    STATE.filters.includeInsecure = p.get('insecure') === '1';
+    STATE.view = p.get('view') || 'rows';
+    const pg = parseInt(p.get('page') || '1', 10);
+    STATE.page = Number.isFinite(pg) && pg > 0 ? pg : 1;
+  }
+
   // ---------- query parsing ----------
   function parseQuery(q) {
     const m = q.trim().match(/^(.+?)\s+(v?\d[\d.]*[\w.-]*)$/i);
@@ -213,6 +249,7 @@
 
   async function runSearch(opts = {}) {
     if (opts.resetPage !== false) STATE.page = 1;
+    syncUrl();
     const seq = ++STATE.reqSeq;
 
     // empty query + no filters → show welcome
@@ -873,6 +910,7 @@
         el.classList.add('text-[var(--color-fog-0)]');
         el.classList.remove('text-[var(--color-fog-4)]');
         STATE.view = el.dataset.view;
+        syncUrl();
       });
     });
 
@@ -903,9 +941,39 @@
     });
   }
 
+  function applyViewToggleStyles() {
+    $$('[data-view]').forEach((o) => {
+      const active = o.dataset.view === STATE.view;
+      o.classList.toggle('hairline', active);
+      o.classList.toggle('text-[var(--color-fog-0)]', active);
+      o.classList.toggle('text-[var(--color-fog-4)]', !active);
+    });
+  }
+
+  function hasActiveState() {
+    const f = STATE.filters;
+    return !!(
+      STATE.query ||
+      f.version ||
+      f.arch ||
+      f.license ||
+      (f.sort && f.sort !== 'date') ||
+      f.exact ||
+      f.includeInsecure ||
+      STATE.page > 1
+    );
+  }
+
   // ---------- init ----------
+  hydrateFromUrl();
   wire();
+  cache('searchInput').value = STATE.query;
   renderFilterChips();
-  renderWelcome();
+  applyViewToggleStyles();
+  if (hasActiveState()) {
+    runSearch({ resetPage: false });
+  } else {
+    renderWelcome();
+  }
   loadBoot();
 })();
