@@ -67,6 +67,9 @@
     if (s == null || s === '') return [];
     if (typeof s !== 'string') return Array.isArray(s) ? s : [String(s)];
     const t = s.trim();
+    // The DB sometimes stores a literal "null"/"None" sentinel for missing
+    // JSON; the server treats those as secure, so we must too.
+    if (t === '' || t === 'null' || t === 'None') return [];
     if (t.startsWith('[')) {
       try {
         const v = JSON.parse(t);
@@ -139,7 +142,12 @@
     const isLegacy = r.legacy || predatesFlakes(r.last);
     const insecurePrefix = r.insecure ? 'NIXPKGS_ALLOW_INSECURE=1 ' : '';
     const impure = r.insecure ? ' --impure' : '';
-    const ref = shortHash(r.hash || r.lastHash);
+    // For the flake path the ref MUST point at a commit that has flake.nix —
+    // i.e. post 2020-02-10. first_commit_hash can predate that even for a
+    // version whose last-seen commit is current, so prefer last_commit_hash
+    // here. For legacy (pre-flake) tarball imports either hash works; keep
+    // the historical preference for first_commit_hash.
+    const ref = isLegacy ? shortHash(r.hash || r.lastHash) : shortHash(r.lastHash || r.hash);
     return isLegacy
       ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${ref}.tar.gz") {}).${r.attr}'`
       : `${insecurePrefix}nix shell${impure} nixpkgs/${ref}#${r.attr}`;
@@ -229,7 +237,18 @@
   }
 
   // ---------- search ----------
-  function buildSearchUrl() {
+  // The /api/v1/search endpoint paginates server-side but has no params for
+  // `arch` or an insecure toggle, so when those client-only filters are
+  // active we fetch a large window and paginate the filtered list ourselves.
+  // This keeps the count and the prev/next controls consistent with what the
+  // user actually sees.
+  const CLIENT_FILTER_LIMIT = 500;
+
+  function clientFilterActive() {
+    return !!STATE.filters.arch || !STATE.filters.includeInsecure;
+  }
+
+  function buildSearchUrl(clientFiltered) {
     const parsed = parseQuery(STATE.query);
     const pkg = parsed.pkg;
     const params = new URLSearchParams();
@@ -240,8 +259,13 @@
     if (STATE.filters.exact) params.set('exact', 'true');
     if (STATE.filters.license) params.set('license', STATE.filters.license);
     if (STATE.filters.sort) params.set('sort', STATE.filters.sort);
-    params.set('limit', String(STATE.pageSize));
-    params.set('offset', String((STATE.page - 1) * STATE.pageSize));
+    if (clientFiltered) {
+      params.set('limit', String(CLIENT_FILTER_LIMIT));
+      params.set('offset', '0');
+    } else {
+      params.set('limit', String(STATE.pageSize));
+      params.set('offset', String((STATE.page - 1) * STATE.pageSize));
+    }
     return `${API_BASE}/search?${params.toString()}`;
   }
 
@@ -258,29 +282,50 @@
       return;
     }
 
-    const url = buildSearchUrl();
+    const clientFiltered = clientFilterActive();
+    const url = buildSearchUrl(clientFiltered);
     setResultsStatus('running…', '');
     try {
       const { json, latency } = await api(url);
       if (seq !== STATE.reqSeq) return; // a newer request started — drop this
       STATE.lastLatencyMs = latency;
       const items = (json.data || []).map(toRow);
-      const meta = json.meta || { total: items.length, has_more: false };
-      STATE.total = meta.total;
-      STATE.hasMore = !!meta.has_more;
+      const serverMeta = json.meta || { total: items.length, has_more: false };
 
-      // client-side filters that the API doesn't support: arch, includeInsecure
+      // client-side filters the API doesn't support
       let filtered = items;
       if (STATE.filters.arch)
         filtered = filtered.filter((r) => r.platforms.includes(STATE.filters.arch));
       if (!STATE.filters.includeInsecure) filtered = filtered.filter((r) => !r.insecure);
 
-      render(filtered);
+      let rows,
+        total,
+        hasMore,
+        truncated = false;
+      if (clientFiltered) {
+        // paginate the filtered list on the client so count + prev/next agree
+        total = filtered.length;
+        const start = (STATE.page - 1) * STATE.pageSize;
+        const end = start + STATE.pageSize;
+        rows = filtered.slice(start, end);
+        hasMore = end < filtered.length;
+        // the server capped us at CLIENT_FILTER_LIMIT rows; if it says there's
+        // more unfiltered data available, our filtered total is a lower bound
+        truncated = !!serverMeta.has_more && items.length >= CLIENT_FILTER_LIMIT;
+      } else {
+        rows = filtered;
+        total = serverMeta.total;
+        hasMore = !!serverMeta.has_more;
+      }
+      STATE.total = total;
+      STATE.hasMore = hasMore;
+
+      render(rows);
       setResultsStatus(
-        `results / ${fmtNum(meta.total)}${filtered.length !== items.length ? ` (${filtered.length} shown)` : ''}`,
+        `results / ${fmtNum(total)}${truncated ? '+' : ''}`,
         `${(latency / 1000).toFixed(3)}s · api`
       );
-      renderPagination(meta);
+      renderPagination({ total, has_more: hasMore });
     } catch (e) {
       if (seq !== STATE.reqSeq) return;
       renderError(e);
@@ -347,7 +392,7 @@
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
         else if (action === 'copy-run')
-          copy(`nix run nixpkgs/${shortHash(r.hash || r.lastHash)}#${r.attr}`);
+          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
         else if (action === 'history') openDrawer(r);
       });
     });
