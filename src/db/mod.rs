@@ -175,6 +175,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
+            -- Used by the incremental indexer's resume path (load_open_ranges_at_commit)
+            -- to avoid a full table scan at the start of every run on large DBs.
+            CREATE INDEX IF NOT EXISTS idx_packages_last_commit_hash ON package_versions(last_commit_hash);
             "#,
         )?;
 
@@ -425,10 +428,11 @@ impl Database {
     /// indexing run so that subsequent commits *extend* existing rows instead of
     /// creating duplicates stamped with a new `first_commit_hash`.
     ///
-    /// Already-bloated databases can hold several rows with the same unique key
-    /// but different `first_commit_hash` — this function picks the row with the
-    /// smallest `id` per key via `GROUP BY` so seeding is deterministic. A full
-    /// rebuild is still required to actually remove the duplicate rows.
+    /// Already-bloated databases can hold several rows for the same
+    /// `(attribute_path, version)` pair but different `first_commit_hash` values
+    /// — this function picks the row with the smallest `id` per pair via
+    /// `GROUP BY` so seeding is deterministic. A full rebuild is still required
+    /// to actually remove the duplicate rows.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn load_open_ranges_at_commit(&self, commit_hash: &str) -> Result<Vec<PackageVersion>> {
         let mut stmt = self.conn.prepare(
