@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+mod self_update;
 pub mod version;
 
 #[cfg(feature = "indexer")]
@@ -173,12 +174,16 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                 let input = input.trim().to_lowercase();
 
                 if input.is_empty() || input == "y" || input == "yes" {
-                    // Run the update command
+                    // Run the update command. Skip the binary self-update check —
+                    // the user invoked search/info/etc., not an explicit update,
+                    // and we don't want to surprise them by replacing the binary
+                    // mid-session.
                     let update_args = cli::UpdateArgs {
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
                         public_key: None,
+                        no_self_update: true,
                     };
                     cmd_update(cli, &update_args)?;
 
@@ -433,6 +438,30 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
             if verbosity >= Verbosity::Info {
                 eprintln!("Full commit hash: {}", commit);
             }
+        }
+    }
+
+    if !args.no_self_update {
+        if !cli.quiet {
+            eprintln!();
+        }
+        // Binary check is best-effort: a GitHub outage or rate limit should not
+        // fail the overall update (the index step already succeeded). Surface
+        // the error as a warning only.
+        let result = self_update::run(self_update::SelfUpdateOptions {
+            check: false,
+            force: false,
+            version: None,
+            // `api_timeout` is applied as a connect-timeout only; it does not
+            // bound the (potentially multi-MB) binary download.
+            connect_timeout_secs: cli.api_timeout,
+            show_progress,
+            quiet: cli.quiet,
+        });
+        if let Err(e) = result
+            && !cli.quiet
+        {
+            eprintln!("Skipping binary self-update check: {e}");
         }
     }
 

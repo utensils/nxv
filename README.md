@@ -148,13 +148,29 @@ nix shell nixpkgs/e4a45f9#python
 nix run nixpkgs/e4a45f9#python
 ```
 
-### Index Management
+### Keeping nxv up to date
 
 ```bash
-nxv update           # Download/update the index
-nxv update --force   # Force full re-download
-nxv stats            # Show index statistics
+nxv update                    # Refresh the index, then check for a newer nxv release
+nxv update --force            # Force a full re-download of the index
+nxv update --no-self-update   # Only refresh the index; skip the binary check
+nxv stats                     # Show index statistics
 ```
+
+`nxv update` always refreshes the package index first. Afterwards it
+checks GitHub for a newer nxv release and behaves according to how nxv
+was installed:
+
+- **Local install** (from `install.sh` or a manual download) — downloads
+  the platform binary, verifies its SHA-256 against `SHA256SUMS.txt`, and
+  atomically swaps the running executable.
+- **Nix / cargo / Homebrew** — leaves the binary alone and prints the
+  matching upgrade command (e.g. `brew upgrade nxv`,
+  `cargo install --locked nxv`).
+
+Set `NXV_NO_SELF_UPDATE=1` or pass `--no-self-update` to skip the binary
+check entirely (useful for CI or systemd timer units that only want to
+refresh the index).
 
 ## API Server
 

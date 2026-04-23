@@ -43,7 +43,16 @@ pub enum Commands {
     /// Search for package versions.
     Search(SearchArgs),
 
-    /// Download or update the package index.
+    /// Update the package index, then check for a newer nxv release.
+    ///
+    /// This runs the index refresh first. Afterwards it checks GitHub
+    /// for a newer nxv binary. On a local install (install.sh, manual
+    /// download) the new binary is downloaded, its SHA-256 is verified
+    /// against SHA256SUMS.txt, and the running executable is replaced
+    /// atomically. On managed installs (Nix, cargo, Homebrew) the
+    /// binary is left alone and the matching upgrade command is
+    /// printed instead. Pass `--no-self-update` to skip the binary
+    /// check entirely and only refresh the index.
     Update(UpdateArgs),
 
     /// Show detailed information about a package.
@@ -207,6 +216,14 @@ pub struct UpdateArgs {
     /// Can be the raw key (RW...) or path to a .pub file.
     #[arg(long, env = "NXV_PUBLIC_KEY")]
     pub public_key: Option<String>,
+
+    /// Skip the binary self-update check after the index refresh.
+    ///
+    /// By default, `nxv update` also checks GitHub for a newer nxv release
+    /// and updates the binary (for local installs) or prints a hint (for
+    /// managed installs). Pass this flag to only refresh the index.
+    #[arg(long, env = "NXV_NO_SELF_UPDATE")]
+    pub no_self_update: bool,
 }
 
 /// Arguments for the history command.
@@ -673,6 +690,17 @@ mod tests {
         match args.command {
             Commands::Update(update) => {
                 assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
+            }
+            _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_update_no_self_update_flag() {
+        let args = Cli::try_parse_from(["nxv", "update", "--no-self-update"]).unwrap();
+        match args.command {
+            Commands::Update(u) => {
+                assert!(u.no_self_update);
             }
             _ => panic!("Expected Update command"),
         }
