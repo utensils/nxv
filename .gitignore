@@ -43,6 +43,11 @@ website/.vitepress/dist/
 website/bun.lock
 website/server/
 
+# Frontend
+frontend/node_modules/
+frontend/tailwind.generated.css
+frontend/package-lock.json
+
 # Added by cargo
 
 /target
