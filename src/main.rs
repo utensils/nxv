@@ -451,7 +451,9 @@ fn cmd_self_update(cli: &Cli, args: &cli::SelfUpdateArgs) -> Result<()> {
         check: args.check,
         force: args.force,
         version: args.version.as_deref(),
-        timeout_secs: cli.api_timeout,
+        // `api_timeout` is repurposed here as the connect-timeout only —
+        // it does *not* bound the (potentially multi-MB) binary download.
+        connect_timeout_secs: cli.api_timeout,
         show_progress: !cli.quiet,
         quiet: cli.quiet,
     })

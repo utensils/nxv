@@ -57,12 +57,56 @@ impl InstallMethod {
         }
     }
 
-    /// Command the user should run to update a managed install, if any.
-    pub fn update_hint(self) -> Option<&'static str> {
+    /// Command (or instruction) the user should run to update a managed install.
+    ///
+    /// `force` and `version` influence the generated hint so that, e.g.,
+    /// `nxv self-update --version v0.1.6` on a cargo install tells the user
+    /// to run `cargo install --locked --version 0.1.6 nxv`, not the generic
+    /// `cargo install --locked nxv` (which would silently install a different
+    /// version). Returns `None` for `Local` — callers do the work themselves.
+    pub fn update_hint(self, force: bool, version: Option<&str>) -> Option<String> {
         match self {
-            InstallMethod::Nix => Some("nix profile upgrade nxv  # or update your flake input"),
-            InstallMethod::Cargo => Some("cargo install --locked nxv"),
-            InstallMethod::Homebrew => Some("brew upgrade nxv"),
+            InstallMethod::Nix => {
+                if let Some(v) = version {
+                    let tag = if v.starts_with('v') {
+                        v.to_string()
+                    } else {
+                        format!("v{v}")
+                    };
+                    Some(format!(
+                        "nix profile install --refresh github:utensils/nxv/{tag}  \
+                         # or pin the flake input to {tag}"
+                    ))
+                } else {
+                    Some("nix profile upgrade nxv  # or update your flake input".to_string())
+                }
+            }
+            InstallMethod::Cargo => {
+                let mut cmd = String::from("cargo install --locked");
+                if force {
+                    cmd.push_str(" --force");
+                }
+                if let Some(v) = version {
+                    let bare = v.strip_prefix('v').unwrap_or(v);
+                    cmd.push_str(" --version ");
+                    cmd.push_str(bare);
+                }
+                cmd.push_str(" nxv");
+                Some(cmd)
+            }
+            InstallMethod::Homebrew => {
+                if version.is_some() {
+                    // Homebrew tracks only the latest formula; pinning is not portable.
+                    Some(String::from(
+                        "# Homebrew tracks only the latest formula — use install.sh \
+                         with NXV_VERSION=<tag> to install a specific release.",
+                    ))
+                } else if force {
+                    Some(String::from("brew reinstall nxv"))
+                } else {
+                    Some(String::from("brew upgrade nxv"))
+                }
+            }
             InstallMethod::Local => None,
         }
     }
@@ -175,6 +219,11 @@ fn verify_checksum(sums_content: &str, asset_name: &str, data: &[u8]) -> Result<
 /// the new one, and clean up the backup. If the install rename fails the
 /// backup is restored. We can rename across the same directory because we
 /// write the temp file next to the target.
+///
+/// `detect_asset_name` already bails on non-Unix platforms, so the Windows
+/// stub below should never be reached at runtime — it exists purely to keep
+/// `cargo build` green on targets we don't ship binaries for.
+#[cfg(unix)]
 fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -213,9 +262,20 @@ fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn replace_binary(_new_binary: &[u8], _exe_path: &Path) -> Result<()> {
+    bail!("self-update is only supported on Unix platforms (Linux and macOS).")
+}
+
 // ── HTTP helpers ────────────────────────────────────────────────────────────
 
-fn build_client(timeout_secs: u64) -> Result<reqwest::blocking::Client> {
+/// Build the HTTP client used for both GitHub API calls *and* binary downloads.
+///
+/// `connect_timeout_secs` bounds only the TCP/TLS handshake so we fail fast
+/// on unreachable hosts. We intentionally do **not** set a total-request
+/// timeout: the same client is reused for multi-MB binary downloads, and
+/// the user can always Ctrl+C an unresponsive session.
+fn build_client(connect_timeout_secs: u64) -> Result<reqwest::blocking::Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
@@ -232,7 +292,7 @@ fn build_client(timeout_secs: u64) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(format!("nxv/{}", version::PKG_VERSION))
         .default_headers(headers)
-        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
         .build()
         .context("failed to build HTTP client")
 }
@@ -340,7 +400,8 @@ pub struct SelfUpdateOptions<'a> {
     pub check: bool,
     pub force: bool,
     pub version: Option<&'a str>,
-    pub timeout_secs: u64,
+    /// TCP/TLS connect timeout (seconds). Does **not** bound the download.
+    pub connect_timeout_secs: u64,
     pub show_progress: bool,
     pub quiet: bool,
 }
@@ -354,7 +415,7 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
         eprintln!("Checking for updates...");
     }
 
-    let client = build_client(opts.timeout_secs)?;
+    let client = build_client(opts.connect_timeout_secs)?;
     let release = match opts.version {
         Some(tag) => fetch_release_by_tag(&client, tag)?,
         None => fetch_latest_release(&client)?,
@@ -424,7 +485,7 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
         } else {
             eprintln!("Latest release is {remote_version}; you are on {current}.");
         }
-        if let Some(hint) = method.update_hint() {
+        if let Some(hint) = method.update_hint(opts.force, opts.version) {
             eprintln!();
             eprintln!("To update, run:");
             eprintln!("  {hint}");
@@ -585,10 +646,56 @@ mod tests {
 
     #[test]
     fn install_method_update_hint_is_set_for_managed() {
-        assert!(InstallMethod::Nix.update_hint().is_some());
-        assert!(InstallMethod::Cargo.update_hint().is_some());
-        assert!(InstallMethod::Homebrew.update_hint().is_some());
-        assert!(InstallMethod::Local.update_hint().is_none());
+        assert!(InstallMethod::Nix.update_hint(false, None).is_some());
+        assert!(InstallMethod::Cargo.update_hint(false, None).is_some());
+        assert!(InstallMethod::Homebrew.update_hint(false, None).is_some());
+        assert!(InstallMethod::Local.update_hint(false, None).is_none());
+    }
+
+    #[test]
+    fn cargo_hint_honors_version_and_force() {
+        let hint = InstallMethod::Cargo
+            .update_hint(true, Some("v0.1.6"))
+            .unwrap();
+        assert!(hint.contains("--force"), "hint missing --force: {hint}");
+        assert!(
+            hint.contains("--version 0.1.6"),
+            "hint missing pinned version (stripped of v): {hint}"
+        );
+        assert!(hint.ends_with(" nxv"), "hint must target nxv: {hint}");
+    }
+
+    #[test]
+    fn cargo_hint_plain() {
+        let hint = InstallMethod::Cargo.update_hint(false, None).unwrap();
+        assert_eq!(hint, "cargo install --locked nxv");
+    }
+
+    #[test]
+    fn homebrew_hint_force_vs_version_vs_default() {
+        let plain = InstallMethod::Homebrew.update_hint(false, None).unwrap();
+        assert_eq!(plain, "brew upgrade nxv");
+        let forced = InstallMethod::Homebrew.update_hint(true, None).unwrap();
+        assert_eq!(forced, "brew reinstall nxv");
+        // --version: Homebrew can't pin, so the hint becomes a guidance note.
+        let pinned = InstallMethod::Homebrew
+            .update_hint(false, Some("v0.1.6"))
+            .unwrap();
+        assert!(
+            pinned.contains("install.sh"),
+            "homebrew pin hint should redirect to install.sh: {pinned}"
+        );
+    }
+
+    #[test]
+    fn nix_hint_version_suggests_flake_ref() {
+        let hint = InstallMethod::Nix
+            .update_hint(false, Some("0.1.6"))
+            .unwrap();
+        assert!(
+            hint.contains("github:utensils/nxv/v0.1.6"),
+            "nix pin hint should include a flake ref: {hint}"
+        );
     }
 
     // ── Checksum verification ───────────────────────────────────────────
@@ -636,6 +743,7 @@ mod tests {
     }
 
     // ── Binary replacement ──────────────────────────────────────────────
+    #[cfg(unix)]
     #[test]
     fn replace_binary_roundtrip() {
         use std::os::unix::fs::PermissionsExt;
@@ -653,6 +761,7 @@ mod tests {
         assert!(!exe_path.with_extension("old").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn replace_binary_leaves_no_tmp() {
         let dir = tempfile::tempdir().unwrap();
