@@ -109,7 +109,8 @@ nxv history python311
 
 ### update
 
-Download or update the package index.
+Refresh the package index, then check for a newer nxv binary and update
+it (or print a hint for managed installs).
 
 ```bash
 nxv update [options]
@@ -117,53 +118,42 @@ nxv update [options]
 
 **Options:**
 
-| Flag                 | Description                          |
-| -------------------- | ------------------------------------ |
-| `-f, --force`        | Force full re-download               |
-| `--skip-verify`      | Skip manifest signature verification |
-| `--public-key <KEY>` | Custom public key for verification   |
+| Flag                 | Description                                                        |
+| -------------------- | ------------------------------------------------------------------ |
+| `-f, --force`        | Force full re-download of the index                                |
+| `--skip-verify`      | Skip manifest signature verification                               |
+| `--public-key <KEY>` | Custom public key for verification                                 |
+| `--no-self-update`   | Skip the binary self-update check; only refresh the index          |
 
-### self-update
+`--no-self-update` also honours the `NXV_NO_SELF_UPDATE` environment
+variable, which is useful for CI or systemd timer units that should
+only refresh the index.
 
-Update the nxv **binary** itself to the latest GitHub release. This is
-separate from `nxv update`, which updates the package _index_.
+**Binary-update behaviour by install method:**
 
-```bash
-nxv self-update [options]
-```
+| Install method | Action                                                         |
+| -------------- | -------------------------------------------------------------- |
+| Local          | Downloads, verifies SHA-256, atomically swaps the binary       |
+| Nix            | Leaves binary alone; prints `nix profile upgrade nxv` / flake hint |
+| `cargo install`| Leaves binary alone; prints `cargo install --locked nxv`       |
+| Homebrew       | Leaves binary alone; prints `brew upgrade nxv` (or reinstall)  |
 
-**Options:**
-
-| Flag                  | Description                                               |
-| --------------------- | --------------------------------------------------------- |
-| `--check`             | Only report whether a newer release exists; no install    |
-| `--force`             | Reinstall even if the current version already matches     |
-| `--version <TAG>`     | Install a specific release tag (e.g. `v0.2.0`)            |
-
-**Behaviour by install method:**
-
-| Install method | Action                                                      |
-| -------------- | ----------------------------------------------------------- |
-| Nix            | Prints `nix profile upgrade nxv` / flake-update hint, exits |
-| `cargo install`| Prints `cargo install --locked nxv`, exits                  |
-| Homebrew       | Prints `brew upgrade nxv`, exits                            |
-| Local          | Downloads, verifies SHA-256, atomically swaps the binary    |
-
-Managed-install branches exit with status `2` so scripts can distinguish
-them from a successful in-place update. Set `GITHUB_TOKEN` to avoid
-unauthenticated rate limits when calling the GitHub API.
+Set `GITHUB_TOKEN` to avoid unauthenticated rate limits when calling the
+GitHub API. If the binary check fails (e.g., network or rate limit),
+`nxv update` prints a warning but still reports the index update as
+successful.
 
 **Examples:**
 
 ```bash
-# Check if a new release is available
-nxv self-update --check
+# Refresh the index and update the binary (or print an upgrade hint)
+nxv update
 
-# Update to latest
-nxv self-update
+# Just refresh the index — don't touch the binary
+nxv update --no-self-update
 
-# Pin to a specific version
-nxv self-update --version v0.2.0
+# Force full re-download of the index
+nxv update --force
 ```
 
 ### serve

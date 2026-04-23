@@ -43,27 +43,17 @@ pub enum Commands {
     /// Search for package versions.
     Search(SearchArgs),
 
-    /// Download or update the package index.
-    Update(UpdateArgs),
-
-    /// Update the nxv binary itself to the latest GitHub release.
+    /// Update the package index, then check for a newer nxv release.
     ///
-    /// Detects how nxv was installed. For managed installs (Nix, cargo,
-    /// Homebrew) this prints the correct upgrade command instead of
-    /// trying to overwrite a read-only binary. For local installs it
-    /// downloads the platform-specific release, verifies its SHA-256
-    /// checksum against SHA256SUMS.txt, and replaces the running
-    /// binary in place.
-    #[command(
-        disable_version_flag = true,
-        after_long_help = "\
-Examples:
-  nxv self-update                  Update to the latest release
-  nxv self-update --check          Only report whether a newer release exists
-  nxv self-update --version v0.2.0 Install a specific release tag
-  nxv self-update --force          Reinstall even if already up-to-date"
-    )]
-    SelfUpdate(SelfUpdateArgs),
+    /// This runs the index refresh first. Afterwards it checks GitHub
+    /// for a newer nxv binary. On a local install (install.sh, manual
+    /// download) the new binary is downloaded, its SHA-256 is verified
+    /// against SHA256SUMS.txt, and the running executable is replaced
+    /// atomically. On managed installs (Nix, cargo, Homebrew) the
+    /// binary is left alone and the matching upgrade command is
+    /// printed instead. Pass `--no-self-update` to skip the binary
+    /// check entirely and only refresh the index.
+    Update(UpdateArgs),
 
     /// Show detailed information about a package.
     Info(InfoArgs),
@@ -226,22 +216,14 @@ pub struct UpdateArgs {
     /// Can be the raw key (RW...) or path to a .pub file.
     #[arg(long, env = "NXV_PUBLIC_KEY")]
     pub public_key: Option<String>,
-}
 
-/// Arguments for the self-update command.
-#[derive(Parser, Debug)]
-pub struct SelfUpdateArgs {
-    /// Only check for updates; do not download or install anything.
-    #[arg(long)]
-    pub check: bool,
-
-    /// Reinstall even if the current version already matches the release.
-    #[arg(long)]
-    pub force: bool,
-
-    /// Install a specific release tag (e.g. `v0.2.0` or `0.2.0`).
-    #[arg(long)]
-    pub version: Option<String>,
+    /// Skip the binary self-update check after the index refresh.
+    ///
+    /// By default, `nxv update` also checks GitHub for a newer nxv release
+    /// and updates the binary (for local installs) or prints a hint (for
+    /// managed installs). Pass this flag to only refresh the index.
+    #[arg(long, env = "NXV_NO_SELF_UPDATE")]
+    pub no_self_update: bool,
 }
 
 /// Arguments for the history command.
@@ -714,28 +696,13 @@ mod tests {
     }
 
     #[test]
-    fn test_self_update_default() {
-        let args = Cli::try_parse_from(["nxv", "self-update"]).unwrap();
+    fn test_update_no_self_update_flag() {
+        let args = Cli::try_parse_from(["nxv", "update", "--no-self-update"]).unwrap();
         match args.command {
-            Commands::SelfUpdate(su) => {
-                assert!(!su.check);
-                assert!(!su.force);
-                assert!(su.version.is_none());
+            Commands::Update(u) => {
+                assert!(u.no_self_update);
             }
-            _ => panic!("Expected SelfUpdate command"),
-        }
-    }
-
-    #[test]
-    fn test_self_update_flags() {
-        let args =
-            Cli::try_parse_from(["nxv", "self-update", "--check", "--version", "v0.2.0"]).unwrap();
-        match args.command {
-            Commands::SelfUpdate(su) => {
-                assert!(su.check);
-                assert_eq!(su.version.as_deref(), Some("v0.2.0"));
-            }
-            _ => panic!("Expected SelfUpdate command"),
+            _ => panic!("Expected Update command"),
         }
     }
 

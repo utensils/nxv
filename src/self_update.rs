@@ -406,13 +406,15 @@ pub struct SelfUpdateOptions<'a> {
     pub quiet: bool,
 }
 
-/// Execute `nxv self-update`. Returns `Ok(())` on success or a no-op
-/// "already up to date" / "managed install" outcome.
+/// Check for a newer nxv release and, on a local install, replace the
+/// running binary. On managed installs (Nix / cargo / Homebrew) this only
+/// prints a package-manager-appropriate upgrade hint — the binary is never
+/// touched. Returns `Ok(())` for all non-error outcomes (up-to-date,
+/// managed-install hint, successful replacement).
 pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
     let current = version::PKG_VERSION;
     if !opts.quiet {
-        eprintln!("Current version: {current}");
-        eprintln!("Checking for updates...");
+        eprintln!("Checking for a newer nxv release...");
     }
 
     let client = build_client(opts.connect_timeout_secs)?;
@@ -471,7 +473,7 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
     let method = detect_install_method(&exe_path);
 
     if method != InstallMethod::Local {
-        // Managed install: print the right hint and exit with a distinct status.
+        // Managed install: print the right hint and return — never touch the binary.
         eprintln!();
         eprintln!(
             "nxv was installed via {} ({}).",
@@ -490,8 +492,7 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
             eprintln!("To update, run:");
             eprintln!("  {hint}");
         }
-        // Non-zero exit so scripts can tell "did not update" apart from success.
-        std::process::exit(2);
+        return Ok(());
     }
 
     // Local install — check we can actually write.

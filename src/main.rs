@@ -50,7 +50,6 @@ fn main() {
     let result = match &cli.command {
         Commands::Search(args) => cmd_search(&cli, args),
         Commands::Update(args) => cmd_update(&cli, args),
-        Commands::SelfUpdate(args) => cmd_self_update(&cli, args),
         Commands::Info(args) => cmd_pkg_info(&cli, args),
         Commands::Stats => cmd_stats(&cli),
         Commands::History(args) => cmd_history(&cli, args),
@@ -175,12 +174,16 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                 let input = input.trim().to_lowercase();
 
                 if input.is_empty() || input == "y" || input == "yes" {
-                    // Run the update command
+                    // Run the update command. Skip the binary self-update check —
+                    // the user invoked search/info/etc., not an explicit update,
+                    // and we don't want to surprise them by replacing the binary
+                    // mid-session.
                     let update_args = cli::UpdateArgs {
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
                         public_key: None,
+                        no_self_update: true,
                     };
                     cmd_update(cli, &update_args)?;
 
@@ -438,25 +441,29 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         }
     }
 
-    Ok(())
-}
+    if !args.no_self_update {
+        eprintln!();
+        // Binary check is best-effort: a GitHub outage or rate limit should not
+        // fail the overall update (the index step already succeeded). Surface
+        // the error as a warning only.
+        let result = self_update::run(self_update::SelfUpdateOptions {
+            check: false,
+            force: false,
+            version: None,
+            // `api_timeout` is applied as a connect-timeout only; it does not
+            // bound the (potentially multi-MB) binary download.
+            connect_timeout_secs: cli.api_timeout,
+            show_progress,
+            quiet: cli.quiet,
+        });
+        if let Err(e) = result
+            && !cli.quiet
+        {
+            eprintln!("Skipping binary self-update check: {e}");
+        }
+    }
 
-/// Updates the `nxv` binary itself to the latest GitHub release.
-///
-/// Delegates to `self_update::run`, propagating CLI-level flags (quiet, timeout).
-/// For managed installs (Nix/cargo/Homebrew), the underlying call prints a
-/// helpful upgrade hint and exits with status 2 instead of touching disk.
-fn cmd_self_update(cli: &Cli, args: &cli::SelfUpdateArgs) -> Result<()> {
-    self_update::run(self_update::SelfUpdateOptions {
-        check: args.check,
-        force: args.force,
-        version: args.version.as_deref(),
-        // `api_timeout` is repurposed here as the connect-timeout only —
-        // it does *not* bound the (potentially multi-MB) binary download.
-        connect_timeout_secs: cli.api_timeout,
-        show_progress: !cli.quiet,
-        quiet: cli.quiet,
-    })
+    Ok(())
 }
 
 /// Display detailed information for a package in the format requested by the CLI.

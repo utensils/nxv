@@ -120,20 +120,19 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
-        .stdout(predicate::str::contains("completions"))
-        .stdout(predicate::str::contains("self-update"));
+        .stdout(predicate::str::contains("completions"));
 }
 
 #[test]
-fn test_self_update_help() {
+fn test_update_help_mentions_self_update() {
+    // `nxv update` is one command: it refreshes the index and then checks for
+    // a newer binary. Verify the help surface exposes the opt-out flag.
     nxv()
-        .args(["self-update", "--help"])
+        .args(["update", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Update the nxv binary"))
-        .stdout(predicate::str::contains("--check"))
-        .stdout(predicate::str::contains("--force"))
-        .stdout(predicate::str::contains("--version"));
+        .stdout(predicate::str::contains("--no-self-update"))
+        .stdout(predicate::str::contains("--force"));
 }
 
 #[test]
