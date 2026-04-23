@@ -233,18 +233,34 @@ fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
 
     let pid = std::process::id();
     let tmp_path = exe_dir.join(format!(".nxv-update-{pid}"));
-    let backup_path = exe_path.with_extension("old");
+    // PID-suffixed backup so a crashed previous run or a concurrent update
+    // attempt doesn't block the rename. `exe_path.with_extension("old")`
+    // would always be `nxv.old`, which collides.
+    let backup_path = exe_dir.join(format!(".nxv-backup-{pid}.old"));
 
     std::fs::write(&tmp_path, new_binary).context("failed to write new binary to temp file")?;
     std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
         .context("failed to set permissions on new binary")?;
 
-    std::fs::rename(exe_path, &backup_path).context("failed to move current binary to backup")?;
+    std::fs::rename(exe_path, &backup_path).with_context(|| {
+        format!(
+            "failed to move current binary to backup at {}",
+            backup_path.display()
+        )
+    })?;
 
     if let Err(e) = std::fs::rename(&tmp_path, exe_path) {
-        // Best-effort rollback.
-        let _ = std::fs::rename(&backup_path, exe_path);
+        // Best-effort rollback. If it fails too, tell the user where the
+        // backup lives so they can restore by hand.
+        let rollback = std::fs::rename(&backup_path, exe_path);
         let _ = std::fs::remove_file(&tmp_path);
+        if let Err(rb) = rollback {
+            bail!(
+                "failed to install new binary: {e}; rollback also failed: {rb}. \
+                 Previous binary is preserved at {}",
+                backup_path.display()
+            );
+        }
         bail!("failed to install new binary: {e}");
     }
 
@@ -540,11 +556,16 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
         opts.show_progress,
     )?;
 
-    let sums_resp = client
+    let sums_content = client
         .get(&sums_asset.browser_download_url)
         .send()
-        .context("failed to download SHA256SUMS.txt")?;
-    let sums_content = sums_resp.text().context("failed to read SHA256SUMS.txt")?;
+        .context("failed to download SHA256SUMS.txt")?
+        // Fail loudly on a non-2xx — otherwise we'd feed an HTML error page
+        // into checksum parsing and surface a misleading "asset not found" error.
+        .error_for_status()
+        .context("failed to download SHA256SUMS.txt (non-success status)")?
+        .text()
+        .context("failed to read SHA256SUMS.txt")?;
 
     verify_checksum(&sums_content, &asset.name, &binary_data)?;
     if !opts.quiet {
