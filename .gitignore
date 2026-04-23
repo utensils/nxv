@@ -56,3 +56,6 @@ __pycache__/
 # Playwright MCP artifacts + ad-hoc screenshots from browser testing
 .playwright-mcp/
 *.png
+
+# Playwright CLI artifacts
+.playwright-cli/
