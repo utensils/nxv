@@ -123,6 +123,49 @@ nxv update [options]
 | `--skip-verify`      | Skip manifest signature verification |
 | `--public-key <KEY>` | Custom public key for verification   |
 
+### self-update
+
+Update the nxv **binary** itself to the latest GitHub release. This is
+separate from `nxv update`, which updates the package _index_.
+
+```bash
+nxv self-update [options]
+```
+
+**Options:**
+
+| Flag                  | Description                                               |
+| --------------------- | --------------------------------------------------------- |
+| `--check`             | Only report whether a newer release exists; no install    |
+| `--force`             | Reinstall even if the current version already matches     |
+| `--version <TAG>`     | Install a specific release tag (e.g. `v0.2.0`)            |
+
+**Behaviour by install method:**
+
+| Install method | Action                                                      |
+| -------------- | ----------------------------------------------------------- |
+| Nix            | Prints `nix profile upgrade nxv` / flake-update hint, exits |
+| `cargo install`| Prints `cargo install --locked nxv`, exits                  |
+| Homebrew       | Prints `brew upgrade nxv`, exits                            |
+| Local          | Downloads, verifies SHA-256, atomically swaps the binary    |
+
+Managed-install branches exit with status `2` so scripts can distinguish
+them from a successful in-place update. Set `GITHUB_TOKEN` to avoid
+unauthenticated rate limits when calling the GitHub API.
+
+**Examples:**
+
+```bash
+# Check if a new release is available
+nxv self-update --check
+
+# Update to latest
+nxv self-update
+
+# Pin to a specific version
+nxv self-update --version v0.2.0
+```
+
 ### serve
 
 Start the HTTP API server.

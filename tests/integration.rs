@@ -120,7 +120,20 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
-        .stdout(predicate::str::contains("completions"));
+        .stdout(predicate::str::contains("completions"))
+        .stdout(predicate::str::contains("self-update"));
+}
+
+#[test]
+fn test_self_update_help() {
+    nxv()
+        .args(["self-update", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Update the nxv binary"))
+        .stdout(predicate::str::contains("--check"))
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--version"));
 }
 
 #[test]

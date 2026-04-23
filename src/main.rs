@@ -11,6 +11,7 @@ mod output;
 mod paths;
 mod remote;
 mod search;
+mod self_update;
 pub mod version;
 
 #[cfg(feature = "indexer")]
@@ -49,6 +50,7 @@ fn main() {
     let result = match &cli.command {
         Commands::Search(args) => cmd_search(&cli, args),
         Commands::Update(args) => cmd_update(&cli, args),
+        Commands::SelfUpdate(args) => cmd_self_update(&cli, args),
         Commands::Info(args) => cmd_pkg_info(&cli, args),
         Commands::Stats => cmd_stats(&cli),
         Commands::History(args) => cmd_history(&cli, args),
@@ -437,6 +439,22 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Updates the `nxv` binary itself to the latest GitHub release.
+///
+/// Delegates to `self_update::run`, propagating CLI-level flags (quiet, timeout).
+/// For managed installs (Nix/cargo/Homebrew), the underlying call prints a
+/// helpful upgrade hint and exits with status 2 instead of touching disk.
+fn cmd_self_update(cli: &Cli, args: &cli::SelfUpdateArgs) -> Result<()> {
+    self_update::run(self_update::SelfUpdateOptions {
+        check: args.check,
+        force: args.force,
+        version: args.version.as_deref(),
+        timeout_secs: cli.api_timeout,
+        show_progress: !cli.quiet,
+        quiet: cli.quiet,
+    })
 }
 
 /// Display detailed information for a package in the format requested by the CLI.

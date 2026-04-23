@@ -46,6 +46,25 @@ pub enum Commands {
     /// Download or update the package index.
     Update(UpdateArgs),
 
+    /// Update the nxv binary itself to the latest GitHub release.
+    ///
+    /// Detects how nxv was installed. For managed installs (Nix, cargo,
+    /// Homebrew) this prints the correct upgrade command instead of
+    /// trying to overwrite a read-only binary. For local installs it
+    /// downloads the platform-specific release, verifies its SHA-256
+    /// checksum against SHA256SUMS.txt, and replaces the running
+    /// binary in place.
+    #[command(
+        disable_version_flag = true,
+        after_long_help = "\
+Examples:
+  nxv self-update                  Update to the latest release
+  nxv self-update --check          Only report whether a newer release exists
+  nxv self-update --version v0.2.0 Install a specific release tag
+  nxv self-update --force          Reinstall even if already up-to-date"
+    )]
+    SelfUpdate(SelfUpdateArgs),
+
     /// Show detailed information about a package.
     Info(InfoArgs),
 
@@ -207,6 +226,22 @@ pub struct UpdateArgs {
     /// Can be the raw key (RW...) or path to a .pub file.
     #[arg(long, env = "NXV_PUBLIC_KEY")]
     pub public_key: Option<String>,
+}
+
+/// Arguments for the self-update command.
+#[derive(Parser, Debug)]
+pub struct SelfUpdateArgs {
+    /// Only check for updates; do not download or install anything.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Reinstall even if the current version already matches the release.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Install a specific release tag (e.g. `v0.2.0` or `0.2.0`).
+    #[arg(long)]
+    pub version: Option<String>,
 }
 
 /// Arguments for the history command.
@@ -675,6 +710,32 @@ mod tests {
                 assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
             }
             _ => panic!("Expected Update command"),
+        }
+    }
+
+    #[test]
+    fn test_self_update_default() {
+        let args = Cli::try_parse_from(["nxv", "self-update"]).unwrap();
+        match args.command {
+            Commands::SelfUpdate(su) => {
+                assert!(!su.check);
+                assert!(!su.force);
+                assert!(su.version.is_none());
+            }
+            _ => panic!("Expected SelfUpdate command"),
+        }
+    }
+
+    #[test]
+    fn test_self_update_flags() {
+        let args =
+            Cli::try_parse_from(["nxv", "self-update", "--check", "--version", "v0.2.0"]).unwrap();
+        match args.command {
+            Commands::SelfUpdate(su) => {
+                assert!(su.check);
+                assert_eq!(su.version.as_deref(), Some("v0.2.0"));
+            }
+            _ => panic!("Expected SelfUpdate command"),
         }
     }
 
