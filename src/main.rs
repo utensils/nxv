@@ -442,7 +442,9 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
     }
 
     if !args.no_self_update {
-        eprintln!();
+        if !cli.quiet {
+            eprintln!();
+        }
         // Binary check is best-effort: a GitHub outage or rate limit should not
         // fail the overall update (the index step already succeeded). Surface
         // the error as a warning only.

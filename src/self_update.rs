@@ -1,8 +1,11 @@
-//! Self-update command — replaces the running `nxv` binary with the latest
-//! release from GitHub, or prints guidance when managed by a package manager.
+//! Self-update support for `nxv update`.
 //!
-//! The existing `nxv update` command continues to update the *index*; this
-//! is a separate, dedicated path for updating the *binary* itself.
+//! There is no standalone `self-update` subcommand — `nxv update` refreshes
+//! the package index first and then delegates to [`run`] here to check for
+//! a newer `nxv` release. For a local install the running binary is
+//! replaced in place; for a managed install (Nix / cargo / Homebrew) the
+//! binary is left untouched and the correct package-manager hint is
+//! printed instead.
 
 use std::path::Path;
 use std::time::Duration;
@@ -59,11 +62,11 @@ impl InstallMethod {
 
     /// Command (or instruction) the user should run to update a managed install.
     ///
-    /// `force` and `version` influence the generated hint so that, e.g.,
-    /// `nxv self-update --version v0.1.6` on a cargo install tells the user
-    /// to run `cargo install --locked --version 0.1.6 nxv`, not the generic
-    /// `cargo install --locked nxv` (which would silently install a different
-    /// version). Returns `None` for `Local` — callers do the work themselves.
+    /// `force` and `version` influence the generated hint. For example, on a
+    /// cargo install requesting a specific version, the hint becomes
+    /// `cargo install --locked --version 0.1.6 nxv` instead of the generic
+    /// upgrade command (which would silently install a different version).
+    /// Returns `None` for `Local` — callers do the work themselves.
     pub fn update_hint(self, force: bool, version: Option<&str>) -> Option<String> {
         match self {
             InstallMethod::Nix => {
@@ -138,18 +141,14 @@ pub fn detect_install_method(exe_path: &Path) -> InstallMethod {
 
 // ── Version comparison ──────────────────────────────────────────────────────
 
-/// Parse a version string like "0.1.7" or "v0.1.7" into `(major, minor, patch)`.
-fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+/// Parse a version string like "0.1.7" or "v0.1.7" into a `semver::Version`.
+///
+/// Uses the same `semver` crate already depended on by the search module
+/// (`src/search.rs`), so pre-release / build-metadata tags compare the way
+/// a Rust developer expects.
+fn parse_version(v: &str) -> Option<semver::Version> {
     let v = v.strip_prefix('v').unwrap_or(v);
-    let parts: Vec<&str> = v.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((
-        parts[0].parse().ok()?,
-        parts[1].parse().ok()?,
-        parts[2].parse().ok()?,
-    ))
+    semver::Version::parse(v).ok()
 }
 
 /// Returns true if `remote` is strictly newer than `current`.
@@ -239,15 +238,23 @@ fn replace_binary(new_binary: &[u8], exe_path: &Path) -> Result<()> {
     let backup_path = exe_dir.join(format!(".nxv-backup-{pid}.old"));
 
     std::fs::write(&tmp_path, new_binary).context("failed to write new binary to temp file")?;
-    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
-        .context("failed to set permissions on new binary")?;
 
-    std::fs::rename(exe_path, &backup_path).with_context(|| {
-        format!(
-            "failed to move current binary to backup at {}",
-            backup_path.display()
-        )
-    })?;
+    // From here on, every early-error path must clean up `tmp_path` so
+    // repeated failed updates don't accumulate stray `.nxv-update-<pid>` files.
+    if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755)) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).context("failed to set permissions on new binary");
+    }
+
+    if let Err(e) = std::fs::rename(exe_path, &backup_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).with_context(|| {
+            format!(
+                "failed to move current binary to backup at {}",
+                backup_path.display()
+            )
+        });
+    }
 
     if let Err(e) = std::fs::rename(&tmp_path, exe_path) {
         // Best-effort rollback. If it fails too, tell the user where the
@@ -489,24 +496,27 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
     let method = detect_install_method(&exe_path);
 
     if method != InstallMethod::Local {
-        // Managed install: print the right hint and return — never touch the binary.
-        eprintln!();
-        eprintln!(
-            "nxv was installed via {} ({}).",
-            method.label(),
-            exe_path.display()
-        );
-        if is_newer(current, remote_version) {
-            eprintln!("A newer release is available: {remote_version} (current: {current}).");
-        } else if remote_version == current {
-            eprintln!("You are already on the latest release ({current}).");
-        } else {
-            eprintln!("Latest release is {remote_version}; you are on {current}.");
-        }
-        if let Some(hint) = method.update_hint(opts.force, opts.version) {
+        // Managed install: never touch the binary. The hint is purely
+        // informational, so suppress it under --quiet.
+        if !opts.quiet {
             eprintln!();
-            eprintln!("To update, run:");
-            eprintln!("  {hint}");
+            eprintln!(
+                "nxv was installed via {} ({}).",
+                method.label(),
+                exe_path.display()
+            );
+            if is_newer(current, remote_version) {
+                eprintln!("A newer release is available: {remote_version} (current: {current}).");
+            } else if remote_version == current {
+                eprintln!("You are already on the latest release ({current}).");
+            } else {
+                eprintln!("Latest release is {remote_version}; you are on {current}.");
+            }
+            if let Some(hint) = method.update_hint(opts.force, opts.version) {
+                eprintln!();
+                eprintln!("To update, run:");
+                eprintln!("  {hint}");
+            }
         }
         return Ok(());
     }
@@ -593,18 +603,29 @@ mod tests {
     // ── Version comparison ──────────────────────────────────────────────
     #[test]
     fn parse_version_valid() {
-        assert_eq!(parse_version("0.1.7"), Some((0, 1, 7)));
-        assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
-        assert_eq!(parse_version("10.20.30"), Some((10, 20, 30)));
+        assert_eq!(parse_version("0.1.7"), Some(semver::Version::new(0, 1, 7)));
+        assert_eq!(parse_version("v1.2.3"), Some(semver::Version::new(1, 2, 3)));
+        assert_eq!(
+            parse_version("10.20.30"),
+            Some(semver::Version::new(10, 20, 30))
+        );
     }
 
     #[test]
     fn parse_version_invalid() {
         assert_eq!(parse_version(""), None);
+        // semver requires MAJOR.MINOR.PATCH — two-component versions are rejected.
         assert_eq!(parse_version("1.2"), None);
-        assert_eq!(parse_version("1.2.3.4"), None);
         assert_eq!(parse_version("abc"), None);
         assert_eq!(parse_version("1.2.x"), None);
+    }
+
+    #[test]
+    fn parse_version_handles_prerelease() {
+        // semver-aware: pre-release tags sort before the same base version.
+        let rc = parse_version("0.2.0-rc.1").expect("valid semver with prerelease");
+        let release = parse_version("0.2.0").expect("valid semver");
+        assert!(rc < release);
     }
 
     #[test]
@@ -631,8 +652,20 @@ mod tests {
     // ── Platform detection ──────────────────────────────────────────────
     #[test]
     fn detect_asset_name_current_platform() {
-        let name = detect_asset_name().expect("current platform should be supported");
-        assert!(name.starts_with("nxv-"));
+        // nxv publishes release binaries for Linux and macOS only; on other
+        // targets the module compiles but this function must return an error.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let name = detect_asset_name().expect("current platform should be supported");
+            assert!(name.starts_with("nxv-"));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            assert!(
+                detect_asset_name().is_err(),
+                "unsupported platforms should return an error"
+            );
+        }
     }
 
     // ── Install method detection ────────────────────────────────────────
@@ -780,7 +813,14 @@ mod tests {
         assert_eq!(std::fs::read(&exe_path).unwrap(), b"new-contents");
         let mode = std::fs::metadata(&exe_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
-        assert!(!exe_path.with_extension("old").exists());
+        // Backup is PID-suffixed (`.nxv-backup-<pid>.old`), so scan for
+        // any leftover instead of checking the legacy `nxv.old` name.
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".nxv-backup-"))
+            .collect();
+        assert!(backups.is_empty(), "stray backup files: {backups:?}");
     }
 
     #[cfg(unix)]
