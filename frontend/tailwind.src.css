@@ -241,6 +241,27 @@
     animation: slideUp 220ms ease-out backwards;
   }
 
+  /* Cards grid layout for view toggle */
+  .cards-grid {
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    column-gap: 10px;
+    row-gap: 10px;
+  }
+  .card {
+    display: block;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: background 120ms ease, box-shadow 120ms ease;
+  }
+  .card:hover {
+    background: var(--color-ink-3);
+    box-shadow: 0 2px 8px oklch(0 0 0 / 0.15);
+  }
+  .card:focus-visible {
+    outline: 2px solid var(--color-nix-500);
+    outline-offset: 2px;
+  }
+
   /* Focus ring on interactive elements */
   :focus-visible {
     outline: 2px solid var(--color-nix-500);

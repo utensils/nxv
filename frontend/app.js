@@ -28,6 +28,7 @@
     reqSeq: 0,
     historyCache: new Map(),
     firstHashCache: new Map(),
+    renderedRows: [], // cached for instant view-switch on toggle
   };
 
   const els = {};
@@ -340,7 +341,7 @@
   function renderWelcome() {
     STATE.total = 0;
     STATE.hasMore = false;
-    cache('resultsBody').innerHTML = `
+    const w = `
       <div class="px-6 py-16 text-center">
         <div class="mono text-[12px] text-[var(--color-fog-4)] leading-7">
           type a package name above to search<br/>
@@ -353,6 +354,10 @@
           <span class="text-[var(--color-fog-3)]">or press</span> <span class="kbd">⌘K</span> <span class="text-[var(--color-fog-3)]">to open the palette</span>
         </div>
       </div>`;
+    cache('resultsBody').innerHTML = w;
+    cache('resultsCards').innerHTML = w;
+    cache('resultsRows').classList.add('hidden');
+    cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', '—');
     renderPagination({ total: 0, has_more: false });
     // rewire welcome example chips
@@ -362,26 +367,48 @@
   }
 
   function renderError(e) {
-    cache('resultsBody').innerHTML = `
+    const err = `
       <div class="px-6 py-12 text-center">
         <div class="mono text-[12px] text-[var(--color-red-glow)]">error · ${escapeHtml(e?.message || 'request failed')}</div>
         <div class="mt-2 mono text-[11px] text-[var(--color-fog-4)]">check that the API server is reachable.</div>
       </div>`;
+    cache('resultsBody').innerHTML = err;
+    cache('resultsCards').innerHTML = err;
+    cache('resultsRows').classList.add('hidden');
+    cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', 'error');
     renderPagination({ total: 0, has_more: false });
   }
 
   function render(rows) {
-    const body = cache('resultsBody');
+    STATE.renderedRows = rows;
+    const isCards = STATE.view === 'cards';
+    const empt = `
+      <div class="px-6 py-16 text-center">
+        <div class="mono text-[12px] text-[var(--color-fog-4)]">no results — try loosening filters, or press <span class="kbd">⌘K</span> to browse.</div>
+      </div>`;
     if (!rows.length) {
-      body.innerHTML = `
-        <div class="px-6 py-16 text-center">
-          <div class="mono text-[12px] text-[var(--color-fog-4)]">no results — try loosening filters, or press <span class="kbd">⌘K</span> to browse.</div>
-        </div>`;
+      cache('resultsBody').innerHTML = empt;
+      cache('resultsCards').innerHTML = empt;
+      cache('resultsRows').classList.add('hidden');
+      cache('resultsCards').classList.add('hidden');
       return;
     }
-    body.innerHTML = rows.map((r, i) => renderRow(r, i)).join('');
+    cache('resultsRows').classList.toggle('hidden', isCards);
+    cache('resultsCards').classList.toggle('hidden', !isCards);
+    if (isCards) {
+      const body = cache('resultsCards');
+      body.classList.add('cards-grid');
+      body.innerHTML = rows.map((r, i) => renderCard(r, i)).join('');
+      bindCardEvents(rows);
+    } else {
+      const body = cache('resultsBody');
+      body.innerHTML = rows.map((r, i) => renderRow(r, i)).join('');
+      bindRowEvents(rows);
+    }
+  }
 
+  function bindRowEvents(rows) {
     const rowByAttrVer = new Map(rows.map((r) => [`${r.attr}::${r.ver}`, r]));
     $$('#resultsBody [data-action]').forEach((el) => {
       el.addEventListener('click', (ev) => {
@@ -402,6 +429,88 @@
         if (r) openDrawer(r);
       });
     });
+  }
+
+  function bindCardEvents(rows) {
+    const cardByAttrVer = new Map(rows.map((r) => [`${r.attr}::${r.ver}`, r]));
+    $$('#resultsCards [data-action]').forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const { action } = el.dataset;
+        const key = el.dataset.key;
+        const r = cardByAttrVer.get(key);
+        if (!r) return;
+        if (action === 'copy-flake') copy(buildFlakeCmd(r));
+        else if (action === 'copy-run')
+          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+        else if (action === 'history') openDrawer(r);
+      });
+    });
+    $$('#resultsCards [data-row]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const r = cardByAttrVer.get(el.dataset.row);
+        if (r) openDrawer(r);
+      });
+    });
+  }
+
+  function renderCard(r, i) {
+    const flags = [];
+    if (r.insecure) {
+      const title = escapeHtml(r.insecure.join(' · '));
+      flags.push(
+        `<span class="chip danger" title="${title}" style="font-size:10px;padding:1px 5px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`
+      );
+    }
+    if (r.legacy) flags.push(`<span class="chip warn" style="font-size:10px;padding:1px 5px;">pre-flakes</span>`);
+    const platformsHtml = r.platforms
+      .filter((p) => /^(x86_64|aarch64|i686|armv7l|armv6l)-(linux|darwin)$/.test(p))
+      .slice(0, 4)
+      .map((p) => {
+        const active = STATE.filters.arch === p;
+        return `<span class="chip${active ? ' active' : ''}" style="font-size:10px;padding:1px 5px;">${archLabel(p)}</span>`;
+      })
+      .join('');
+    const key = `${r.attr}::${r.ver}`;
+    const nameHtml = escapeHtml(r.name);
+    const attrHtml = escapeHtml(r.attr);
+    const verHtml = escapeHtml(r.ver);
+    const descHtml = escapeHtml(r.desc);
+    const licenseHtml = escapeHtml(r.license || '—');
+    return `
+      <div data-row="${escapeHtml(key)}" class="panel card ${i === 0 ? '' : 'anim-in'}" style="animation-delay:${i * 15}ms" tabindex="0">
+        <div class="px-3 pt-3 pb-1 flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <div class="mono text-[13px] text-[var(--color-fog-0)] font-medium truncate">${nameHtml}</div>
+            <div class="mono text-[10.5px] text-[var(--color-fog-4)] truncate mt-0.5">${attrHtml}</div>
+          </div>
+          <span class="mono text-[13px] ${r.insecure || r.legacy ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-nix-400)]'} tabular-nums shrink-0">${verHtml}</span>
+        </div>
+        <div class="px-3 mt-2 text-[12px] text-[var(--color-fog-2)] line-clamp-2 leading-relaxed min-h-[36px]">
+          ${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}
+        </div>
+        <div class="px-3 pb-1 flex flex-wrap gap-1">
+          ${flags.join('')}${platformsHtml}
+          <span class="chip" style="font-size:10px;padding:1px 5px;">${licenseHtml}</span>
+        </div>
+        <div class="hairline-t px-3 py-2 flex items-center gap-1 opacity-70 group-hover:opacity-100 transition">
+          <button class="btn btn-ghost" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref" style="font-size:10px;padding:1px 5px;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button class="btn btn-ghost" data-action="copy-run" data-key="${escapeHtml(key)}" title="nix run ref" style="font-size:10px;padding:1px 5px;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </button>
+          <button class="btn btn-ghost" data-action="history" data-key="${escapeHtml(key)}" title="version history" style="font-size:10px;padding:1px 5px;">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </button>
+          <span class="flex-1"></span>
+          <span class="mono text-[9px] text-[var(--color-fog-4)]">#${shortHash(r.hash || r.lastHash)}</span>
+        </div>
+      </div>`;
+  }
+
+  function refreshCurrentView() {
+    if (STATE.renderedRows.length) render(STATE.renderedRows);
   }
 
   function renderRow(r, i) {
@@ -1101,6 +1210,11 @@
         el.classList.remove('text-[var(--color-fog-4)]');
         STATE.view = el.dataset.view;
         syncUrl();
+        // re-render cached results in new view mode (no API call)
+        refreshCurrentView();
+        // scroll to results section
+        const rs = cache('resultsSection');
+        if (rs) window.scrollTo({ top: rs.offsetTop - 80, behavior: 'smooth' });
       });
     });
 
