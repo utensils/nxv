@@ -58,6 +58,13 @@
       .replace('armv7l-linux', 'armv7·linux');
   const predatesFlakes = (d) => (d ? new Date(d) < FLAKES_EPOCH : false);
   const shortHash = (h) => (h || '').slice(0, 7);
+  const truncateName = (name) => {
+    if (!name || name.length <= 25) return name || '';
+    // For names like 'vimpager-a4da4dfac44d1bbc6986c5c76fea45a60ebdd8e5', show the prefix
+    const match = name.match(/^([^-]+(-[^-]+)*?)-/);
+    if (match) return match[1];
+    return name.slice(0, 25) + '…';
+  };
   const escapeHtml = (s) =>
     String(s ?? '').replace(
       /[&<>"']/g,
@@ -534,11 +541,12 @@
       .join('');
 
     const key = `${r.attr}::${r.ver}`;
-    const nameHtml = escapeHtml(r.name);
+    const nameHtml = escapeHtml(truncateName(r.name));
     const attrHtml = escapeHtml(r.attr);
     const licenseHtml = escapeHtml(r.license || '—');
     const descHtml = escapeHtml(r.desc);
-    const verHtml = escapeHtml(r.ver);
+    // Truncate long versions (like full git hashes) in row view to fit column
+    const verHtml = escapeHtml(r.ver.length > 20 ? r.ver.slice(0, 10) : r.ver);
 
     return `
       <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 items-center px-4 py-3 cursor-pointer transition anim-in hover:bg-[var(--color-ink-2)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--color-ink-2);">
