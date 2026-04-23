@@ -73,26 +73,16 @@ const TAILWIND_CSS: &str = include_str!("../../frontend/tailwind.generated.css")
 /// Embedded fonts.css (@font-face declarations).
 const FONTS_CSS: &str = include_str!("../../frontend/fonts.css");
 
-/// Embedded font files.
-const FONT_INTER_400: &[u8] = include_bytes!("../../frontend/fonts/inter-400.woff2");
-const FONT_INTER_500: &[u8] = include_bytes!("../../frontend/fonts/inter-500.woff2");
-const FONT_INTER_600: &[u8] = include_bytes!("../../frontend/fonts/inter-600.woff2");
-const FONT_INTER_700: &[u8] = include_bytes!("../../frontend/fonts/inter-700.woff2");
-const FONT_JM_400: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-400.woff2");
-const FONT_JM_500: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-500.woff2");
-const FONT_JM_600: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-600.woff2");
-const FONT_JM_700: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-700.woff2");
+/// Embedded font files. One variable woff2 per family covers all
+/// weights/styles the UI uses (browsers interpolate within the font's
+/// weight axis).
+const FONT_INTER_VAR: &[u8] = include_bytes!("../../frontend/fonts/inter-var.woff2");
+const FONT_JM_VAR: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-var.woff2");
 
 /// All bundled font files.
-const BUNDLED_FONTS: [(&str, &[u8]); 8] = [
-    ("inter-400.woff2", FONT_INTER_400),
-    ("inter-500.woff2", FONT_INTER_500),
-    ("inter-600.woff2", FONT_INTER_600),
-    ("inter-700.woff2", FONT_INTER_700),
-    ("jetbrains-mono-400.woff2", FONT_JM_400),
-    ("jetbrains-mono-500.woff2", FONT_JM_500),
-    ("jetbrains-mono-600.woff2", FONT_JM_600),
-    ("jetbrains-mono-700.woff2", FONT_JM_700),
+const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
+    ("inter-var.woff2", FONT_INTER_VAR),
+    ("jetbrains-mono-var.woff2", FONT_JM_VAR),
 ];
 
 /// Font filename -> MIME type mapping (matches bundled fonts).

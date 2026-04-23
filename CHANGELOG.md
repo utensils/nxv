@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Web UI: cards view for search results (issue #30). Toggle `cards`/`rows`
+  re-renders cached results instantly without re-querying the API. Cards
+  use a responsive `auto-fill, minmax(296px)` grid with hover lift, a
+  brand-coloured accent rail, dotted meta divider (first / last / rev),
+  and three icon+label actions (flake / run / history).
+- Web UI: bundle Tailwind + Inter/JetBrains Mono variable fonts for true
+  offline operation (issue #28). Removes the runtime CDN load
+  (`@tailwindcss/browser` + Google Fonts) and embeds the assets in the
+  Rust binary via `include_str!`/`include_bytes!`. Adds `tw` and
+  `tw-dev` devshell helpers (Tailwind v4 CLI), `frontend/package.json`,
+  `frontend/tailwind.src.css` (now the canonical theme source), and
+  routes `/tailwind.css`, `/fonts.css`, `/fonts/{name}` in the server
+  with the same 24h cache layer as the rest of the static assets.
 - Docs site theme rebuilt to mirror the embedded web UI at
   `frontend/index.html`: oklch ink/fog palette, Nix-blue accent,
   JetBrains Mono on UI chrome, 2px radii, hairline panel borders,
@@ -34,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Web UI: long version strings (e.g. full git hashes) in row view now
+  render as `xxxxxxxxxx…` with a `title=` tooltip carrying the full
+  string instead of being silently sliced.
+- Web UI: `truncateName` now strips trailing 7+ char hex suffixes
+  (e.g. `vimpager-a4da4dfac…` → `vimpager`) instead of greedy-trimming
+  to the first hyphen, which over-trimmed legitimate names like
+  `prefetch-npm-deps-2.0.0`.
+- Web UI: view-toggle no longer auto-scrolls to the results section on
+  every click — only when the section is below the fold.
 - Docs: stale `/api/v1/health` response example (`version: 0.6.0` →
   `0.1.6`).
 - Docs: wrong indexer schema description (v4 → actual v3, integer

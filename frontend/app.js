@@ -59,11 +59,11 @@
   const predatesFlakes = (d) => (d ? new Date(d) < FLAKES_EPOCH : false);
   const shortHash = (h) => (h || '').slice(0, 7);
   const truncateName = (name) => {
-    if (!name || name.length <= 25) return name || '';
-    // For names like 'vimpager-a4da4dfac44d1bbc6986c5c76fea45a60ebdd8e5', show the prefix
-    const match = name.match(/^([^-]+(-[^-]+)*?)-/);
-    if (match) return match[1];
-    return name.slice(0, 25) + '…';
+    if (!name) return '';
+    // Strip trailing git-rev-style hex suffix (7+ chars), e.g. 'vimpager-a4da4d…'.
+    const stripped = name.replace(/-[0-9a-f]{7,}$/i, '');
+    if (stripped.length <= 25) return stripped;
+    return stripped.slice(0, 25) + '…';
   };
   const escapeHtml = (s) =>
     String(s ?? '').replace(
@@ -362,8 +362,8 @@
         </div>
       </div>`;
     cache('resultsBody').innerHTML = w;
-    cache('resultsCards').innerHTML = w;
-    cache('resultsRows').classList.add('hidden');
+    cache('resultsCards').innerHTML = '';
+    cache('resultsRows').classList.remove('hidden');
     cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', '—');
     renderPagination({ total: 0, has_more: false });
@@ -380,8 +380,8 @@
         <div class="mt-2 mono text-[11px] text-[var(--color-fog-4)]">check that the API server is reachable.</div>
       </div>`;
     cache('resultsBody').innerHTML = err;
-    cache('resultsCards').innerHTML = err;
-    cache('resultsRows').classList.add('hidden');
+    cache('resultsCards').innerHTML = '';
+    cache('resultsRows').classList.remove('hidden');
     cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', 'error');
     renderPagination({ total: 0, has_more: false });
@@ -396,8 +396,8 @@
       </div>`;
     if (!rows.length) {
       cache('resultsBody').innerHTML = empt;
-      cache('resultsCards').innerHTML = empt;
-      cache('resultsRows').classList.add('hidden');
+      cache('resultsCards').innerHTML = '';
+      cache('resultsRows').classList.remove('hidden');
       cache('resultsCards').classList.add('hidden');
       return;
     }
@@ -466,54 +466,71 @@
     if (r.insecure) {
       const title = escapeHtml(r.insecure.join(' · '));
       flags.push(
-        `<span class="chip danger" title="${title}" style="font-size:10px;padding:1px 5px;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`
+        `<span class="chip danger" title="${title}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`
       );
     }
-    if (r.legacy) flags.push(`<span class="chip warn" style="font-size:10px;padding:1px 5px;">pre-flakes</span>`);
+    if (r.legacy) flags.push(`<span class="chip warn">pre-flakes</span>`);
     const platformsHtml = r.platforms
       .filter((p) => /^(x86_64|aarch64|i686|armv7l|armv6l)-(linux|darwin)$/.test(p))
       .slice(0, 4)
       .map((p) => {
         const active = STATE.filters.arch === p;
-        return `<span class="chip${active ? ' active' : ''}" style="font-size:10px;padding:1px 5px;">${archLabel(p)}</span>`;
+        return `<span class="chip${active ? ' active' : ''}">${archLabel(p)}</span>`;
       })
       .join('');
     const key = `${r.attr}::${r.ver}`;
-    const nameHtml = escapeHtml(r.name);
+    const nameFull = r.name || r.attr || '';
+    const nameDisplay = truncateName(nameFull) || nameFull;
+    const nameHtml = escapeHtml(nameDisplay);
+    const nameTitleAttr = nameDisplay === nameFull ? '' : ` title="${escapeHtml(nameFull)}"`;
     const attrHtml = escapeHtml(r.attr);
-    const verHtml = escapeHtml(r.ver);
+    const verFull = r.ver || '';
+    const verShort = verFull.length > 18 ? verFull.slice(0, 10) + '…' : verFull;
+    const verHtml = escapeHtml(verShort);
+    const verTitleAttr = verShort === verFull ? '' : ` title="${escapeHtml(verFull)}"`;
     const descHtml = escapeHtml(r.desc);
     const licenseHtml = escapeHtml(r.license || '—');
+    const verToneClass = r.insecure
+      ? 'card-ver--danger'
+      : r.legacy
+        ? 'card-ver--warn'
+        : 'card-ver--brand';
+    const firstSeen = r.first ? fmtDate(r.first) : '—';
+    const lastSeen = r.last ? fmtDate(r.last) : '—';
     return `
-      <div data-row="${escapeHtml(key)}" class="panel card ${i === 0 ? '' : 'anim-in'}" style="animation-delay:${i * 15}ms" tabindex="0">
-        <div class="px-3 pt-3 pb-1 flex items-start justify-between gap-2">
-          <div class="min-w-0">
-            <div class="mono text-[13px] text-[var(--color-fog-0)] font-medium truncate">${nameHtml}</div>
-            <div class="mono text-[10.5px] text-[var(--color-fog-4)] truncate mt-0.5">${attrHtml}</div>
+      <article data-row="${escapeHtml(key)}" class="panel card group anim-in" style="animation-delay:${i * 18}ms" tabindex="0">
+        <header class="card-head">
+          <div class="card-head__title min-w-0">
+            <h3 class="card-name mono"${nameTitleAttr}>${nameHtml}</h3>
+            <p class="card-attr mono"><span class="card-attr__sigil">›</span>${attrHtml}</p>
           </div>
-          <span class="mono text-[13px] ${r.insecure || r.legacy ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-nix-400)]'} tabular-nums shrink-0">${verHtml}</span>
-        </div>
-        <div class="px-3 mt-2 text-[12px] text-[var(--color-fog-2)] line-clamp-2 leading-relaxed min-h-[36px]">
-          ${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}
-        </div>
-        <div class="px-3 pb-1 flex flex-wrap gap-1">
+          <span class="card-ver mono ${verToneClass} tabular-nums"${verTitleAttr}>${verHtml}</span>
+        </header>
+        <p class="card-desc">${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}</p>
+        <div class="card-chips">
           ${flags.join('')}${platformsHtml}
-          <span class="chip" style="font-size:10px;padding:1px 5px;">${licenseHtml}</span>
+          <span class="chip">${licenseHtml}</span>
         </div>
-        <div class="hairline-t px-3 py-2 flex items-center gap-1 opacity-70 group-hover:opacity-100 transition">
-          <button class="btn btn-ghost" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref" style="font-size:10px;padding:1px 5px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <dl class="card-meta mono">
+          <div><dt>first</dt><dd class="tabular-nums">${firstSeen}</dd></div>
+          <div><dt>last</dt><dd class="tabular-nums">${lastSeen}</dd></div>
+          <div><dt>rev</dt><dd class="tabular-nums">#${shortHash(r.hash || r.lastHash)}</dd></div>
+        </dl>
+        <footer class="card-actions">
+          <button class="card-action" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref" aria-label="copy flake ref">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>flake</span>
           </button>
-          <button class="btn btn-ghost" data-action="copy-run" data-key="${escapeHtml(key)}" title="nix run ref" style="font-size:10px;padding:1px 5px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <button class="card-action" data-action="copy-run" data-key="${escapeHtml(key)}" title="copy nix run ref" aria-label="copy nix run ref">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>run</span>
           </button>
-          <button class="btn btn-ghost" data-action="history" data-key="${escapeHtml(key)}" title="version history" style="font-size:10px;padding:1px 5px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <button class="card-action" data-action="history" data-key="${escapeHtml(key)}" title="version history" aria-label="version history">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span>history</span>
           </button>
-          <span class="flex-1"></span>
-          <span class="mono text-[9px] text-[var(--color-fog-4)]">#${shortHash(r.hash || r.lastHash)}</span>
-        </div>
-      </div>`;
+        </footer>
+      </article>`;
   }
 
   function refreshCurrentView() {
@@ -545,8 +562,12 @@
     const attrHtml = escapeHtml(r.attr);
     const licenseHtml = escapeHtml(r.license || '—');
     const descHtml = escapeHtml(r.desc);
-    // Truncate long versions (like full git hashes) in row view to fit column
-    const verHtml = escapeHtml(r.ver.length > 20 ? r.ver.slice(0, 10) : r.ver);
+    // Truncate long versions (like full git hashes) to fit the column;
+    // keep the full string in title= so users can hover to see it.
+    const verFull = r.ver || '';
+    const verShort = verFull.length > 20 ? verFull.slice(0, 10) + '…' : verFull;
+    const verHtml = escapeHtml(verShort);
+    const verTitleAttr = verShort === verFull ? '' : ` title="${escapeHtml(verFull)}"`;
 
     return `
       <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 items-center px-4 py-3 cursor-pointer transition anim-in hover:bg-[var(--color-ink-2)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--color-ink-2);">
@@ -563,7 +584,7 @@
           </div>
         </div>
         <div>
-          <span class="mono text-[13px] ${r.insecure ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-fog-0)]'} tabular-nums">${verHtml}</span>
+          <span class="mono text-[13px] ${r.insecure ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-fog-0)]'} tabular-nums"${verTitleAttr}>${verHtml}</span>
         </div>
         <div class="hidden md:block min-w-0">
           <div class="text-[13px] text-[var(--color-fog-2)] truncate">${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}</div>
@@ -1220,9 +1241,11 @@
         syncUrl();
         // re-render cached results in new view mode (no API call)
         refreshCurrentView();
-        // scroll to results section
+        // scroll into view only when results are below the fold
         const rs = cache('resultsSection');
-        if (rs) window.scrollTo({ top: rs.offsetTop - 80, behavior: 'smooth' });
+        if (rs && rs.getBoundingClientRect().top > window.innerHeight - 80) {
+          window.scrollTo({ top: rs.offsetTop - 80, behavior: 'smooth' });
+        }
       });
     });
 

@@ -91,9 +91,21 @@
             filter =
               path: type:
               let
+                # cleanSourceWith filters per-path, including directories.
+                # We must let the `frontend/` and `frontend/fonts/` directories
+                # through so the asset files inside them survive filtering.
+                isFrontendDir =
+                  type == "directory"
+                  && (
+                    (builtins.match ".*/frontend$" path) != null
+                    || (builtins.match ".*/frontend/fonts$" path) != null
+                    || (builtins.match ".*/keys$" path) != null
+                  );
                 isFrontendAsset =
-                  type == "file" && (
-                    (builtins.match ".*frontend/(index\.html|app\.js|favicon\.svg|package\.json)$" path) != null
+                  type == "regular"
+                  && (
+                    (builtins.match ".*frontend/(index\.html|app\.js|favicon\.svg|package\.json|package-lock\.json)$" path)
+                    != null
                     || (builtins.match ".*frontend/(tailwind\.(src|generated)\.css|fonts\.css)$" path) != null
                     || (builtins.match ".*frontend/fonts/.*\.(woff2|ttf)$" path) != null
                   );
@@ -101,6 +113,7 @@
                 notNodeModules = (builtins.match ".*/node_modules/.*" path) == null;
               in
               (craneLib.filterCargoSources path type)
+              || isFrontendDir
               || (isKey && notNodeModules)
               || (isFrontendAsset && notNodeModules);
           };
@@ -471,6 +484,13 @@
               pkgs.prettier # HTML/JS/CSS formatter
               pkgs.markdownlint-cli # Markdown linter
               pkgs.k6 # Load testing tool
+              # Accessibility tooling — static checks run offline, the dynamic
+              # pa11y-ci check uses `npx` which fetches from npm on first run.
+              pkgs.html5validator
+              (pkgs.python3.withPackages (ps: [
+                ps.beautifulsoup4
+                ps.wcag-contrast-ratio
+              ]))
               pkgs.nodejs_22 # Node.js for Tailwind CSS v4 CLI
               pkgs.bun # VitePress docs site runtime
             ];

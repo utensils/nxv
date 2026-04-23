@@ -45,8 +45,11 @@ website/server/
 
 # Frontend
 frontend/node_modules/
-frontend/tailwind.generated.css
-frontend/package-lock.json
+# NOTE: frontend/tailwind.generated.css is intentionally tracked. The Rust
+# server embeds it via include_str!, so `cargo build` (incl. crates.io /
+# Nix sandbox builds without Node) needs it on disk. Regenerate with the
+# `tw` devshell command after editing tailwind.src.css. Same reason for
+# committing frontend/package-lock.json (so regeneration is deterministic).
 
 # Added by cargo
 
