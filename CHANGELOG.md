@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-23
+
+_`nxv update` now also checks for a newer nxv binary release. Local
+installs are replaced atomically; Nix / cargo / Homebrew installs get a
+package-manager-native upgrade hint._
+
+### Added
+
+- `nxv update` now runs a binary self-update check after refreshing the
+  package index. Detects the install method (Nix, `cargo install`,
+  Homebrew, or local) and behaves appropriately (#32):
+  - **Local install** — downloads the platform release binary, verifies
+    its SHA-256 against `SHA256SUMS.txt`, and atomically replaces the
+    running executable.
+  - **Nix / cargo / Homebrew** — leaves the binary alone and prints the
+    matching upgrade command (hints respect `--force`/`--version` where
+    the underlying package manager supports it).
+- `--no-self-update` flag (plus `NXV_NO_SELF_UPDATE` env var) on
+  `nxv update` to opt out of the binary check — used internally by the
+  first-run prompt for a missing index so search/info never surprise a
+  user with a binary replacement.
+
+### Changed
+
+- Binary check is best-effort: a GitHub outage or rate limit is
+  surfaced as a warning, not a failure — the index refresh has already
+  succeeded at that point.
+
 ## [0.1.7] - 2026-04-22
 
 _Web UI bundling + cards view: ships fully offline assets (Tailwind +
@@ -268,7 +296,9 @@ search-results view toggle._
 - Rust 2024 edition
 - 10 MB release binary size
 
-[unreleased]: https://github.com/utensils/nxv/compare/v0.1.6...HEAD
+[unreleased]: https://github.com/utensils/nxv/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/utensils/nxv/compare/v0.1.7...v0.2.0
+[0.1.7]: https://github.com/utensils/nxv/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/utensils/nxv/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/utensils/nxv/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/utensils/nxv/compare/v0.1.3...v0.1.4
