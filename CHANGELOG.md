@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-04-22
+
+_Web UI bundling + cards view: ships fully offline assets (Tailwind +
+variable fonts, no CDN load) and a working cards layout for the
+search-results view toggle._
+
 ### Added
 
 - Web UI: cards view for search results (issue #30). Toggle `cards`/`rows`
