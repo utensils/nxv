@@ -82,15 +82,40 @@
 
           craneLib = (inputs.crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-          # Source filter: include Cargo sources plus the embedded `frontend/`
-          # and the minisign public key under `keys/`.
+          # Source filter: include Cargo sources plus specific frontend assets
+          # (CSS, fonts, HTML, JS - but not node_modules or build output).
+          # The generated CSS, fonts, and Tailwind source CSS are included so
+          # `nix build` can produce a fully offline binary (no CDN needed).
           src = lib.cleanSourceWith {
             src = ./.;
             filter =
               path: type:
+              let
+                # cleanSourceWith filters per-path, including directories.
+                # We must let the `frontend/` and `frontend/fonts/` directories
+                # through so the asset files inside them survive filtering.
+                isFrontendDir =
+                  type == "directory"
+                  && (
+                    (builtins.match ".*/frontend$" path) != null
+                    || (builtins.match ".*/frontend/fonts$" path) != null
+                    || (builtins.match ".*/keys$" path) != null
+                  );
+                isFrontendAsset =
+                  type == "regular"
+                  && (
+                    (builtins.match ".*frontend/(index\.html|app\.js|favicon\.svg|package\.json|package-lock\.json)$" path)
+                    != null
+                    || (builtins.match ".*frontend/(tailwind\.(src|generated)\.css|fonts\.css)$" path) != null
+                    || (builtins.match ".*frontend/fonts/.*\.(woff2|ttf)$" path) != null
+                  );
+                isKey = (builtins.match ".*keys/.*\.pub$" path) != null;
+                notNodeModules = (builtins.match ".*/node_modules/.*" path) == null;
+              in
               (craneLib.filterCargoSources path type)
-              || (builtins.match ".*frontend.*" path != null)
-              || (builtins.match ".*keys/.*\\.pub$" path != null);
+              || isFrontendDir
+              || (isKey && notNodeModules)
+              || (isFrontendAsset && notNodeModules);
           };
 
           crateInfo = craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; };
@@ -466,7 +491,7 @@
                 ps.beautifulsoup4
                 ps.wcag-contrast-ratio
               ]))
-              pkgs.nodejs_22
+              pkgs.nodejs_22 # Node.js for Tailwind CSS v4 CLI
               pkgs.bun # VitePress docs site runtime
             ];
 
@@ -685,6 +710,41 @@
                   set -euo pipefail
                   cargo update
                   nix flake update
+                '';
+              }
+              {
+                category = "frontend";
+                name = "tw";
+                help = "compile Tailwind CSS (installs deps automatically)";
+                command = ''
+                  cd frontend
+                  if [ ! -d node_modules ]; then
+                    echo "Installing Tailwind CSS dependencies (first-time setup)…"
+                    npm install --prefer-offline
+                  fi
+                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \\
+                    -i tailwind.src.css \\
+                    -o tailwind.generated.css \\
+                    --content "index.html,app.js" \\
+                    --minify
+                  echo "✓ Generated frontend/tailwind.generated.css"
+                '';
+              }
+              {
+                category = "frontend";
+                name = "tw-dev";
+                help = "watch and recompile Tailwind CSS on changes";
+                command = ''
+                  cd frontend
+                  if [ ! -d node_modules ]; then
+                    echo "Installing Tailwind CSS dependencies (first-time setup)…"
+                    npm install --prefer-offline
+                  fi
+                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \\
+                    -i tailwind.src.css \\
+                    -o tailwind.generated.css \\
+                    --content "index.html,app.js" \\
+                    --watch --minify
                 '';
               }
             ];

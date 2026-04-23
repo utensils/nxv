@@ -1,0 +1,8 @@
+{
+  "name": "nxv-frontend",
+  "private": true,
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.6",
+    "@tailwindcss/vite": "^4.1.6"
+  }
+}

@@ -67,6 +67,37 @@ const FAVICON_SVG: &str = include_str!("../../frontend/favicon.svg");
 /// Embedded frontend JavaScript.
 const FRONTEND_JS: &str = include_str!("../../frontend/app.js");
 
+/// Embedded compiled Tailwind CSS (pre-compiled via `tw` devshell command).
+const TAILWIND_CSS: &str = include_str!("../../frontend/tailwind.generated.css");
+
+/// Embedded fonts.css (@font-face declarations).
+const FONTS_CSS: &str = include_str!("../../frontend/fonts.css");
+
+/// Embedded font files. One variable woff2 per family covers all
+/// weights/styles the UI uses (browsers interpolate within the font's
+/// weight axis).
+const FONT_INTER_VAR: &[u8] = include_bytes!("../../frontend/fonts/inter-var.woff2");
+const FONT_JM_VAR: &[u8] = include_bytes!("../../frontend/fonts/jetbrains-mono-var.woff2");
+
+/// All bundled font files.
+const BUNDLED_FONTS: [(&str, &[u8]); 2] = [
+    ("inter-var.woff2", FONT_INTER_VAR),
+    ("jetbrains-mono-var.woff2", FONT_JM_VAR),
+];
+
+/// Font filename -> MIME type mapping (matches bundled fonts).
+fn font_content_type(f: &str) -> &'static str {
+    if f.ends_with(".woff2") {
+        "font/woff2"
+    } else if f.ends_with(".woff") {
+        "font/woff"
+    } else if f.ends_with(".ttf") {
+        "font/ttf"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 /// When `NXV_FRONTEND_DIR` is set, read `file_name` from disk on each request
 /// so HTML/JS changes are picked up without rebuilding. Falls back to the
 /// compile-time `embedded` constant if the env var is unset or the read fails.
@@ -77,6 +108,16 @@ fn frontend_asset(file_name: &str, embedded: &'static str) -> String {
         return contents;
     }
     embedded.to_string()
+}
+
+/// Read a binary file from disk if `NXV_FRONTEND_DIR` is set, otherwise use embedded bytes.
+fn frontend_asset_bytes(file_name: &str, embedded: &'static [u8]) -> Vec<u8> {
+    if let Ok(dir) = std::env::var("NXV_FRONTEND_DIR")
+        && let Ok(contents) = std::fs::read(PathBuf::from(dir).join(file_name))
+    {
+        return contents;
+    }
+    embedded.to_vec()
 }
 
 /// Default maximum concurrent database operations.
@@ -383,6 +424,46 @@ pub(crate) fn build_router(
                 )
                     .into_response()
             }),
+        )
+        // Tailwind CSS (pre-compiled)
+        .route(
+            "/tailwind.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    frontend_asset("tailwind.generated.css", TAILWIND_CSS),
+                )
+                    .into_response()
+            }),
+        )
+        // Fonts CSS (@font-face declarations)
+        .route(
+            "/fonts.css",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    frontend_asset("fonts.css", FONTS_CSS),
+                )
+                    .into_response()
+            }),
+        )
+        // Individual font files
+        .route(
+            "/fonts/{name}",
+            get(
+                |axum::extract::Path(name): axum::extract::Path<String>| async move {
+                    match BUNDLED_FONTS.iter().find(|(n, _)| **n == name) {
+                        Some((_, bytes)) => (
+                            [(header::CONTENT_TYPE, font_content_type(&name))],
+                            frontend_asset_bytes(&name, bytes),
+                        )
+                            .into_response(),
+                        None => {
+                            (axum::http::StatusCode::NOT_FOUND, "font not found").into_response()
+                        }
+                    }
+                },
+            ),
         )
         .merge(Scalar::with_url("/docs", openapi::ApiDoc::openapi()))
         .route(

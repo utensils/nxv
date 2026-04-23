@@ -28,6 +28,7 @@
     reqSeq: 0,
     historyCache: new Map(),
     firstHashCache: new Map(),
+    renderedRows: [], // cached for instant view-switch on toggle
   };
 
   const els = {};
@@ -57,6 +58,13 @@
       .replace('armv7l-linux', 'armv7·linux');
   const predatesFlakes = (d) => (d ? new Date(d) < FLAKES_EPOCH : false);
   const shortHash = (h) => (h || '').slice(0, 7);
+  const truncateName = (name) => {
+    if (!name) return '';
+    // Strip trailing git-rev-style hex suffix (7+ chars), e.g. 'vimpager-a4da4d…'.
+    const stripped = name.replace(/-[0-9a-f]{7,}$/i, '');
+    if (stripped.length <= 25) return stripped;
+    return stripped.slice(0, 25) + '…';
+  };
   const escapeHtml = (s) =>
     String(s ?? '').replace(
       /[&<>"']/g,
@@ -340,7 +348,8 @@
   function renderWelcome() {
     STATE.total = 0;
     STATE.hasMore = false;
-    cache('resultsBody').innerHTML = `
+    STATE.renderedRows = [];
+    const w = `
       <div class="px-6 py-16 text-center">
         <div class="mono text-[12px] text-[var(--color-fog-4)] leading-7">
           type a package name above to search<br/>
@@ -353,6 +362,10 @@
           <span class="text-[var(--color-fog-3)]">or press</span> <span class="kbd">⌘K</span> <span class="text-[var(--color-fog-3)]">to open the palette</span>
         </div>
       </div>`;
+    cache('resultsBody').innerHTML = w;
+    cache('resultsCards').innerHTML = '';
+    cache('resultsRows').classList.remove('hidden');
+    cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', '—');
     renderPagination({ total: 0, has_more: false });
     // rewire welcome example chips
@@ -362,26 +375,49 @@
   }
 
   function renderError(e) {
-    cache('resultsBody').innerHTML = `
+    STATE.renderedRows = [];
+    const err = `
       <div class="px-6 py-12 text-center">
         <div class="mono text-[12px] text-[var(--color-red-glow)]">error · ${escapeHtml(e?.message || 'request failed')}</div>
         <div class="mt-2 mono text-[11px] text-[var(--color-fog-4)]">check that the API server is reachable.</div>
       </div>`;
+    cache('resultsBody').innerHTML = err;
+    cache('resultsCards').innerHTML = '';
+    cache('resultsRows').classList.remove('hidden');
+    cache('resultsCards').classList.add('hidden');
     setResultsStatus('results / —', 'error');
     renderPagination({ total: 0, has_more: false });
   }
 
   function render(rows) {
-    const body = cache('resultsBody');
+    STATE.renderedRows = rows;
+    const isCards = STATE.view === 'cards';
+    const empt = `
+      <div class="px-6 py-16 text-center">
+        <div class="mono text-[12px] text-[var(--color-fog-4)]">no results — try loosening filters, or press <span class="kbd">⌘K</span> to browse.</div>
+      </div>`;
     if (!rows.length) {
-      body.innerHTML = `
-        <div class="px-6 py-16 text-center">
-          <div class="mono text-[12px] text-[var(--color-fog-4)]">no results — try loosening filters, or press <span class="kbd">⌘K</span> to browse.</div>
-        </div>`;
+      cache('resultsBody').innerHTML = empt;
+      cache('resultsCards').innerHTML = '';
+      cache('resultsRows').classList.remove('hidden');
+      cache('resultsCards').classList.add('hidden');
       return;
     }
-    body.innerHTML = rows.map((r, i) => renderRow(r, i)).join('');
+    cache('resultsRows').classList.toggle('hidden', isCards);
+    cache('resultsCards').classList.toggle('hidden', !isCards);
+    if (isCards) {
+      const body = cache('resultsCards');
+      body.classList.add('cards-grid');
+      body.innerHTML = rows.map((r, i) => renderCard(r, i)).join('');
+      bindCardEvents(rows);
+    } else {
+      const body = cache('resultsBody');
+      body.innerHTML = rows.map((r, i) => renderRow(r, i)).join('');
+      bindRowEvents(rows);
+    }
+  }
 
+  function bindRowEvents(rows) {
     const rowByAttrVer = new Map(rows.map((r) => [`${r.attr}::${r.ver}`, r]));
     $$('#resultsBody [data-action]').forEach((el) => {
       el.addEventListener('click', (ev) => {
@@ -402,6 +438,105 @@
         if (r) openDrawer(r);
       });
     });
+  }
+
+  function bindCardEvents(rows) {
+    const cardByAttrVer = new Map(rows.map((r) => [`${r.attr}::${r.ver}`, r]));
+    $$('#resultsCards [data-action]').forEach((el) => {
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const { action } = el.dataset;
+        const key = el.dataset.key;
+        const r = cardByAttrVer.get(key);
+        if (!r) return;
+        if (action === 'copy-flake') copy(buildFlakeCmd(r));
+        else if (action === 'copy-run')
+          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+        else if (action === 'history') openDrawer(r);
+      });
+    });
+    $$('#resultsCards [data-row]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const r = cardByAttrVer.get(el.dataset.row);
+        if (r) openDrawer(r);
+      });
+    });
+  }
+
+  function renderCard(r, i) {
+    const flags = [];
+    if (r.insecure) {
+      const title = escapeHtml(r.insecure.join(' · '));
+      flags.push(
+        `<span class="chip danger" title="${title}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>insecure</span>`
+      );
+    }
+    if (r.legacy) flags.push(`<span class="chip warn">pre-flakes</span>`);
+    const platformsHtml = r.platforms
+      .filter((p) => /^(x86_64|aarch64|i686|armv7l|armv6l)-(linux|darwin)$/.test(p))
+      .slice(0, 4)
+      .map((p) => {
+        const active = STATE.filters.arch === p;
+        return `<span class="chip${active ? ' active' : ''}">${archLabel(p)}</span>`;
+      })
+      .join('');
+    const key = `${r.attr}::${r.ver}`;
+    const nameFull = r.name || r.attr || '';
+    const nameDisplay = truncateName(nameFull) || nameFull;
+    const nameHtml = escapeHtml(nameDisplay);
+    const nameTitleAttr = nameDisplay === nameFull ? '' : ` title="${escapeHtml(nameFull)}"`;
+    const attrHtml = escapeHtml(r.attr);
+    const verFull = r.ver || '';
+    const verShort = verFull.length > 18 ? verFull.slice(0, 10) + '…' : verFull;
+    const verHtml = escapeHtml(verShort);
+    const verTitleAttr = verShort === verFull ? '' : ` title="${escapeHtml(verFull)}"`;
+    const descHtml = escapeHtml(r.desc);
+    const licenseHtml = escapeHtml(r.license || '—');
+    const verToneClass = r.insecure
+      ? 'card-ver--danger'
+      : r.legacy
+        ? 'card-ver--warn'
+        : 'card-ver--brand';
+    const firstSeen = r.first ? fmtDate(r.first) : '—';
+    const lastSeen = r.last ? fmtDate(r.last) : '—';
+    return `
+      <article data-row="${escapeHtml(key)}" class="panel card group anim-in" style="animation-delay:${i * 18}ms" tabindex="0">
+        <header class="card-head">
+          <div class="card-head__title min-w-0">
+            <h3 class="card-name mono"${nameTitleAttr}>${nameHtml}</h3>
+            <p class="card-attr mono"><span class="card-attr__sigil">›</span>${attrHtml}</p>
+          </div>
+          <span class="card-ver mono ${verToneClass} tabular-nums"${verTitleAttr}>${verHtml}</span>
+        </header>
+        <p class="card-desc">${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}</p>
+        <div class="card-chips">
+          ${flags.join('')}${platformsHtml}
+          <span class="chip">${licenseHtml}</span>
+        </div>
+        <dl class="card-meta mono">
+          <div><dt>first</dt><dd class="tabular-nums">${firstSeen}</dd></div>
+          <div><dt>last</dt><dd class="tabular-nums">${lastSeen}</dd></div>
+          <div><dt>rev</dt><dd class="tabular-nums">#${shortHash(r.hash || r.lastHash)}</dd></div>
+        </dl>
+        <footer class="card-actions">
+          <button class="card-action" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref" aria-label="copy flake ref">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>flake</span>
+          </button>
+          <button class="card-action" data-action="copy-run" data-key="${escapeHtml(key)}" title="copy nix run ref" aria-label="copy nix run ref">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>run</span>
+          </button>
+          <button class="card-action" data-action="history" data-key="${escapeHtml(key)}" title="version history" aria-label="version history">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span>history</span>
+          </button>
+        </footer>
+      </article>`;
+  }
+
+  function refreshCurrentView() {
+    if (STATE.renderedRows.length) render(STATE.renderedRows);
   }
 
   function renderRow(r, i) {
@@ -425,11 +560,16 @@
       .join('');
 
     const key = `${r.attr}::${r.ver}`;
-    const nameHtml = escapeHtml(r.name);
+    const nameHtml = escapeHtml(truncateName(r.name));
     const attrHtml = escapeHtml(r.attr);
     const licenseHtml = escapeHtml(r.license || '—');
     const descHtml = escapeHtml(r.desc);
-    const verHtml = escapeHtml(r.ver);
+    // Truncate long versions (like full git hashes) to fit the column;
+    // keep the full string in title= so users can hover to see it.
+    const verFull = r.ver || '';
+    const verShort = verFull.length > 20 ? verFull.slice(0, 10) + '…' : verFull;
+    const verHtml = escapeHtml(verShort);
+    const verTitleAttr = verShort === verFull ? '' : ` title="${escapeHtml(verFull)}"`;
 
     return `
       <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 items-center px-4 py-3 cursor-pointer transition anim-in hover:bg-[var(--color-ink-2)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--color-ink-2);">
@@ -446,7 +586,7 @@
           </div>
         </div>
         <div>
-          <span class="mono text-[13px] ${r.insecure ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-fog-0)]'} tabular-nums">${verHtml}</span>
+          <span class="mono text-[13px] ${r.insecure ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-fog-0)]'} tabular-nums"${verTitleAttr}>${verHtml}</span>
         </div>
         <div class="hidden md:block min-w-0">
           <div class="text-[13px] text-[var(--color-fog-2)] truncate">${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}</div>
@@ -1101,6 +1241,13 @@
         el.classList.remove('text-[var(--color-fog-4)]');
         STATE.view = el.dataset.view;
         syncUrl();
+        // re-render cached results in new view mode (no API call)
+        refreshCurrentView();
+        // scroll into view only when results are below the fold
+        const rs = cache('resultsSection');
+        if (rs && rs.getBoundingClientRect().top > window.innerHeight - 80) {
+          window.scrollTo({ top: rs.offsetTop - 80, behavior: 'smooth' });
+        }
       });
     });
 
