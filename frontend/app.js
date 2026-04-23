@@ -348,6 +348,7 @@
   function renderWelcome() {
     STATE.total = 0;
     STATE.hasMore = false;
+    STATE.renderedRows = [];
     const w = `
       <div class="px-6 py-16 text-center">
         <div class="mono text-[12px] text-[var(--color-fog-4)] leading-7">
@@ -374,6 +375,7 @@
   }
 
   function renderError(e) {
+    STATE.renderedRows = [];
     const err = `
       <div class="px-6 py-12 text-center">
         <div class="mono text-[12px] text-[var(--color-red-glow)]">error · ${escapeHtml(e?.message || 'request failed')}</div>
