@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-24
+
+_Ships an agent-facing Claude Code skill so Claude / openclaw can drive
+nxv directly, and fixes #33 — `--format json` is now pure JSON and
+broken pipes (`| head`, `| jq`) exit cleanly instead of panicking._
+
 ### Added
 
 - Claude Code skill at `.claude/skills/nxv/SKILL.md` so Claude (and any
   agent that consumes the open Agent Skills standard, e.g. openclaw)
   can drive the nxv CLI and HTTP API on the user's behalf without
-  extra setup. Documented at `website/guide/skill.md`.
+  extra setup. Documented at `website/guide/skill.md`. (#34)
 
 ### Fixed
 
@@ -22,13 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output. JSON output now parses cleanly with `jq` / `python -m json.tool`
   / `dasel` etc., matching the documented contract. Empty / not-found
   results emit `[]` instead of a prose line. Affects `nxv history` (all
-  modes) and `nxv info`. (#33)
+  modes) and `nxv info`. (#33, #34)
 - Broken pipes (e.g. `nxv search ... --format json | head -1`,
   `nxv history ... | jq`) no longer panic out of `println!` with a
   spurious "failed printing to stdout: Broken pipe" backtrace and exit
   code 5. nxv now resets `SIGPIPE` to its default disposition at startup
   on Unix, matching ripgrep / fd / bat behavior, so the process exits
-  cleanly when a downstream consumer closes the pipe early. (#33)
+  cleanly when a downstream consumer closes the pipe early. (#33, #34)
 
 ## [0.2.0] - 2026-04-23
 
@@ -319,7 +325,8 @@ search-results view toggle._
 - Rust 2024 edition
 - 10 MB release binary size
 
-[unreleased]: https://github.com/utensils/nxv/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/utensils/nxv/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/utensils/nxv/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/utensils/nxv/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/utensils/nxv/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/utensils/nxv/compare/v0.1.5...v0.1.6
