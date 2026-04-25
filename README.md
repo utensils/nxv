@@ -578,6 +578,25 @@ src/
     └── publisher.rs # Index publishing
 ```
 
+## Claude Code Skill
+
+nxv ships a [Claude Code skill](https://code.claude.com/docs/en/skills) at
+[`.claude/skills/nxv/SKILL.md`](.claude/skills/nxv/SKILL.md) so Claude — and
+agents like [openclaw](https://github.com/utensils/openclaw) — can run nxv
+commands and call the HTTP API on your behalf without extra setup.
+
+```bash
+# Install for all your projects
+mkdir -p ~/.claude/skills/nxv
+curl -sL https://raw.githubusercontent.com/utensils/nxv/main/.claude/skills/nxv/SKILL.md \
+  -o ~/.claude/skills/nxv/SKILL.md
+```
+
+Then ask Claude things like *"which nixpkgs commit shipped python 2.7?"* or
+*"give me the `nix shell` command for nodejs 15.14"*. See the
+[skill guide](https://utensils.io/nxv/guide/skill) for installation, agent
+patterns, and JSON shapes.
+
 ## Related Projects
 
 There are several other great tools in this space:

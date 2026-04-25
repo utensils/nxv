@@ -86,6 +86,12 @@ semver = "1.0"
 # Temporary files
 tempfile = "3.24"
 
+# Reset SIGPIPE to default so broken pipes (e.g. `nxv ... | head`) exit cleanly
+# instead of panicking out of `println!`. Already in the dependency tree
+# transitively via reqwest/tokio/etc.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2.1"
 predicates = "3.1"
