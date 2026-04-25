@@ -1587,6 +1587,7 @@ dependencies = [
  "git2",
  "http-body-util",
  "indicatif",
+ "libc",
  "minisign",
  "mockito",
  "owo-colors",

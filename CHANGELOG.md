@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Claude Code skill at `.claude/skills/nxv/SKILL.md` so Claude (and any
+  agent that consumes the open Agent Skills standard, e.g. openclaw)
+  can drive the nxv CLI and HTTP API on the user's behalf without
+  extra setup. Documented at `website/guide/skill.md`.
+
+### Fixed
+
+- `--format json` and `--format plain` no longer emit human-readable
+  header lines (`Version history for: ...`, `Package: foo X.Y`, `To use
+  this version: ...`, `Package 'X' not found.`) before the machine
+  output. JSON output now parses cleanly with `jq` / `python -m json.tool`
+  / `dasel` etc., matching the documented contract. Empty / not-found
+  results emit `[]` instead of a prose line. Affects `nxv history` (all
+  modes) and `nxv info`. (#33)
+- Broken pipes (e.g. `nxv search ... --format json | head -1`,
+  `nxv history ... | jq`) no longer panic out of `println!` with a
+  spurious "failed printing to stdout: Broken pipe" backtrace and exit
+  code 5. nxv now resets `SIGPIPE` to its default disposition at startup
+  on Unix, matching ripgrep / fd / bat behavior, so the process exits
+  cleanly when a downstream consumer closes the pipe early. (#33)
+
 ## [0.2.0] - 2026-04-23
 
 _`nxv update` now also checks for a newer nxv binary release. Local

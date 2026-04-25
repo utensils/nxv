@@ -173,6 +173,15 @@ A NixOS module is provided for running nxv as a systemd service:
 }
 ```
 
+## Claude Code Skill
+
+The repo ships a Claude Code skill at `.claude/skills/nxv/SKILL.md` that
+teaches Claude (and any agent that consumes the open Agent Skills standard,
+e.g. openclaw) how to drive the nxv CLI and HTTP API. When changing CLI flags,
+adding/removing subcommands, or altering JSON / API response shapes, also
+update the SKILL.md so the skill stays accurate. The user-facing guide lives
+at `website/guide/skill.md`.
+
 ## Releasing
 
 **Use `/release` to prepare and execute a release.** This skill:

@@ -39,6 +39,15 @@ use cli::{Cli, Commands};
 /// nxv::main();
 /// ```
 fn main() {
+    // Reset SIGPIPE to its default disposition so the process exits cleanly
+    // (with signal 13) when a downstream consumer like `head` or `jq` closes
+    // the pipe early, instead of panicking out of `println!`. Same approach
+    // as ripgrep, fd, bat, etc.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
 
     // Handle no-color flag
@@ -510,13 +519,19 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
     let packages = backend.search_by_name_version(&args.package, version)?;
 
     if packages.is_empty() {
-        println!(
-            "Package '{}' not found{}.",
-            args.package,
-            version
-                .map(|v| format!(" version {}", v))
-                .unwrap_or_default()
-        );
+        match args.format {
+            cli::OutputFormatArg::Json => println!("[]"),
+            cli::OutputFormatArg::Plain => {} // empty stdout
+            cli::OutputFormatArg::Table => {
+                println!(
+                    "Package '{}' not found{}.",
+                    args.package,
+                    version
+                        .map(|v| format!(" version {}", v))
+                        .unwrap_or_default()
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -907,53 +922,86 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         let packages = backend.search_by_name_version(&args.package, Some(version.as_str()))?;
 
         if packages.is_empty() {
-            println!("Version {} of {} not found.", version, args.package);
-        } else {
-            // Use the first (most recent) match
-            let pkg = &packages[0];
-            println!("Package: {} {}", pkg.attribute_path, pkg.version);
-            println!();
-            println!(
-                "First appeared: {} ({})",
-                pkg.first_commit_short(),
-                pkg.first_commit_date.format("%Y-%m-%d")
-            );
-            println!(
-                "Last seen: {} ({})",
-                pkg.last_commit_short(),
-                pkg.last_commit_date.format("%Y-%m-%d")
-            );
-            println!();
-
-            // Show security warning if package has known vulnerabilities
-            if pkg.is_insecure() {
-                use owo_colors::OwoColorize;
-                println!("{}", "Security Warning".bold().underline().red());
-                println!(
-                    "  {}",
-                    "This package has known vulnerabilities!".red().bold()
-                );
-                let vulns = pkg.vulnerabilities();
-                for vuln in &vulns {
-                    println!("  {} {}", "•".red(), vuln);
+            match args.format {
+                cli::OutputFormatArg::Json => println!("[]"),
+                cli::OutputFormatArg::Plain => {} // empty stdout
+                cli::OutputFormatArg::Table => {
+                    println!("Version {} of {} not found.", version, args.package);
                 }
-                println!();
             }
+            return Ok(());
+        }
 
-            println!("To use this version:");
-            println!("  {}", pkg.nix_run_cmd());
+        // Use the first (most recent) match
+        let pkg = &packages[0];
+
+        match args.format {
+            cli::OutputFormatArg::Json => {
+                println!("{}", serde_json::to_string_pretty(&packages)?);
+            }
+            cli::OutputFormatArg::Plain => {
+                println!(
+                    "ATTR_PATH\tVERSION\tFIRST_COMMIT\tFIRST_DATE\tLAST_COMMIT\tLAST_DATE\tINSECURE"
+                );
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    pkg.attribute_path,
+                    pkg.version,
+                    pkg.first_commit_short(),
+                    pkg.first_commit_date.format("%Y-%m-%d"),
+                    pkg.last_commit_short(),
+                    pkg.last_commit_date.format("%Y-%m-%d"),
+                    if pkg.is_insecure() { "yes" } else { "no" },
+                );
+            }
+            cli::OutputFormatArg::Table => {
+                println!("Package: {} {}", pkg.attribute_path, pkg.version);
+                println!();
+                println!(
+                    "First appeared: {} ({})",
+                    pkg.first_commit_short(),
+                    pkg.first_commit_date.format("%Y-%m-%d")
+                );
+                println!(
+                    "Last seen: {} ({})",
+                    pkg.last_commit_short(),
+                    pkg.last_commit_date.format("%Y-%m-%d")
+                );
+                println!();
+
+                // Show security warning if package has known vulnerabilities
+                if pkg.is_insecure() {
+                    use owo_colors::OwoColorize;
+                    println!("{}", "Security Warning".bold().underline().red());
+                    println!(
+                        "  {}",
+                        "This package has known vulnerabilities!".red().bold()
+                    );
+                    let vulns = pkg.vulnerabilities();
+                    for vuln in &vulns {
+                        println!("  {} {}", "•".red(), vuln);
+                    }
+                    println!();
+                }
+
+                println!("To use this version:");
+                println!("  {}", pkg.nix_run_cmd());
+            }
         }
     } else if args.full {
         // Show full details for all versions
         let packages = backend.search_by_name(&args.package, true)?;
 
         if packages.is_empty() {
-            println!("No history found for package '{}'", args.package);
+            match args.format {
+                cli::OutputFormatArg::Json => println!("[]"),
+                cli::OutputFormatArg::Plain => {} // empty stdout
+                cli::OutputFormatArg::Table => {
+                    println!("No history found for package '{}'", args.package);
+                }
+            }
             return Ok(());
         }
-
-        println!("Version history for: {}", args.package);
-        println!();
 
         match args.format {
             cli::OutputFormatArg::Json => {
@@ -982,6 +1030,9 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 use comfy_table::{
                     Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
                 };
+
+                println!("Version history for: {}", args.package);
+                println!();
 
                 let mut table = Table::new();
                 table
@@ -1035,12 +1086,15 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         let history = backend.get_version_history(&args.package)?;
 
         if history.is_empty() {
-            println!("No history found for package '{}'", args.package);
+            match args.format {
+                cli::OutputFormatArg::Json => println!("[]"),
+                cli::OutputFormatArg::Plain => {} // empty stdout
+                cli::OutputFormatArg::Table => {
+                    println!("No history found for package '{}'", args.package);
+                }
+            }
             return Ok(());
         }
-
-        println!("Version history for: {}", args.package);
-        println!();
 
         match args.format {
             cli::OutputFormatArg::Json => {
@@ -1073,6 +1127,9 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                 use comfy_table::{
                     Cell, Color, ContentArrangement, Table, presets::ASCII_FULL, presets::UTF8_FULL,
                 };
+
+                println!("Version history for: {}", args.package);
+                println!();
 
                 let mut table = Table::new();
                 table

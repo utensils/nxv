@@ -63,6 +63,10 @@ export default defineConfig({
           text: 'Usage',
           items: [{ text: 'CLI Reference', link: '/guide/cli-reference' }],
         },
+        {
+          text: 'Integrations',
+          items: [{ text: 'Claude Code Skill', link: '/guide/skill' }],
+        },
       ],
       '/advanced/': [
         {

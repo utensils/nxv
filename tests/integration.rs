@@ -457,6 +457,8 @@ fn test_history_json_format() {
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
 
+    // Regression for #33: --format json must produce pure JSON on stdout
+    // (no human-readable "Version history for: ..." header).
     let output = nxv()
         .args([
             "--db-path",
@@ -470,11 +472,97 @@ fn test_history_json_format() {
         .success();
 
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    // Skip the header line and parse JSON
-    let json_part = stdout.lines().skip(2).collect::<Vec<_>>().join("\n");
     let parsed: serde_json::Value =
-        serde_json::from_str(&json_part).expect("Output should contain valid JSON");
+        serde_json::from_str(&stdout).expect("Output should be valid JSON with no header");
+    assert!(parsed.is_array(), "JSON output should be an array");
+    assert!(
+        !stdout.contains("Version history for:"),
+        "JSON output must not contain human-readable header"
+    );
+}
+
+#[test]
+fn test_history_full_json_format() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: --full --format json must also produce pure JSON.
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "history",
+            "python",
+            "--full",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--full --format json should be pure JSON");
     assert!(parsed.is_array());
+    assert!(!stdout.contains("Version history for:"));
+}
+
+#[test]
+fn test_history_specific_version_json() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: history with a specific version + --format json
+    // must produce pure JSON (was previously printing "Package: foo X.Y" first).
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "history",
+            "python",
+            "3.11.0",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Specific-version JSON should parse cleanly");
+    assert!(parsed.is_array());
+    assert!(!stdout.contains("Package:"));
+    assert!(!stdout.contains("To use this version:"));
+}
+
+#[test]
+fn test_history_not_found_json() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: not-found path with --format json must still
+    // produce parseable JSON (an empty array), not the human-readable
+    // "No history found" message that breaks downstream `jq`.
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "history",
+            "nonexistent_package",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Not-found JSON should be an empty array");
+    assert_eq!(parsed.as_array().map(|a| a.len()), Some(0));
+    assert!(!stdout.contains("No history found"));
 }
 
 #[test]
@@ -493,6 +581,109 @@ fn test_history_not_found() {
         .assert()
         .success()
         .stdout(predicate::str::contains("No history found"));
+}
+
+#[test]
+fn test_info_json_pure() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: `nxv info ... --format json` must be pure JSON.
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "info",
+            "python",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("info --format json should be pure JSON");
+    assert!(parsed.is_array());
+}
+
+#[test]
+fn test_info_not_found_json() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: not-found path on `info` with --format json must
+    // emit `[]`, not the human-readable "Package 'X' not found." message.
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "info",
+            "nonexistent_package_xyz",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("Not-found JSON should be an empty array");
+    assert_eq!(parsed.as_array().map(|a| a.len()), Some(0));
+    assert!(!stdout.contains("not found"));
+}
+
+#[test]
+#[cfg(unix)]
+fn test_broken_pipe_exits_cleanly() {
+    use std::io::Read;
+    use std::process::{Command as StdCommand, Stdio};
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #33: a downstream consumer closing stdin early must
+    // not cause nxv to panic from inside `println!`. Spawn nxv with stdout
+    // piped, drop the read end immediately, then assert nxv exits without
+    // a Rust panic backtrace.
+    let bin = assert_cmd::cargo::cargo_bin!("nxv");
+    let mut child = StdCommand::new(bin)
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "history",
+            "python",
+            "--full",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn nxv");
+
+    // Drop stdout immediately to close the pipe → next println! in nxv hits EPIPE.
+    drop(child.stdout.take());
+
+    let status = child.wait().expect("wait nxv");
+    let mut stderr = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut stderr);
+    }
+
+    assert!(
+        !stderr.contains("panicked at"),
+        "nxv panicked on broken pipe (regressed #33): {stderr}"
+    );
+    // SIGPIPE-terminated processes have status.code() == None on Unix, or
+    // 141 (128+13) when wrapped by a shell. A clean 0 is also acceptable
+    // if nxv finished writing before the pipe closed.
+    let code = status.code();
+    assert!(
+        code.is_none() || code == Some(0) || code == Some(141),
+        "unexpected exit on broken pipe: code={code:?}, stderr={stderr}"
+    );
 }
 
 // ============================================================================
