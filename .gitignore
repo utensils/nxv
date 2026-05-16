@@ -27,6 +27,7 @@ Thumbs.db
 
 # Direnv
 .direnv/
+.envrc.local
 
 # Environment
 .env
