@@ -919,7 +919,7 @@ impl Indexer {
                 pb.set_message(format!(
                     "({}) {} ({}) | {} pkgs | {} ranges",
                     eta_tracker.eta_string(),
-                    &commit.short_hash,
+                    commit.short_hash,
                     commit.date.format("%Y-%m-%d"),
                     result.packages_found,
                     result.ranges_written
@@ -930,7 +930,7 @@ impl Indexer {
             if let Err(e) = repo.checkout_commit(&commit.hash) {
                 warn(
                     &progress_bar,
-                    format!("Failed to checkout {}: {}", &commit.short_hash, e),
+                    format!("Failed to checkout {}: {}", commit.short_hash, e),
                 );
                 prev_commit_hash = Some(commit.hash.clone());
                 prev_commit_date = Some(commit.date);
@@ -944,7 +944,7 @@ impl Indexer {
                 Err(e) => {
                     warn(
                         &progress_bar,
-                        format!("Failed to list changes for {}: {}", &commit.short_hash, e),
+                        format!("Failed to list changes for {}: {}", commit.short_hash, e),
                     );
                     prev_commit_hash = Some(commit.hash.clone());
                     prev_commit_date = Some(commit.date);
@@ -1031,7 +1031,7 @@ impl Indexer {
                                 &progress_bar,
                                 format!(
                                     "Extraction failed at {} ({}): {}",
-                                    &commit.short_hash, system, e
+                                    commit.short_hash, system, e
                                 ),
                             );
                             continue;

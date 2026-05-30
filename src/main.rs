@@ -1430,7 +1430,7 @@ fn cmd_dedupe(cli: &Cli, args: &cli::DedupeArgs) -> Result<()> {
             } else {
                 "starting"
             },
-            &cli.db_path
+            cli.db_path
         );
     }
 
