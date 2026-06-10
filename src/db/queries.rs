@@ -35,10 +35,55 @@ fn escape_fts5_query(input: &str) -> String {
     format!("\"{}\"", input.replace('"', "\"\""))
 }
 
-/// Unix timestamp for when flake.nix was added to nixpkgs (2020-02-10 00:00:00 UTC).
-/// Commits before this date require legacy nix-shell syntax instead of flake references.
-/// See: https://github.com/NixOS/nixpkgs/pull/68897
-const FLAKE_EPOCH_TIMESTAMP: i64 = 1581292800;
+/// Boundary for emitting flake-style commands, padded for observation dates.
+///
+/// flake.nix landed in nixpkgs on 2020-02-10 (NixOS/nixpkgs#68897), but v4
+/// rows carry channel-release *observation* dates, which lag the underlying
+/// commit by hours to (in stalls) over two weeks. 2020-03-26 sits in the gap
+/// between the last nix-env-era release (2020-03-21) and the first
+/// packages.json release (2020-03-27): every observation at or after it is
+/// guaranteed to reference a flake-capable tree, and emitting the legacy
+/// `fetchTarball` form for the handful of early-2020 pre-boundary rows is
+/// harmless (it works on any tree).
+const FLAKE_EPOCH_TIMESTAMP: i64 = 1585180800; // 2020-03-26 00:00:00 UTC
+
+/// Nix keywords that must be quoted when used as attribute-path segments
+/// (`aspellDicts.or` must be emitted as `aspellDicts."or"`).
+const NIX_KEYWORDS: &[&str] = &[
+    "or", "if", "then", "else", "assert", "with", "let", "in", "rec", "inherit",
+];
+
+/// True when a segment is usable bare in a Nix attribute path.
+fn is_plain_nix_identifier(segment: &str) -> bool {
+    !segment.is_empty()
+        && !NIX_KEYWORDS.contains(&segment)
+        && segment
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '-'))
+}
+
+/// Prepare an attribute path for command emission: re-quote segments that
+/// aren't valid bare Nix identifiers. Returns the printable path and whether
+/// any segment needed quoting (the caller must then shell-quote the ref).
+fn nix_attr_for_command(attr: &str) -> (String, bool) {
+    let mut quoted_any = false;
+    let parts: Vec<String> = attr
+        .split('.')
+        .map(|segment| {
+            if is_plain_nix_identifier(segment) {
+                segment.to_string()
+            } else {
+                quoted_any = true;
+                format!("\"{}\"", segment.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        })
+        .collect();
+    (parts.join("."), quoted_any)
+}
 
 /// Represents a package version entry from the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,17 +195,23 @@ impl PackageVersion {
             ""
         };
 
+        let (attr, attr_quoted) = nix_attr_for_command(&self.attribute_path);
+
         if self.predates_flakes() {
             format!(
                 "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
-                insecure_prefix, self.last_commit_hash, self.attribute_path
+                insecure_prefix, self.last_commit_hash, attr
             )
         } else {
             let impure_flag = if self.is_insecure() { " --impure" } else { "" };
-            format!(
-                "{}nix shell{} nixpkgs/{}#{}",
-                insecure_prefix, impure_flag, self.last_commit_hash, self.attribute_path
-            )
+            let flake_ref = format!("nixpkgs/{}#{}", self.last_commit_hash, attr);
+            // Quoted attr segments contain double quotes the shell would eat.
+            let flake_ref = if attr_quoted {
+                format!("'{flake_ref}'")
+            } else {
+                flake_ref
+            };
+            format!("{insecure_prefix}nix shell{impure_flag} {flake_ref}")
         }
     }
 
@@ -178,17 +229,22 @@ impl PackageVersion {
             ""
         };
 
+        let (attr, attr_quoted) = nix_attr_for_command(&self.attribute_path);
+
         if self.predates_flakes() {
             format!(
                 "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
-                insecure_prefix, self.last_commit_hash, self.attribute_path, self.attribute_path
+                insecure_prefix, self.last_commit_hash, attr, self.attribute_path
             )
         } else {
             let impure_flag = if self.is_insecure() { " --impure" } else { "" };
-            format!(
-                "{}nix run{} nixpkgs/{}#{}",
-                insecure_prefix, impure_flag, self.last_commit_hash, self.attribute_path
-            )
+            let flake_ref = format!("nixpkgs/{}#{}", self.last_commit_hash, attr);
+            let flake_ref = if attr_quoted {
+                format!("'{flake_ref}'")
+            } else {
+                flake_ref
+            };
+            format!("{insecure_prefix}nix run{impure_flag} {flake_ref}")
         }
     }
 
@@ -243,15 +299,33 @@ pub struct IndexStats {
 }
 
 /// Search for packages by name.
+/// Hard cap on rows any single search query materializes.
+///
+/// With 144k+ attrs (nested sets included), a broad prefix like `python`
+/// matches tens of thousands of rows; the search layer paginates to at most
+/// 100 per response, so pulling more than this from SQLite is pure waste.
+/// High enough that page-through and post-sort stay correct in practice.
+const SEARCH_SQL_CAP: usize = 5000;
+
+/// Ranking expression: shallower attribute paths first (top-level packages
+/// before `python313Packages.*`), then recency.
+const ATTR_DEPTH_RANK: &str = "(LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', '')))";
+
 pub fn search_by_name(
     conn: &rusqlite::Connection,
     name: &str,
     exact: bool,
 ) -> Result<Vec<PackageVersion>> {
     let sql = if exact {
-        "SELECT * FROM package_versions WHERE name = ? ORDER BY last_commit_date DESC"
+        format!(
+            "SELECT * FROM package_versions WHERE name = ? \
+             ORDER BY {ATTR_DEPTH_RANK} ASC, last_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        )
     } else {
-        "SELECT * FROM package_versions WHERE name LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC"
+        format!(
+            "SELECT * FROM package_versions WHERE name LIKE ? ESCAPE '\\' \
+             ORDER BY {ATTR_DEPTH_RANK} ASC, last_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        )
     };
 
     let pattern = if exact {
@@ -260,7 +334,7 @@ pub fn search_by_name(
         format!("{}%", escape_like_pattern(name))
     };
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
 
     let mut results = Vec::new();
@@ -272,9 +346,10 @@ pub fn search_by_name(
 
 /// Search for packages by attribute path.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY last_commit_date DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' \
+         ORDER BY {ATTR_DEPTH_RANK} ASC, last_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+    ))?;
     let pattern = format!("{}%", escape_like_pattern(attr_path));
     let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
 
@@ -311,9 +386,10 @@ pub fn search_by_name_version(
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
     // Search by attribute_path (package) and version prefix
-    let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' ORDER BY first_commit_date DESC",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
+         ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+    ))?;
     let package_pattern = format!("{}%", escape_like_pattern(package));
     let version_pattern = format!("{}%", escape_like_pattern(version));
     let rows = stmt.query_map(
@@ -628,14 +704,14 @@ pub fn search_by_description(
     conn: &rusqlite::Connection,
     query: &str,
 ) -> Result<Vec<PackageVersion>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         r#"
         SELECT pv.* FROM package_versions pv
         INNER JOIN package_versions_fts fts ON pv.id = fts.rowid
         WHERE package_versions_fts MATCH ?
-        ORDER BY pv.last_commit_date DESC
-        "#,
-    )?;
+        ORDER BY pv.last_commit_date DESC LIMIT {SEARCH_SQL_CAP}
+        "#
+    ))?;
 
     // Escape user input to prevent FTS5 syntax injection
     let escaped_query = escape_fts5_query(query);
