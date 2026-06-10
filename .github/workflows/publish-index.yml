@@ -1,18 +1,24 @@
 name: Publish Index
 
-# This workflow updates the nxv package index from nixpkgs
-# It runs on a schedule or can be triggered manually
+# Keeps the published package index current by ingesting new channel-release
+# snapshots from releases.nixos.org (see docs/indexer-rewrite/DESIGN.md).
+# No nixpkgs clone, no commit walking: each run diffs the S3 listing against
+# the index's release ledger and ingests whatever is new — typically 0-2
+# releases per 6h window, seconds to minutes of work.
+#
+# The initial full v4 rebuild is an out-of-band, operator-driven run (hours);
+# this workflow only does incremental updates against an existing index.
 
 on:
-  # Run every 6 hours to keep index fresh
+  # Run every 6 hours to keep the index fresh
   schedule:
     - cron: '0 */6 * * *'
 
   # Allow manual triggering
   workflow_dispatch:
     inputs:
-      dedupe:
-        description: "Run `nxv dedupe` on the index before publish (one-shot repair for pre-0.1.5 bloat)"
+      force_publish:
+        description: "Publish even when no new releases were ingested this run"
         type: boolean
         default: false
 
@@ -23,7 +29,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Index is stored in a GitHub release with this tag
-  # Forks can override INDEX_URL_PREFIX via repository variable (Settings > Secrets and variables > Actions > Variables)
+  # Forks can override INDEX_URL_PREFIX via repository variable
   INDEX_RELEASE_TAG: index-latest
   INDEX_URL_PREFIX: ${{ vars.INDEX_URL_PREFIX || format('https://github.com/{0}/releases/download/index-latest', github.repository) }}
 
@@ -38,16 +44,12 @@ jobs:
       - name: Checkout nxv
         uses: actions/checkout@v4
 
+      # Nix is only needed for the --head-eval fallback (channel-stuck
+      # periods); the snapshot path itself does no evaluation.
       - name: Install Nix
         uses: cachix/install-nix-action@v30
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Cachix
-        uses: cachix/cachix-action@v16
-        with:
-          name: nxv
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,181 +68,66 @@ jobs:
       - name: Build nxv with indexer
         run: cargo build --release --features indexer
 
-      # Download existing index BEFORE cloning nixpkgs so we can determine clone depth
       - name: Download existing index
-        id: download-index
-        continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p ~/.local/share/nxv
           echo "Downloading existing index from ${INDEX_URL_PREFIX}..."
 
-          if curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst; then
-            echo "Downloaded index.db.zst ($(du -h ~/.local/share/nxv/index.db.zst | cut -f1))"
-            if zstd -d ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db; then
-              rm ~/.local/share/nxv/index.db.zst
-              echo "Decompressed to index.db ($(du -h ~/.local/share/nxv/index.db | cut -f1))"
-              echo "index_exists=true" >> $GITHUB_OUTPUT
-            else
-              echo "Failed to decompress index.db.zst"
-              rm -f ~/.local/share/nxv/index.db.zst ~/.local/share/nxv/index.db
-              echo "index_exists=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "No existing index found (this is normal for first run)"
-            echo "index_exists=false" >> $GITHUB_OUTPUT
-          fi
+          # Incremental updates REQUIRE an existing index. The initial v4
+          # full rebuild is run out-of-band and uploaded manually.
+          curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst
+          zstd -d -f ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db
+          rm ~/.local/share/nxv/index.db.zst
+          echo "Index ready: $(du -h ~/.local/share/nxv/index.db | cut -f1)"
 
-          # Also download bloom filter if available
-          if curl -sSfL "${INDEX_URL_PREFIX}/bloom.bin" -o ~/.local/share/nxv/bloom.bin; then
-            echo "Downloaded bloom.bin ($(du -h ~/.local/share/nxv/bloom.bin | cut -f1))"
-          else
-            echo "No existing bloom filter found"
-            rm -f ~/.local/share/nxv/bloom.bin
-          fi
-
-          # Show what we have
-          echo "Contents of ~/.local/share/nxv:"
-          ls -la ~/.local/share/nxv/ || echo "(empty)"
-
-      - name: Determine clone depth
-        id: clone-strategy
+      - name: Ingest new channel releases
+        id: ingest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Used by --head-eval to resolve master HEAD without rate limits
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # We require an existing index for incremental updates
-          # Full rebuilds take days and should be done locally, not in CI
+          set -euo pipefail
+          ./target/release/nxv index --strict --head-eval --report report.json
+          echo "ingested=$(jq -r '.ingested' report.json)" >> "$GITHUB_OUTPUT"
+          echo "healthy=$(jq -r '.healthy' report.json)" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ steps.download-index.outputs.index_exists }}" != "true" ]; then
-            echo "::error::No existing index available. Full rebuilds must be done locally (takes days)."
-            echo "Upload an initial index to the index-latest release first."
+      - name: Decide whether to publish
+        id: gate
+        run: |
+          INGESTED="${{ steps.ingest.outputs.ingested }}"
+          HEALTHY="${{ steps.ingest.outputs.healthy }}"
+          FORCE="${{ inputs.force_publish }}"
+
+          if [ "$HEALTHY" != "true" ]; then
+            echo "::error::Index run unhealthy — not publishing."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          # Get last indexed commit from the database
-          LAST_COMMIT=$(./target/release/nxv stats 2>/dev/null | grep "Last indexed commit" | awk '{print $4}')
-          echo "Last indexed commit: ${LAST_COMMIT:-unknown}"
-
-          if [ -z "$LAST_COMMIT" ]; then
-            echo "::error::Could not determine last indexed commit from database."
-            exit 1
+          if [ "${INGESTED:-0}" -gt 0 ] || [ "$FORCE" = "true" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No new releases this run; skipping publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
-
-          # Use GitHub API to count commits ahead on master branch
-          # Note: We index from master, not nixos-unstable, as it has more packages
-          echo "Querying GitHub API for commit count..."
-          # Capture both output and exit code, preventing errexit from stopping the script
-          set +e
-          API_RESPONSE=$(gh api "repos/NixOS/nixpkgs/compare/${LAST_COMMIT}...master" 2>&1)
-          API_EXIT_CODE=$?
-          set -e
-
-          if [ $API_EXIT_CODE -ne 0 ]; then
-            echo "::warning::GitHub API call failed for commit ${LAST_COMMIT} (exit code: $API_EXIT_CODE)"
-            echo "Response: ${API_RESPONSE}"
-            echo "The indexed commit may have been garbage collected or rebased out."
-            echo "Falling back to deep clone (1000 commits) to recover..."
-            echo "depth=1000" >> $GITHUB_OUTPUT
-            echo "strategy=deep-fallback" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          AHEAD=$(echo "$API_RESPONSE" | jq -r '.ahead_by // empty')
-
-          if [ -z "$AHEAD" ] || ! [[ "$AHEAD" =~ ^[0-9]+$ ]]; then
-            echo "::warning::Could not parse ahead_by from API response for commit ${LAST_COMMIT}"
-            echo "Response: ${API_RESPONSE}"
-            echo "Falling back to deep clone (1000 commits) to recover..."
-            echo "depth=1000" >> $GITHUB_OUTPUT
-            echo "strategy=deep-fallback" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          if [ "$AHEAD" = "0" ]; then
-            echo "Index is already up to date!"
-            echo "depth=0" >> $GITHUB_OUTPUT
-            echo "strategy=skip" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          DEPTH=$((AHEAD + 10))
-          echo "Commits ahead: ${AHEAD}, clone depth: ${DEPTH}"
-          echo "depth=${DEPTH}" >> $GITHUB_OUTPUT
-          echo "strategy=shallow" >> $GITHUB_OUTPUT
-
-      - name: Skip if already up to date
-        if: ${{ steps.clone-strategy.outputs.strategy == 'skip' && inputs.dedupe != true }}
-        run: |
-          echo "Index is already up to date, nothing to do!"
-          echo "## Index Already Current" >> $GITHUB_STEP_SUMMARY
-          echo "The index is already up to date with nixpkgs master. No update needed." >> $GITHUB_STEP_SUMMARY
-
-      - name: Clone nixpkgs
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
-        run: |
-          STRATEGY="${{ steps.clone-strategy.outputs.strategy }}"
-          DEPTH="${{ steps.clone-strategy.outputs.depth }}"
-          echo "Performing ${STRATEGY} clone with depth ${DEPTH}..."
-          git clone --depth "${DEPTH}" \
-            --single-branch --branch master \
-            https://github.com/NixOS/nixpkgs.git nixpkgs
-
-          echo "Clone complete. Commit count in clone:"
-          git -C nixpkgs rev-list --count HEAD
-
-      - name: Get stats before indexing
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
-        id: stats-before
-        run: |
-          # Capture unique package count before indexing
-          PACKAGES_BEFORE=$(./target/release/nxv stats 2>/dev/null | grep "Unique package names" | awk '{print $4}' || echo "0")
-          echo "packages_before=${PACKAGES_BEFORE}" >> $GITHUB_OUTPUT
-          echo "Packages before: ${PACKAGES_BEFORE}"
-
-      - name: Run indexer
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
-        run: ./target/release/nxv index --nixpkgs-path ./nixpkgs
-
-      - name: Get stats after indexing
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback'
-        id: stats-after
-        run: |
-          # Capture unique package count after indexing
-          PACKAGES_AFTER=$(./target/release/nxv stats 2>/dev/null | grep "Unique package names" | awk '{print $4}' || echo "0")
-          echo "packages_after=${PACKAGES_AFTER}" >> $GITHUB_OUTPUT
-          echo "Packages after: ${PACKAGES_AFTER}"
-
-          # Calculate new packages
-          PACKAGES_BEFORE="${{ steps.stats-before.outputs.packages_before }}"
-          NEW_PACKAGES=$((PACKAGES_AFTER - PACKAGES_BEFORE))
-          echo "new_packages=${NEW_PACKAGES}" >> $GITHUB_OUTPUT
-          echo "New packages: ${NEW_PACKAGES}"
-
-      # One-shot repair path: collapse duplicate (attribute_path, version) rows
-      # produced by the pre-0.1.5 incremental-indexer bug. Runs only when the
-      # workflow was dispatched manually with `dedupe: true`, before publish
-      # so the republished artifact is clean.
-      - name: Dedupe existing index
-        if: ${{ inputs.dedupe == true && steps.download-index.outputs.index_exists == 'true' }}
-        run: |
-          echo "Rows before dedupe:"
-          ./target/release/nxv stats 2>/dev/null | grep "Total version ranges" || true
-          ./target/release/nxv --db-path ~/.local/share/nxv/index.db dedupe
-          echo "Rows after dedupe:"
-          ./target/release/nxv stats 2>/dev/null | grep "Total version ranges" || true
 
       - name: Generate publishable artifacts
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
+        if: steps.gate.outputs.publish == 'true'
         env:
           NXV_SECRET_KEY: ${{ secrets.NXV_SIGNING_KEY }}
         run: |
+          # --min-version defaults to the schema version in code; passed
+          # explicitly as belt-and-braces (pre-v4 clients must be gated
+          # BEFORE download or they overwrite a working index).
           ./target/release/nxv publish \
             --output ./publish \
             --url-prefix "${INDEX_URL_PREFIX}" \
+            --min-version 4 \
             --sign
 
       - name: Upload workflow artifacts
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
+        if: steps.gate.outputs.publish == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: nxv-index
@@ -248,12 +135,11 @@ jobs:
           retention-days: 7
 
       - name: Upload to GitHub Release
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
+        if: steps.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Check if release exists, create if not
           if ! gh release view "$INDEX_RELEASE_TAG" > /dev/null 2>&1; then
             echo "Creating release $INDEX_RELEASE_TAG..."
             gh release create "$INDEX_RELEASE_TAG" \
@@ -262,7 +148,6 @@ jobs:
               --latest=false
           fi
 
-          # Upload files (--clobber overwrites existing assets)
           echo "Uploading index files to release..."
           gh release upload "$INDEX_RELEASE_TAG" \
             publish/index.db.zst \
@@ -272,21 +157,22 @@ jobs:
             --clobber
 
       - name: Summary
-        if: steps.clone-strategy.outputs.strategy == 'shallow' || steps.clone-strategy.outputs.strategy == 'deep-fallback' || inputs.dedupe == true
+        if: always()
         run: |
           echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.dedupe }}" = "true" ]; then
-            echo "- **Dedupe:** enabled (one-shot repair)" >> $GITHUB_STEP_SUMMARY
+          if [ -f report.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat report.json >> $GITHUB_STEP_SUMMARY
+            echo '' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "_No report generated (run failed before ingest)._" >> $GITHUB_STEP_SUMMARY
           fi
-          echo "- **Clone depth:** ${{ steps.clone-strategy.outputs.depth }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **New packages:** ${{ steps.stats-after.outputs.new_packages || 'n/a (no index run)' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total packages:** ${{ steps.stats-after.outputs.packages_after || 'n/a' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Index size:** $(du -h publish/index.db.zst | cut -f1)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Bloom filter size:** $(du -h publish/bloom.bin 2>/dev/null | cut -f1 || echo 'N/A')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Release:** [$INDEX_RELEASE_TAG](https://github.com/${{ github.repository }}/releases/tag/$INDEX_RELEASE_TAG)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```json' >> $GITHUB_STEP_SUMMARY
-          cat publish/manifest.json >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.gate.outputs.publish }}" = "true" ] && [ -f publish/manifest.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Published:** yes ($(du -h publish/index.db.zst | cut -f1))" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Published:** no" >> $GITHUB_STEP_SUMMARY
+          fi

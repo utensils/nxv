@@ -20,10 +20,10 @@ direnv allow         # Or use direnv for automatic shell activation
 ```bash
 cargo build                      # Debug build
 cargo build --release            # Release build
-cargo build --features indexer   # Build with indexer feature (requires libgit2)
+cargo build --features indexer   # Build with indexer feature
 cargo run -- <args>              # Run with arguments
 cargo test                       # Run default test suite (unit + integration)
-cargo test --features indexer    # Include indexer tests (requires libgit2; some need `nix`)
+cargo test --features indexer    # Include indexer tests (some #[ignore]d ones need `nix` + network)
 cargo test <test_name>           # Run a single test by name
 cargo test db::                  # Run tests in a specific module
 cargo clippy --features indexer -- -D warnings   # Lint (matches CI; CI also runs the featureless variant)
@@ -78,27 +78,29 @@ The `nxv serve` command runs an HTTP API server with:
 
 ### Indexer (`src/index/`, feature-gated)
 
-Note the directory is `src/index/` even though the Cargo feature is named `indexer`. The `indexer` feature enables building indexes from a local nixpkgs clone:
+Note the directory is `src/index/` even though the Cargo feature is named `indexer`. The indexer ingests **channel-release snapshots** from releases.nixos.org — it does NOT walk git history or read a nixpkgs checkout (see `docs/indexer-rewrite/DESIGN.md` for the full specification and `ANALYSIS.md` for why the git-walking design was replaced):
 
-- `git.rs`: Walks nixpkgs git history (commits from 2017+)
-- `extractor.rs`: Runs `nix eval` to extract package metadata per commit
-- `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
-- `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
-  - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
-  - Historical mode (`--history`): Traverses git to original commits for accuracy
-- `publisher.rs`: Generates compressed index files and manifest for distribution
+- `releases.rs`: S3 bucket listing (event-based XML parsing), release-name parsing, git-revision fetch, planning (diff against the `releases` ledger)
+- `snapshot.rs`: Streaming brotli + JSON parsing of `packages.json.br` (~380 MB decompressed, never materialized; era-tolerant field handling back to 2020)
+- `eval.rs`: `nix-env` over `nixexprs.tar.xz` for the pre-2020 era (`--backfill-evals`), and the `--head-eval` master-tarball fallback for channel-stuck periods (the only paths that need `nix`)
+- `monitor.rs`: Data-quality gates that run BEFORE any write — count floors, rolling baselines, sentinel packages (firefox, thunderbird, nh, python*Packages.requests), births/deaths, head-lag; plus the end-of-run report (`--report report.json`)
+- `mod.rs`: Coordinator — plan → parallel fetch/parse → in-order gating → aggregated widen-only upserts (atomic with the ledger) → FTS/bloom rebuild + watermarks
+- `publisher.rs`: Generates compressed index files and manifest for distribution (min_version defaults to the schema version; refuses to publish v4 ungated)
 
-### Database Schema (`db/mod.rs`)
+### Database Schema (`db/mod.rs`, schema v4)
 
-- `package_versions`: Main table with version ranges (first/last commit dates)
-- `package_versions_fts`: FTS5 virtual table for description search
-- `meta`: Key-value store for index metadata (last_indexed_commit, schema_version)
+- `package_versions`: One row per `(attribute_path, version)` with **observation-backed** bounds: the pair was seen at `first_commit` and `last_commit` (real, Hydra-built channel commits); interior presence is interpolated, not guaranteed
+- `releases`: Per-channel ingestion ledger (pending/ingested/failed/skipped + retry backoff) — replaces the old single-checkpoint model; a gap is just a pending row the next run picks up
+- `package_versions_fts`: FTS5 virtual table for description search (triggers are WHEN-guarded; bulk runs drop + rebuild)
+- `meta`: Key-value store (last_indexed_commit = newest ingested release commit, schema_version, min_schema_version)
 
 ### Key Design Decisions
 
-- **Version ranges**: Instead of storing every commit where a package exists, stores (first_commit, last_commit) ranges to minimize DB size
-- **Bloom filter**: Serialized to separate file, loaded at search time for instant "not found" responses
-- **Feature gates**: Indexer code (git2, ctrlc) only compiled with `--features indexer` to keep user binary small
+- **Observations, not inference**: every stored commit is one at which the version verifiably existed; no file→attr change mapping, no "no evaluation = unchanged" (the root causes of issues #21/#23)
+- **Nested package sets included**: packages.json already enumerates all ~144k attrs (python3xxPackages.*, haskellPackages.*, ...) — issue #5 is covered with zero evaluation cost
+- **Currency**: nixos-unstable-small ingestion keeps the index hours behind master; `--head-eval` covers channel stalls; `--strict` fails CI when head lag exceeds 72h
+- **Bloom filter**: Serialized to separate file, loaded at search time for instant "not found" responses; contains full dotted attribute paths
+- **Feature gates**: Indexer code (ctrlc, brotli, quick-xml) only compiled with `--features indexer` to keep user binary small
 
 ## Dependency Management
 
@@ -124,6 +126,7 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_MAX_DB_CONNECTIONS`, `NXV_DB_TIMEOUT_SECS` — `nxv serve` DB concurrency cap (default 32) and per-operation timeout (default 30s)
 - `NXV_LOG_FORMAT` — set to `json` for structured `nxv serve` logs (combine with `RUST_LOG`)
 - `NXV_SECRET_KEY` — minisign secret key (path or contents) for `nxv publish` signing
+- `NXV_RELEASES_URL` — override the releases.nixos.org S3 endpoint for `nxv index` (tests, mirrors)
 - `NXV_FRONTEND_DIR` — serve `index.html`/`app.js`/`favicon.svg` from this directory on every request instead of the embedded copy, and disable the 24h `Cache-Control` for those routes. Used by the devshell `dev` command for live frontend reload (edit → browser refresh, no rebuild; `dev` also runs cargo-watch so `src/` changes rebuild and restart the server). Unset in production.
 - `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
 
@@ -216,7 +219,7 @@ at `website/guide/skill.md`.
 
 - `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
 - `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
-- `publish-index.yml`: Weekly scheduled or manual - builds the package index and uploads to `index-latest` release
+- `publish-index.yml`: Every 6 hours or manual - ingests new channel-release snapshots into the index and republishes to `index-latest` only when something was ingested and monitors are green (`--strict --head-eval --report`)
 - `pages.yml`: Deploys the VitePress docs site (`website/`) to GitHub Pages on pushes to main
 - `flakehub-publish-tagged.yml`: Publishes tagged releases to FlakeHub
 
