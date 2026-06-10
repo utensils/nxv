@@ -60,10 +60,12 @@ a commit that has version X" — always gets a true endpoint.
   - `nixos/unstable-small/` → **nixos-unstable-small**: currency channel,
     typically **hours behind master** (measured 9h vs 1.4d for
     nixpkgs-unstable). Ingested from where its packages.json exists.
-- **Source selection is a per-release probe**: try `packages.json.br`,
-  on 404 fall back to `nix_env` — never decide by date or prefix (the
-  boundary is mid-`20.09pre`, and 198 releases were renamed `21.03pre`
-  before becoming `21.05pre`).
+- **Source selection is a per-release probe**: every release tries
+  `packages.json.br` first and falls back to nix-env on 404 — never decided
+  by date or prefix (the boundary is mid-`20.09pre`, and 198 releases were
+  renamed `21.03pre` before becoming `21.05pre`). The plan-time date guess
+  is only a worklist hint (`--backfill-evals` filtering); the ledger source
+  is corrected to the mechanism that actually produced the data.
 - **Parsing requirements** (all verified the hard way):
   - Event-based XML parsing (quick-xml) per `<Contents>` block with
     optional elements — post-Feb-2025 objects embed
@@ -352,14 +354,24 @@ hidden no-op with a deprecation warning for one release cycle.
 
 ## 11. CI (publish-index.yml)
 
-Steps: download existing index → `nxv index --strict --report` → **publish
-only when** (a) ≥1 release was ingested this run, AND (b) no
-pending/failed release older than the published watermark exists, AND (c)
-monitors are green. `--allow-partial-publish` exists as an operator
-override. Most 6h runs ingest 0–1 releases and exit in ~2–3 min without
-republishing the artifact. No nixpkgs clone, no clone-depth logic, no
-GitHub compare API. `nxv stats` grep-scraping is replaced by the
-`--report` JSON.
+Steps: download existing index → `nxv index --head-eval --report` →
+**publish when ≥1 release was ingested** (or `force_publish`) → **alert
+after publishing** (the job goes red when `healthy=false` or any release
+failed).
+
+> **Deviation from the original draft** (which gated publishing on "no
+> pending/failed before the watermark"): publishing ingested progress is
+> *always safe* — gate-failed snapshots never write rows, so the artifact
+> only ever gains verified data, and the shipped ledger carries the failed
+> release's retry/backoff state to the next run. Blocking the publish of 92
+> good releases because 1 failed would only increase staleness without
+> fixing the hole; retries fix the hole. The hole is surfaced instead:
+> `unsettled_before_watermark` in the report/stats, plus the red workflow
+> run. Head-lag breaches mark the run unhealthy unconditionally.
+
+Most 6h runs ingest 0–2 releases and exit in ~2–3 min without republishing
+the artifact. No nixpkgs clone, no clone-depth logic, no GitHub compare
+API. `nxv stats` grep-scraping is replaced by the `--report` JSON.
 
 ## 12. Performance, size & search budgets
 
