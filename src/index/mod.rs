@@ -16,6 +16,7 @@
 
 pub mod publisher;
 pub mod releases;
+pub mod snapshot;
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
