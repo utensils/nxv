@@ -1,56 +1,243 @@
-# Repository Guidelines
+# AGENTS.md
 
-## Project Structure & Module Organization
+This file provides guidance to AI coding agents (Claude Code, Codex, etc.) when working with code in this repository. `CLAUDE.md` is a symlink to this file — edit here.
 
-- `src/` contains the Rust CLI, database, remote update logic, server, and
-  indexer (feature-gated). See `src/index/` for indexer internals and
-  `src/server/` for the HTTP API.
-- `tests/` holds integration tests (notably `tests/integration.rs`).
-- `frontend/` contains the static HTML/CSS/JS for the web UI served by
-  `nxv serve`.
-- `docs/` hosts implementation specs and design notes.
-- `scripts/` includes operational scripts (e.g., cache publishing).
+## Project Overview
 
-## Build, Test, and Development Commands
+nxv (Nix Versions) is a Rust CLI tool for quickly finding specific versions of Nix packages across nixpkgs history. It uses a pre-built SQLite index with bloom filters for fast lookups. Also provides an HTTP API server with web frontend.
 
-- `nix develop` enters the Nix dev shell with the Rust toolchain.
-- `cargo build` builds the debug CLI; `cargo build --features indexer` enables
-  indexer support.
-- `cargo test` runs the default test suite; `cargo test --features indexer`
-  includes indexer tests.
-- `cargo clippy -- -D warnings` runs linting with warnings treated as errors.
-- `cargo fmt` formats Rust code.
-- `nix flake check` runs the full Nix CI checks.
+## Development Environment
 
-## Coding Style & Naming Conventions
+This project uses Nix flakes with crane for reproducible builds:
 
-- Rust is formatted with rustfmt defaults (4-space indentation).
-- Naming follows Rust conventions: `snake_case` for modules and functions,
-  `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants.
-- Run `cargo fmt` and `cargo clippy -- -D warnings` before submitting changes.
+```bash
+nix develop          # Enter devshell with Rust toolchain
+direnv allow         # Or use direnv for automatic shell activation
+```
 
-## Testing Guidelines
+## Build Commands
 
-- Unit tests live alongside code in `src/` modules using `#[test]`.
-- Integration tests are in `tests/integration.rs` and use `assert_cmd` and
-  `tempfile`.
-- Some indexer tests require `nix` and are marked `#[ignore]`; run them
-  explicitly when needed.
+```bash
+cargo build                      # Debug build
+cargo build --release            # Release build
+cargo build --features indexer   # Build with indexer feature (requires libgit2)
+cargo run -- <args>              # Run with arguments
+cargo test                       # Run default test suite (unit + integration)
+cargo test --features indexer    # Include indexer tests (requires libgit2; some need `nix`)
+cargo test <test_name>           # Run a single test by name
+cargo test db::                  # Run tests in a specific module
+cargo clippy --features indexer -- -D warnings   # Lint (matches CI; CI also runs the featureless variant)
+cargo fmt                        # Format code
+cargo bench                      # Run benchmarks (bloom, search, indexer)
+nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
+```
 
-## Commit & Pull Request Guidelines
+The devshell provides shortcuts for all of these (`build`, `clippy`, `fmt-check`, `run-tests`, `coverage`, ...). `ci-local` runs the exact CI sequence: fmt-check, clippy, test — all with `--features indexer`.
 
-- Commit messages are short, imperative, and title-style (e.g., "Fix CI
-  workflow").
-- PRs should include: a clear description, linked issue (if any), and the test
-  commands run.
-- Include screenshots or recordings for UI changes in `frontend/`.
+## Nix Flake Outputs
 
-## Configuration & Data Paths
+```bash
+nix build                        # Build nxv (user binary)
+nix build .#nxv-indexer          # Build with indexer feature
+nix build .#nxv-static           # Static musl build (x86_64 Linux only)
+nix build .#nxv-static-aarch64   # Static musl build (aarch64 Linux)
+nix build .#nxv-docker           # Docker image (Linux only, use --system x86_64-linux on macOS)
+nix run                          # Run nxv directly
+nix run .#nxv-indexer            # Run with indexer feature
+```
 
-- Key environment variables: `NXV_DB_PATH`, `NXV_API_URL`, `NXV_MANIFEST_URL`.
-- Default data locations are platform-specific (see `CLAUDE.md` and
-  `README.md`).
+## Architecture
 
-## Agent Notes
+### Data Flow
 
-- For deeper architecture and feature details, read `CLAUDE.md`.
+1. **Index Download** (`remote/`): User runs `nxv update` → downloads compressed SQLite DB + bloom filter from remote manifest
+2. **Search** (`db/queries.rs`): Queries go through bloom filter first (fast negative lookup), then SQLite with FTS5
+3. **Output** (`output/`): Results formatted as table (default), JSON, or plain text
+
+### Backend Abstraction (`backend.rs`, `client.rs`)
+
+The CLI transparently runs against either a local index or a remote `nxv serve` instance. `main.rs` branches on `NXV_API_URL` — if set, `ApiClient` (HTTP) is used; otherwise the local SQLite/bloom backend is used. Both implement the same backend trait, so command handlers are backend-agnostic. `search.rs` holds the search logic shared by the CLI commands and the API server handlers.
+
+### Self-Update (`self_update.rs`)
+
+There is no standalone `self-update` subcommand — `nxv update` refreshes the index first, then checks GitHub for a newer nxv release. On local installs (install.sh, manual download) the binary is replaced atomically after SHA-256 verification against the release's SHA256SUMS.txt; on managed installs (Nix, cargo, Homebrew — detected from the executable path) it only prints the matching upgrade command. Skip with `--no-self-update`; pin a specific release tag with `NXV_VERSION`.
+
+### API Server (`server/`)
+
+The `nxv serve` command runs an HTTP API server with:
+
+- REST API at `/api/v1/*` (search, package info, version history, stats)
+- Web frontend at `/` served from `frontend/` (static HTML/CSS/JS, embedded at build time)
+- OpenAPI documentation at `/docs` (generated in `server/openapi.rs`)
+- Configurable CORS support
+- In-memory runtime metrics (`server/metrics.rs`): rolling latency window, 30-minute activity buckets, uptime — all lost on restart by design
+
+### Shell Completions (`completions.rs`)
+
+`nxv completions <shell>` emits clap-generated completions; for bash/zsh/fish it appends custom functions that call the hidden `nxv complete-package` subcommand for dynamic package-name completion against the local index.
+
+### Indexer (`src/index/`, feature-gated)
+
+Note the directory is `src/index/` even though the Cargo feature is named `indexer`. The `indexer` feature enables building indexes from a local nixpkgs clone:
+
+- `git.rs`: Walks nixpkgs git history (commits from 2017+)
+- `extractor.rs`: Runs `nix eval` to extract package metadata per commit
+- `mod.rs`: Coordinates indexing with checkpointing for Ctrl+C resilience
+- `backfill.rs`: Updates missing metadata (source_path, homepage) for existing records
+  - HEAD mode: Fast extraction from current nixpkgs (may miss renamed/removed packages)
+  - Historical mode (`--history`): Traverses git to original commits for accuracy
+- `publisher.rs`: Generates compressed index files and manifest for distribution
+
+### Database Schema (`db/mod.rs`)
+
+- `package_versions`: Main table with version ranges (first/last commit dates)
+- `package_versions_fts`: FTS5 virtual table for description search
+- `meta`: Key-value store for index metadata (last_indexed_commit, schema_version)
+
+### Key Design Decisions
+
+- **Version ranges**: Instead of storing every commit where a package exists, stores (first_commit, last_commit) ranges to minimize DB size
+- **Bloom filter**: Serialized to separate file, loaded at search time for instant "not found" responses
+- **Feature gates**: Indexer code (git2, ctrlc) only compiled with `--features indexer` to keep user binary small
+
+## Dependency Management
+
+**Always use current versions.** Before adding dependencies:
+
+```bash
+cargo search <crate>           # Find latest version
+```
+
+## Environment Variables
+
+Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for tests and deployment.
+
+- `NXV_API_URL` — point the CLI at a remote `nxv serve` instead of the local DB
+- `NXV_API_TIMEOUT` — HTTP client timeout in seconds (default 30)
+- `NXV_DB_PATH` — override local SQLite path
+- `NXV_MANIFEST_URL` — override the manifest URL for `nxv update`
+- `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
+- `NXV_PUBLIC_KEY` — override the embedded minisign public key
+- `NXV_NO_SELF_UPDATE` — make `nxv update` only refresh the index, skipping the binary check
+- `NXV_VERSION` — pin the self-update to a specific release tag instead of latest
+- `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT`, `NXV_RATE_LIMIT_BURST` — `nxv serve` bind/host/rate-limit
+- `NXV_MAX_DB_CONNECTIONS`, `NXV_DB_TIMEOUT_SECS` — `nxv serve` DB concurrency cap (default 32) and per-operation timeout (default 30s)
+- `NXV_LOG_FORMAT` — set to `json` for structured `nxv serve` logs (combine with `RUST_LOG`)
+- `NXV_SECRET_KEY` — minisign secret key (path or contents) for `nxv publish` signing
+- `NXV_FRONTEND_DIR` — serve `index.html`/`app.js`/`favicon.svg` from this directory on every request instead of the embedded copy, and disable the 24h `Cache-Control` for those routes. Used by the devshell `dev` command for live frontend reload (edit → browser refresh, no rebuild; `dev` also runs cargo-watch so `src/` changes rebuild and restart the server). Unset in production.
+- `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
+
+## Data Paths
+
+The database and bloom filter are stored in platform-specific data directories:
+
+- **macOS**: `~/Library/Application Support/nxv/`
+- **Linux**: `~/.local/share/nxv/`
+
+Files:
+
+- `index.db` - SQLite database with package versions
+- `bloom.bin` - Bloom filter for fast negative lookups
+
+## Testing
+
+- Unit tests are in each module's `mod tests` section
+- Integration tests in `tests/integration.rs` use `assert_cmd` to test CLI behavior
+- Tests create temporary databases using `tempfile`
+- Some indexer tests require `nix` to be installed (marked `#[ignore]`)
+
+## Accessibility (WCAG)
+
+Frontend a11y is audited by two devshell commands:
+
+- `a11y` — static, fully offline. Runs `html5validator` against `frontend/*.html`
+  (CSS validation is skipped — vnu.jar predates Tailwind v4 oklch/`@theme`/
+  `@layer`/`color-mix`) and then `scripts/a11y_check.py frontend/index.html`.
+  The Python script enforces landmarks, form labels, alt/role on images and
+  SVGs, heading hierarchy, skip-link presence, dialog semantics, and converts
+  every oklch token in the `@theme` block to sRGB to flag fg/bg pairs below
+  WCAG 2.1 AA (4.5:1 text, 3:1 large/UI). Wired into `nix flake check` as
+  `nxv-a11y`.
+- `a11y-live` — dynamic, opt-in. Runs `pa11y-ci` via `npx` against the local
+  `nxv serve` (start it first with `dev`). Config at `frontend/.pa11yci.json`
+  covers the home page (desktop + mobile), a search-populated state, and the
+  command palette open state. Not wired into `nix flake check` — needs a
+  running server and pulls from npm on first run.
+
+## Docs Site (VitePress)
+
+The VitePress site under `website/` is managed by four devshell commands
+(they `cd website` and delegate to `bun`, which is provided in the shell):
+
+- `docs-dev` — start the local dev server (`bun run dev`). Default port is
+  5173; the site is served under `/nxv/` to match the GitHub Pages base.
+- `docs-build` — build the static site into `website/.vitepress/dist`.
+- `docs-preview` — serve the already-built site for a final look.
+- `docs-fmt` — run Prettier over `website/`.
+
+## NixOS Module
+
+A NixOS module is provided for running nxv as a systemd service:
+
+```nix
+{
+  imports = [ inputs.nxv.nixosModules.default ];
+  services.nxv = {
+    enable = true;
+    port = 8080;
+    # indexPath = "/path/to/index.db";  # Optional custom path
+  };
+}
+```
+
+## Claude Code Skill
+
+The repo ships a Claude Code skill at `.claude/skills/nxv/SKILL.md` that
+teaches Claude (and any agent that consumes the open Agent Skills standard,
+e.g. openclaw) how to drive the nxv CLI and HTTP API. When changing CLI flags,
+adding/removing subcommands, or altering JSON / API response shapes, also
+update the SKILL.md so the skill stays accurate. The user-facing guide lives
+at `website/guide/skill.md`.
+
+## Releasing
+
+**Use `/release` to prepare and execute a release.** This skill:
+
+1. Runs pre-flight checks (fmt, clippy, tests, nix flake check, clean git status)
+2. Generates release notes from git history
+3. Shows a complete summary of what will happen
+4. Asks for explicit confirmation with the version number
+5. Bumps version, updates Docker timestamp, commits, and tags
+6. CI/CD handles the rest (builds, GitHub release, crates.io, Docker, FlakeHub)
+
+## CI/CD & Index Publishing
+
+### GitHub Actions Workflows
+
+- `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
+- `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
+- `publish-index.yml`: Weekly scheduled or manual - builds the package index and uploads to `index-latest` release
+- `pages.yml`: Deploys the VitePress docs site (`website/`) to GitHub Pages on pushes to main
+- `flakehub-publish-tagged.yml`: Publishes tagged releases to FlakeHub
+
+### Publishing the Index
+
+The default manifest URL is `https://github.com/utensils/nxv/releases/download/index-latest/manifest.json`.
+
+To publish manually with signing:
+
+```bash
+nxv publish --url-prefix "https://github.com/utensils/nxv/releases/download/index-latest" --secret-key keys/nxv.key
+```
+
+Or trigger the workflow:
+
+```bash
+gh workflow run publish-index.yml
+```
+
+### Required Secrets
+
+- `CACHIX_AUTH_TOKEN`: Nix binary cache
+- `CARGO_REGISTRY_TOKEN`: crates.io publishing
+- `NXV_SIGNING_KEY`: Manifest signing (minisign secret key)
