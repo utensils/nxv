@@ -15,6 +15,7 @@
 //! file-change-driven indexer was replaced.
 
 pub mod publisher;
+pub mod releases;
 
 use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
