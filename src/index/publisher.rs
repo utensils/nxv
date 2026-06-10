@@ -371,7 +371,7 @@ fn file_sha256_with_progress<P: AsRef<Path>>(path: P, show_progress: bool) -> Re
         pb.finish_and_clear();
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
 /// Generate a compressed full index for distribution.

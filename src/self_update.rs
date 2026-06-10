@@ -200,7 +200,7 @@ fn verify_checksum(sums_content: &str, asset_name: &str, data: &[u8]) -> Result<
 
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = base16ct::lower::encode_string(&hasher.finalize());
 
     if actual != expected {
         bail!(
@@ -759,7 +759,7 @@ mod tests {
         let data = b"hello nxv";
         let mut hasher = Sha256::new();
         hasher.update(data);
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = base16ct::lower::encode_string(&hasher.finalize());
         let sums = format!("{hash}  nxv-x86_64-linux-musl\n");
         assert!(verify_checksum(&sums, "nxv-x86_64-linux-musl", data).is_ok());
     }
@@ -785,12 +785,12 @@ mod tests {
         let ha = {
             let mut h = Sha256::new();
             h.update(a);
-            format!("{:x}", h.finalize())
+            base16ct::lower::encode_string(&h.finalize())
         };
         let hb = {
             let mut h = Sha256::new();
             h.update(b);
-            format!("{:x}", h.finalize())
+            base16ct::lower::encode_string(&h.finalize())
         };
         let sums = format!("{ha}  nxv-a\n{hb}  nxv-b\n");
         assert!(verify_checksum(&sums, "nxv-a", a).is_ok());

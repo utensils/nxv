@@ -597,10 +597,7 @@ impl NixpkgsRepo {
         let head = self.repo.head()?;
         if head.is_branch() {
             // Return the full reference name
-            Ok(head
-                .name()
-                .ok_or_else(|| NxvError::Git(git2::Error::from_str("HEAD has no name")))?
-                .to_string())
+            Ok(head.name()?.to_string())
         } else {
             // Detached HEAD - return commit hash
             let commit = head.peel_to_commit()?;
@@ -835,7 +832,7 @@ impl NixpkgsRepo {
             .repo
             .worktrees()?
             .iter()
-            .filter_map(|s| s.map(String::from))
+            .filter_map(|s| s.ok().flatten().map(String::from))
             .filter(|name| name.starts_with("nxv-worktree-"))
             .collect();
 

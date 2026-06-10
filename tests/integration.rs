@@ -1322,7 +1322,7 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
     // Calculate SHA256 of compressed data
     let mut hasher = Sha256::new();
     hasher.update(&compressed);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = base16ct::lower::encode_string(&hasher.finalize());
 
     (compressed, hash)
 }
@@ -1343,7 +1343,7 @@ fn create_test_bloom_filter() -> (Vec<u8>, String) {
     // Calculate SHA256
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = base16ct::lower::encode_string(&hasher.finalize());
 
     (bytes, hash)
 }
@@ -1543,7 +1543,7 @@ COMMIT;
     // Calculate SHA256 of compressed delta
     let mut hasher = Sha256::new();
     hasher.update(&compressed_delta);
-    let delta_hash = format!("{:x}", hasher.finalize());
+    let delta_hash = base16ct::lower::encode_string(&hasher.finalize());
 
     // Start mock server
     let mut server = mockito::Server::new();
@@ -2347,11 +2347,11 @@ fn test_full_delta_update_workflow() {
 
     let mut initial_db_hasher = Sha256::new();
     initial_db_hasher.update(&initial_db_compressed);
-    let initial_db_hash = format!("{:x}", initial_db_hasher.finalize());
+    let initial_db_hash = base16ct::lower::encode_string(&initial_db_hasher.finalize());
 
     let mut initial_bloom_hasher = Sha256::new();
     initial_bloom_hasher.update(&initial_bloom_data);
-    let initial_bloom_hash = format!("{:x}", initial_bloom_hasher.finalize());
+    let initial_bloom_hash = base16ct::lower::encode_string(&initial_bloom_hasher.finalize());
 
     // Initial manifest
     let initial_manifest = serde_json::json!({
@@ -2441,7 +2441,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
 
     let mut delta_hasher = Sha256::new();
     delta_hasher.update(&delta_compressed);
-    let delta_hash = format!("{:x}", delta_hasher.finalize());
+    let delta_hash = base16ct::lower::encode_string(&delta_hasher.finalize());
 
     // Create updated bloom filter (contains both firefox and nodejs)
     let updated_bloom_data = {
@@ -2453,7 +2453,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
 
     let mut updated_bloom_hasher = Sha256::new();
     updated_bloom_hasher.update(&updated_bloom_data);
-    let updated_bloom_hash = format!("{:x}", updated_bloom_hasher.finalize());
+    let updated_bloom_hash = base16ct::lower::encode_string(&updated_bloom_hasher.finalize());
 
     // New server for phase 2 (recreate mocks)
     drop(_manifest_mock);
