@@ -25,8 +25,10 @@ clap_complete = "4.6"
 # Database
 rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 
-# Git (dev/indexer only, feature-gated)
-git2 = { version = "0.21", optional = true }
+# Indexer-only deps (feature-gated): brotli for packages.json.br snapshots,
+# quick-xml for the S3 ListObjectsV2 release listing. Both pure Rust.
+brotli = { version = "8.0", optional = true }
+quick-xml = { version = "0.40", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -120,7 +122,7 @@ harness = false
 
 [features]
 default = []
-indexer = ["git2", "ctrlc"]  # Enable indexer functionality
+indexer = ["ctrlc", "brotli", "quick-xml"]  # Enable indexer functionality
 
 # Release profile optimizations
 [profile.release]
