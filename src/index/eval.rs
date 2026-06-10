@@ -227,13 +227,16 @@ mod tests {
     fn test_eval_real_2018_release() {
         let s3 = S3Client::new(crate::index::releases::DEFAULT_BASE_URL).unwrap();
         let entries =
-            ingest_nix_env_release(&s3, "nixpkgs/", "nixpkgs-18.03pre119524.a124425fa6a").unwrap();
+            ingest_nix_env_release(&s3, "nixpkgs/", "nixpkgs-18.03pre114401.017561209e").unwrap();
         assert!(entries.len() > 10_000, "got {} entries", entries.len());
         assert!(entries.iter().any(|e| e.attribute_path == "firefox"));
+        // 2018-era nix-env recursion covers python/perl/ocaml sets (~50%
+        // dotted attrs) but NOT haskellPackages (no recurseForDerivations
+        // there until later; the optional -A haskellPackages pass covers it).
         assert!(
             entries
                 .iter()
-                .any(|e| e.attribute_path.starts_with("haskellPackages."))
+                .any(|e| e.attribute_path == "python27Packages.requests")
         );
     }
 }
