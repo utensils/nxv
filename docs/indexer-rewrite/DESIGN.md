@@ -1,260 +1,393 @@
 # nxv Indexer v2: Design Specification
 
-> Driven by [ANALYSIS.md](./ANALYSIS.md). Status: draft for review.
+> Driven by [ANALYSIS.md](./ANALYSIS.md). Revision 2 — incorporates the
+> empirical verification sweep (S3 ground truth, pre-2021 eval testing,
+> clone checks, codebase impact scan) and a three-judge design review.
 > Hard requirements: (1) nxv stays a single binary — no external tool
-> dependencies beyond `nix` itself (and `nix` only for the pre-2021 backfill);
-> (2) index builds must surface missing-package anomalies early and loudly.
+> dependencies beyond `nix` itself (and `nix` only for eval-based paths);
+> (2) index builds must surface missing-package anomalies early and loudly;
+> (3) no user-visible capability regresses; (4) the index stays current
+> (≤ hours behind nixpkgs master in steady state).
 
 ## 1. Core model
 
-**Observation-based snapshot indexing.** Every row in the index is backed by
-real observations: "(attr, version) was present in channel release R at
-commit C". No file→attr inference, no range stamping, no "no evaluation =
+**Observation-based snapshot indexing.** Every row is backed by real
+observations: "(attr, version) was present in channel release R at commit
+C". No file→attr inference, no range stamping, no "no evaluation =
 unchanged". The unit of work is a **channel release**, not a git commit.
-
-Two ingestion eras:
 
 | Era | Source | Mechanism | Nix eval? |
 |---|---|---|---|
-| ~late 2020 → today | `packages.json.br` per release from releases.nixos.org (S3), multi-channel (§2) | download → stream brotli → stream JSON parse | **No** |
-| 2017 → ~late 2020 | `nixexprs.tar.xz` per release from the same S3 dirs | `nix-env -f <tarball> -qaP --json --meta` in recycled subprocesses | Yes (a few hundred runs, one-time) |
-| master HEAD (opt-in `--head-eval`, §2a) | GitHub tarball of master HEAD | chunked recursive extraction in memory-capped subprocesses | Yes (only when channels lag) |
+| 2020-03-27 → today | `packages.json.br` per release (S3), multi-channel | download → stream brotli → stream JSON parse | **No** |
+| 2016-09-28 → 2020-03-27 | `nixexprs.tar.xz` per release (same S3 dirs) | `nix-env -f <tar> -qaP --json --meta` in subprocesses | Yes (~1,283 releases, one-time) |
+| master HEAD (opt-in `--head-eval`) | GitHub tarball of master HEAD | chunked recursive extraction in memory-capped subprocesses | Yes (only when channels lag) |
 
-Both eras need **no git clone at all**. The `git2` dependency is dropped from
-the indexer feature entirely.
+Verified facts this rests on (see ANALYSIS appendix + verification sweep):
+- `packages.json.br` exists for **2,866/2,866** releases from
+  `nixpkgs-20.09pre218523.4a3f9aced7f` (2020-03-27) to today — zero gaps,
+  14.6 GB compressed total (2.7→9.8 MB each; 71→381 MB decompressed).
+- The nix-env era (1,283 releases back to 2016-09-28) evaluates **cleanly
+  with current Nix** — one recipe, no old-Nix fallbacks (§6).
+- Channel commits are ancestors of `origin/master` (226/226 verified) and
+  Hydra-built — emitted `nix shell nixpkgs/<commit>#pkg` commands hit the
+  binary cache (user-facing upgrade over arbitrary master commits).
+- nix-env output is NOT top-level-only: it auto-recurses
+  `recurseForDerivations` sets (~50–60% dotted attrs in every era).
+- Aliases are never present in either source (`allowAliases = false`);
+  darwin-only and unfree packages ARE present with correct `meta.platforms`.
+- Channel-granularity capture: 26/27 (96%) of fast-mover master versions in
+  a 6-month thunderbird/firefox/linux/nodejs basket; the only real miss was
+  firefox 141.0.2 (~1.9-day lifetime). thunderbird 144.0 **never existed on
+  master** (a single-commit `143.0.1 -> 144.0.1` double-jump) — no design
+  can index it, and its absence is a *negative* regression fixture.
 
-Why this is correct where the old design was not:
-- Every stored commit is a real channel commit at which the version existed
-  (and is Hydra-built, so `nix shell nixpkgs/<commit>#pkg` hits the binary
-  cache — a user-facing upgrade over arbitrary master commits).
-- Wrapper/inherited-version packages (`nh`) appear in every snapshot —
-  unmissable by construction.
-- Nested package sets (issue #5) are already enumerated in `packages.json`
-  (144k attrs) — no recursive eval cost.
-- A failed/missing release stays `pending` in the DB and is retried next
-  run — gaps self-heal instead of being checkpointed past.
+### Range semantics (explicit)
 
-Known tradeoff: versions that lived shorter than one channel advance
-(~½–1 day on nixpkgs-unstable) are not observed. This is the same tradeoff
-NixHub makes; an optional later phase can refine with per-file git log. The
-old indexer's *theoretical* per-commit granularity produced 4-month holes in
-practice.
+A row means: **(attr, version) was observed at `first_commit` and at
+`last_commit`; presence at interior commits is NOT guaranteed.** A version
+that disappears and later reappears (revert, security rollback, attr reuse)
+collapses into one row spanning the interregnum — endpoints are real
+observations, the interior is interpolation. This is accepted and must be
+stated in user docs, API docs, and SKILL.md. The primary use case — "give me
+a commit that has version X" — always gets a true endpoint.
 
-## 2. Data sources
+## 2. Data sources & enumeration
 
-- **Release enumeration:** S3 ListObjectsV2 on `nix-releases.s3.amazonaws.com`
-  (public, no auth). Each release dir contains `git-revision` (full 40-char
-  hash), `packages.json.br` (post-2020), `nixexprs.tar.xz`.
-- **Multi-channel ingestion** (one pipeline, `releases.channel` column):
-  - `nixpkgs/` → **nixpkgs-unstable**: the historical spine — longest
-    unbroken S3 history, most packages, ~1–2 advances/day.
-  - `nixos/unstable-small/` → **nixos-unstable-small**: the currency channel —
-    minimal Hydra gating, typically **hours behind master** (measured
-    2026-06-09: 9h behind, vs 1.4d for nixpkgs-unstable and 3.6d for
-    nixos-unstable). Ingested from the point its packages.json exists.
-  - Observations from all channels merge into the same widen-only rows; a
-    version is "current" the moment ANY channel observes it.
-- **Cross-check (one-time):** gsc.io channel history for pre-S3-era advance
-  dates if S3 listing has holes for 2017–2018.
-- Hydra's API is explicitly NOT used (slow/unreliable, verified).
+- **S3 ListObjectsV2** on `nix-releases.s3.amazonaws.com` (public). Channels:
+  - `nixpkgs/` → **nixpkgs-unstable**: historical spine (4,149 usable
+    releases, 2016-09-28 → today, ~1.0–1.5 advances/day, stalls up to
+    ~7 days recently / 17 historically).
+  - `nixos/unstable-small/` → **nixos-unstable-small**: currency channel,
+    typically **hours behind master** (measured 9h vs 1.4d for
+    nixpkgs-unstable). Ingested from where its packages.json exists.
+- **Source selection is a per-release probe**: try `packages.json.br`,
+  on 404 fall back to `nix_env` — never decide by date or prefix (the
+  boundary is mid-`20.09pre`, and 198 releases were renamed `21.03pre`
+  before becoming `21.05pre`).
+- **Parsing requirements** (all verified the hard way):
+  - Event-based XML parsing (quick-xml) per `<Contents>` block with
+    optional elements — post-Feb-2025 objects embed
+    `<ChecksumAlgorithm>`/`<ChecksumType>` between ETag and Size; a
+    positional regex silently drops all 482 recent releases. Regression
+    fixture with a post-2025 block is mandatory.
+  - Release date = the `git-revision` object's LastModified (the flat HTML
+    stub keys ceased 2025-02-20). S3 LastModified lags the commit's
+    committer-date by hours (~15.5h measured) — see flake-epoch note in §8.
+  - Skip-list: 28 ancient dirs (nixpkgs-0.x, `1.0preNNN_shortrev` with
+    underscore, 14.04, no-`pre` formats), 7 re-uploaded `16.09pre` dirs
+    (LastModified 2020-02-26 ≠ release date), and 18 `*-darwin/` channel
+    CommonPrefixes.
+  - Order releases by **S3 LastModified or numeric commit-count** — never
+    lexicographic (`pre1001117` sorts before `pre880076`).
+  - `git-revision` is always full 40-char; release-name shortrev drifts
+    7→11→12 chars; `preNNNNNN == git rev-list --count` (free ingest-time
+    sanity check).
+- gsc.io cross-check: **dropped** — S3 is continuous from 2016-09 (max
+  pre-2020 gap 23 days).
+- Hydra's API is NOT used (slow/unreliable, verified).
 
 ## 2a. Currency guarantee ("always current")
 
-Requirement: the published index must track nixpkgs as closely as the old
-master-walking design intended (CI cadence: 6h).
-
-- Steady state: each CI run ingests every new advance from both channels.
-  Staleness ≈ unstable-small lag (hours) + scheduling delay. This matches or
-  beats the old system, which was 6h-cadence on master *when healthy* and
-  silently months stale when not.
-- Channel-stuck scenario (Hydra blocked for days): `--head-eval` (optional
-  flag, on in CI) closes the gap — resolve master HEAD via the GitHub API,
-  download the GitHub tarball (no git needed), run the salvaged recursive
-  extraction expression in memory-capped subprocess chunks, and upsert those
-  observations at the real master commit. Skipped when a channel observation
-  is newer than N hours (default 24), so it costs nothing in steady state.
-- The monitor reports "index head lag vs master" (commit dates) at the end of
-  every run, and `--strict` fails CI if lag exceeds a threshold (default 72h)
-  so stuck-channel periods page us instead of rotting silently.
+- Steady state: each CI run (6h cadence) ingests new advances from both
+  channels; staleness ≈ unstable-small lag (hours). Most 6h runs see 0–1 new
+  releases and finish in minutes.
+- Channel-stuck periods: `--head-eval` (on in CI) resolves master HEAD via
+  the GitHub API, downloads the GitHub tarball (no git), runs the salvaged
+  recursive extraction expression in memory-capped subprocess chunks, and
+  upserts observations at the real master commit. Skipped while any channel
+  observation is < 24h old, so it costs nothing in steady state.
+- The monitor reports **index-head lag vs master** every run; `--strict`
+  fails CI when lag > 72h. Staleness pages us; it never rots silently.
 
 ## 3. Database schema (v4)
 
 ```sql
 CREATE TABLE package_versions (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,                -- pname (fallback: parsed name)
+    name TEXT NOT NULL,                -- top-level: pname; nested: final attr segment (see below)
     version TEXT NOT NULL,
-    attribute_path TEXT NOT NULL,      -- full dotted path (python313Packages.requests)
-    first_commit_hash TEXT NOT NULL,   -- first release commit observed containing it
+    attribute_path TEXT NOT NULL,      -- full dotted path, segments unquoted
+    first_commit_hash TEXT NOT NULL,
     first_commit_date INTEGER NOT NULL,
-    last_commit_hash TEXT NOT NULL,    -- last release commit observed containing it
+    last_commit_hash TEXT NOT NULL,
     last_commit_date INTEGER NOT NULL,
     description TEXT, license TEXT, homepage TEXT,
     maintainers TEXT, platforms TEXT, source_path TEXT,
     known_vulnerabilities TEXT,
     UNIQUE(attribute_path, version),
-    CHECK(first_commit_date <= last_commit_date)
+    CHECK(first_commit_date <= last_commit_date)   -- fresh DBs only; upsert enforces otherwise
 );
 
 CREATE TABLE releases (
     id INTEGER PRIMARY KEY,
-    channel TEXT NOT NULL,             -- "nixpkgs-unstable"
-    release_name TEXT NOT NULL,        -- "nixpkgs-26.05pre880076.f3007fa61f17"
-    commit_hash TEXT NOT NULL,         -- full 40-char from git-revision
-    release_date INTEGER NOT NULL,     -- S3 LastModified of the release
-    source TEXT NOT NULL,              -- packages_json | nix_env
-    status TEXT NOT NULL,              -- pending | ingested | failed | skipped
-    attr_count INTEGER,                -- packages observed (monitoring)
-    error TEXT,                        -- last failure reason
+    channel TEXT NOT NULL,
+    release_name TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,          -- full 40-char from git-revision
+    commit_count INTEGER,               -- preNNNNNN from the name
+    release_date INTEGER NOT NULL,      -- git-revision object LastModified
+    source TEXT NOT NULL,               -- packages_json | nix_env | head_eval
+    status TEXT NOT NULL,               -- pending | ingested | failed | skipped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at INTEGER,
+    attr_count INTEGER,
+    error TEXT,
     ingested_at INTEGER,
     UNIQUE(channel, release_name)
 );
 ```
 
-- `package_versions` keeps its column set → the query/server/output layers
-  keep working with minimal changes. The UNIQUE key tightens from
-  `(attr, version, first_commit_hash)` to `(attr, version)` (slim model).
-- Writes go through an **order-agnostic widen-only upsert** (CASE-WHEN
-  bounds extension, salvaged from `feature/reverse-indexing`): correct under
-  any ingestion order and parallelism. Metadata updates prefer the *newer*
-  observation (overwrite when the incoming snapshot is newer than
-  `last_commit_date`, not COALESCE).
-- FTS5 table unchanged. Bloom filter gains **full dotted attribute paths**
-  (and final path segments, so `requests` still pre-checks true).
-- `meta`: `schema_version = 4`; per-channel watermark is derived from
-  `releases` (max ingested release), NOT a single fragile
-  `last_indexed_commit` hash.
+- **Writes**: order-agnostic widen-only upsert (CASE-WHEN bounds extension;
+  `ON CONFLICT(attribute_path, version)`); metadata fields update only when
+  the incoming observation's date ≥ the row's `last_commit_date` (newest
+  observation wins; never COALESCE-flip names backward).
+- **name normalization** (upstream pname conventions drifted ~2024:
+  `python3.10-requests` → `requests`): top-level attrs store pname verbatim;
+  nested attrs store the **final attrpath segment** (quotes stripped) —
+  deterministic regardless of ingestion order. Note: production v3 rows
+  store full name-with-version for ~27k rows; v4 is a behavior improvement
+  to document.
+- **FTS5**: AFTER UPDATE trigger gains
+  `WHEN (old.name IS NOT new.name OR old.description IS NOT new.description)`
+  so pure range-widening never touches FTS. For `--full`/catch-up ingest,
+  triggers are dropped and FTS is rebuilt once at Finish
+  (`INSERT INTO package_versions_fts(package_versions_fts) VALUES('rebuild')`).
+  Measured: 28× writer slowdown without this.
+- **Bloom filter**: full dotted attribute paths (quoted segments stored
+  unquoted). Leaf-segment entries are NOT added (no consumer in the query
+  path; leaf-name resolution is a possible fast-follow, see §12).
+- **meta**: `schema_version=4`. The indexer **keeps writing**
+  `last_indexed_commit` (= newest ingested release commit) and
+  `last_indexed_date` — they are load-bearing for `manifest.latest_commit`,
+  the `nxv update` UpToDate check, `/health`, `/api/v1/stats`, and the
+  frontend stats panel. Planning watermarks derive from `releases`.
+- **Migration v3→v4 (local DBs)**: `dedupe_ranges()` (production DB has
+  1,073 duplicate (attr,version) groups; without dedupe the new upsert fails
+  at statement-prepare), then
+  `CREATE UNIQUE INDEX uq_attr_version ON package_versions(attribute_path, version)`,
+  then create `releases`, bump meta. No table rebuild; the stale 3-col
+  UNIQUE stays as a redundant index; the CHECK applies to fresh DBs only.
+- Deleted: `load_open_ranges_at_commit`, `update_package_range_end`,
+  `idx_packages_last_commit_hash`, the dead delta machinery
+  (`generate_delta_pack`, `db/import.rs` delta path — no delta has ever
+  been published).
 
 ## 4. Pipeline architecture (src/index/)
 
 ```
-mod.rs        coordinator: plan → ingest (parallel) → monitor (in-order) → publish-ready
-releases.rs   S3 listing/pagination, release parsing, git-revision fetch, plan diffing
-snapshot.rs   one release → SnapshotData: streaming .br download+decompress+JSON parse
-eval.rs       eval-based ingestion: pre-2021 nix-env over nixexprs.tar.xz AND the
-              --head-eval master-tarball path; recycled memory-capped subprocesses
-monitor.rs    data-quality gates: counts, sentinels, births/deaths, head-lag, report
+mod.rs        coordinator: plan → ingest (parallel) → gate → write → finish
+releases.rs   S3 listing/pagination (quick-xml), release parsing, skip-lists,
+              git-revision fetch, plan diffing, retry/backoff state
+snapshot.rs   one release → parsed snapshot: streaming .br download+decompress+
+              JSON parse (serde_json MapAccess visitor; 381 MB raw never
+              materialized), era-tolerant field handling (§5)
+eval.rs       nix-env ingestion (pre-2020 era) + --head-eval master tarball:
+              recycled memory-capped subprocesses, batch bisection on failure
+monitor.rs    gates BEFORE write: count ladder, sentinels, births/deaths,
+              stall advisory, head-lag; end-of-run report (stdout + JSON)
 ```
 
 Flow per run (`nxv index`):
-1. **Plan**: list S3 → upsert unknown releases as `pending` → work list =
-   all `pending` + `failed` releases (bounded retries), oldest→newest.
-2. **Ingest**: N parallel workers (default `min(4, cores)`), each:
-   download `packages.json.br` (~10 MB) → stream-decompress (brotli crate,
-   pure Rust) → stream-parse (`serde_json` custom `MapAccess` visitor — the
-   378 MB JSON is never materialized) → fold to
-   `HashMap<attr, {pname, version, meta…}>` (~150–250 MB peak per worker,
-   dropped after upsert).
-3. **Write**: single writer thread; batched upserts (≤50k rows per
-   transaction); workers hand off via bounded channel (backpressure, no
-   unbounded accumulators anywhere).
-4. **Monitor** (in-order by release, buffered like the salvaged seq-numbered
-   BTreeMap): see §5. A release is marked `ingested` only after its rows are
-   committed AND its monitors pass; failures mark `failed` + reason and do
-   NOT advance anything.
-5. **Finish**: rebuild bloom, print/write coverage report.
+1. **Plan**: list S3 per channel → upsert unknown releases `pending` →
+   work list = `pending` + retryable `failed` (skip unless
+   `now − last_attempt_at > base × 2^attempts`; after 5 attempts →
+   terminal `skipped`, resurrectable via `--retry-failed`), ordered oldest→
+   newest by release_date.
+2. **Ingest** (N parallel workers, default `min(4, cores)`): fetch + parse
+   one release into `HashMap<attr, Entry>`. Any mid-stream brotli/JSON error
+   discards the whole map — partial snapshots never reach the writer.
+3. **Gate** (in-order by release, seq-numbered buffer): monitors run on the
+   parsed map BEFORE any write (§7). Gate-failed releases are marked
+   `failed` and their data is dropped — a bad snapshot can never pollute
+   `package_versions`.
+4. **Write**: gate-passed snapshots feed a **multi-release range
+   aggregator** keyed (attr, version) that merges K consecutive releases
+   per flush group (K≈64 for full/catch-up, K=1 incremental) — row writes
+   become O(distinct pairs + metadata changes), not O(alive attrs ×
+   releases) (measured: ~63 new pairs per advance vs 144k alive rows).
+   Single writer thread, bounded channel, ≤50k rows per transaction;
+   releases in a group are marked `ingested` in the same transaction as
+   their rows.
+5. **Finish**: FTS rebuild (if triggers were dropped), bloom rebuild, write
+   meta watermarks, print/write the coverage report.
 
 Interrupt safety: ctrlc flag checked between releases; a killed run leaves
-`pending`/`failed` rows that the next run picks up. There is no checkpoint
-hash to strand.
+`pending`/`failed` rows that the next run picks up. No checkpoint hash
+exists to strand.
 
-The pre-2021 era (`nxv index --backfill-evals`) uses the same plan/monitor
-loop but `eval.rs` ingestion: download `nixexprs.tar.xz`, run
-`nix-env -f <tar> -qaP --json --meta` (top-level only — nested sets aren't
-reasonably evaluable pre-2020), one subprocess per release (process exit =
-guaranteed memory reclaim — no watchdogs), concurrency sized by RAM
-(default 2), failure → `failed` + retry with `--keep-going` semantics.
+HTTP policy: one shared reqwest client; explicit connect/read timeouts;
+3–5 retries with exponential backoff + jitter on 5xx/timeouts;
+`User-Agent: nxv-indexer/<version>`; ≤4 concurrent S3 downloads.
 
-## 5. Monitoring (hard requirement: catch missing packages EARLY)
+## 5. Snapshot parser tolerance (verified per-era)
 
-Per-release gates, evaluated in chronological order during the run:
-- **Count floor**: `attr_count >= 0.90 × previous ingested release's count`
-  (and an absolute floor: 10k pre-2021, 80k post-2021). Violation ⇒ release
-  marked `failed`, loud warning; `--strict` (CI) exits non-zero.
-- **Sentinels**: configurable list with applicability windows, checked per
-  release: `firefox` (always), `thunderbird` (always), `nh` (≥2024-01),
-  `python3Packages.requests`-style nested attr (≥2021). Missing sentinel ⇒
-  same failure path. Defaults embedded; extensible via flag.
-- **Births/deaths accounting**: per release, log
-  `+births −deaths Δnet (total)`; deaths >5% of total in one advance ⇒
-  warning with a sample of the dead attrs (legitimate mass-renames happen,
-  e.g. python3xPackages flips, so advisory unless `--strict`).
-- **End-of-run report** (stdout + `--report report.json`): releases ingested/
-  failed, total attrs at HEAD vs search.nixos.org floor, top gaps, sentinel
-  table, mass-death events. CI publishes this as a job summary.
-- **Regression fixtures** (tests): thunderbird 142.0 must not span
-  2025-08→2026-01; `nh` present; nested attr present + bloom-resolvable.
+- Envelope `{"version": 2, "packages": { <attrpath>: {name, pname, version,
+  system, meta} }}` in ALL eras — assert `version == 2`.
+- Attr keys: ~83% dotted in every era, ≤6 dots deep; non-identifier segments
+  are Nix-quoted inside the key (`aspellDicts."or"`, `emacsPackages."@"`) —
+  unquote segments for storage.
+- `license`: dict | list[dict] | str | list[str] | empty list. `homepage`:
+  str, occasionally a list (take first). `description`/`license`/`platforms`/
+  `position` absent on a large minority of entries.
+- `meta.position` → source_path; strip the `/build/source/` prefix
+  (2020-era files only) and the `:line` suffix.
+- Ignore unknown meta fields (2023 added outputName/outputs; 2026 added
+  identifiers/teams/maintainersPosition).
+- `knownVulnerabilities`: list[str], present in all eras.
+- nix-env era output shape `{attr: {name, pname, version, system, meta}}`
+  — same handling.
 
-## 6. CLI surface & feature parity
+## 6. Eval recipes (single-binary compatible)
 
-**Hard requirement: no user-visible feature regresses.** Parity matrix:
+- **Pre-2020 era**: extract `nixexprs.tar.xz`, run
+  `nix-env -f <dir> -qaP --json --meta` with
+  `NIXPKGS_ALLOW_{UNFREE,BROKEN,INSECURE,UNSUPPORTED_SYSTEM}=1` and
+  **mandatory `--argstr system x86_64-linux`** (native eval of pre-2020
+  nixpkgs fails on aarch64-darwin hosts). Verified: current Nix evaluates
+  every era 2016–2020 with this one recipe; ~15–25 s and 0.5–1.4 GB RSS per
+  release → default 4 workers, full backfill **~1.5–3 h** (not days).
+  Optional `-A haskellPackages` second pass (~65 s/release) for fuller
+  pre-2020 nested coverage — off by default.
+- **--head-eval**: GitHub tarball + the salvaged recursive extraction
+  expression (embedded; proven 119k-attr coverage) in chunked subprocesses;
+  subprocess exit is the memory reclamation mechanism — no watchdogs, no
+  rlimits, no in-process evaluator.
+
+## 7. Monitoring (hard requirement: catch missing packages EARLY)
+
+All gates run BEFORE the snapshot's rows are written (§4 step 3).
+
+- **Count floor** = max of:
+  - *year ladder* (absolute backstop, from measured totals 61k/69k/87k/101k/
+    145k for 2020/2021/2022/2023/2026; nix-env era ladder from measured
+    counts, floor 10k at 2016): a table in code, interpolated by year;
+  - *rolling baseline*: 0.90 × max(attr_count) over the last 10 `ingested`
+    releases of the **same channel AND same source era** (prevents
+    ratcheting-down; baseline can't decay just because regressions passed).
+  - First-ever release of a channel/era: absolute floor only.
+  - The one-time +≈33k birth event at the 2020-03-27 era boundary is
+    whitelisted.
+- **Sentinels** (pattern-based, with applicability windows — verified
+  against real data): `firefox` (always), `thunderbird` (always),
+  regex `python3\d+Packages\.requests` (entire history — the unversioned
+  `python3Packages.*` set exists in NO era), `nh` (≥ 2024-01). Extensible
+  via flag. Missing sentinel ⇒ gate failure.
+- **Births/deaths accounting** per release: log `+births −deaths Δnet
+  (total)`; deaths > 5% in one advance ⇒ warning with samples (mass renames
+  are legitimate; advisory unless `--strict`).
+- **Cumulative drift**: HEAD attr count vs rolling max and vs the
+  search.nixos.org package-count floor — catches slow leaks that per-release
+  ratchets miss.
+- **Stall handling**: advance gaps are NOT anomalies (6.6-day stalls occur
+  while healthy); "no new release in >10 days" is an advisory. Head-lag
+  >72h under `--strict` fails CI (§2a).
+- **Report**: stdout summary + `--report report.json` (releases
+  ingested/failed/skipped, counts, sentinel table, births/deaths events,
+  head lag); CI publishes it as a job summary.
+- **Regression fixtures** (tests, served from a local mock S3): thunderbird
+  142.0 must NOT span 2025-08→2026-01; thunderbird 143.0 present;
+  thunderbird **144.0 ABSENT** (never existed on master); `nh` present;
+  a `python313Packages.*` attr present and bloom-resolvable.
+
+## 8. Command generation under observation dates
+
+- `predates_flakes()` (src/db/queries.rs) and its duplicate in
+  frontend/app.js compare against the flake-epoch commit date. Observation
+  dates lag commit dates (hours–17 days), so the boundary must be replaced
+  by the **first channel release whose tree contains flake.nix**
+  (determined once during implementation, hardcoded alongside FLAKE_EPOCH)
+  — otherwise early-2020 rows emit flake refs against pre-flake commits.
+- Attr segments that required quoting in Nix (44 keys currently) must be
+  re-quoted in emitted commands (`nixpkgs/<hash>#aspellDicts."or"`), in both
+  CLI and frontend.
+- Legacy (pre-flake) `fetchTarball` commands may need
+  `{ system = "x86_64-linux"; }` pinning on darwin hosts — document in the
+  website guide; optionally emit the pinned form when `platforms` shows no
+  darwin support.
+
+## 9. CLI surface & feature parity
+
+**No user-visible capability regresses.** Parity matrix:
 
 | Current feature | v2 fate |
 |---|---|
-| `search` / `info` / `history` / `stats` / `serve` / API / web UI / completions | Unchanged (same table shape; `stats` additionally reports release coverage + head lag) |
-| All metadata fields (description, license, homepage, maintainers, platforms, source_path, known_vulnerabilities) | Kept — sourced from packages.json `meta` (position → source_path); fields missing from old snapshots stay NULL exactly as today |
-| Insecure-package command prefixes (`NIXPKGS_ALLOW_INSECURE`) | Unchanged (driven by known_vulnerabilities) |
-| FTS5 name/description search | Unchanged |
-| Bloom fast-negative lookup | Kept, extended with dotted attr paths + final segments |
-| `update` (delta downloads, minisign verify, self-update) | Unchanged (verify delta generation in publisher against slim schema during implementation) |
-| `publish` artifacts/manifest | Unchanged format, schema_version=4, min_schema_version=4 (old clients get the existing "please upgrade" path) |
-| `dedupe` | Kept (still repairs old DBs; new schema can't produce duplicates) |
-| `backfill`, `reset` (maintainer tools operating on a local clone) | Kept as-is (git-based; unaffected by the new index pipeline) |
-| `index --full`, `--since`, `--until` | Kept (same semantics over releases instead of commits) |
-| Index freshness (6h CI cadence on master) | Met or beaten via unstable-small + `--head-eval` (§2a) |
+| `search` / `info` / `history` / `stats` / `serve` / API / web UI / completions | Unchanged surface; `stats` adds optional release-coverage block (serde(default) fields, v3-DB tolerant); search gains depth-first ranking + SQL-level LIMIT (§12) |
+| All metadata fields | Kept — verified present in BOTH source eras (incl. knownVulnerabilities and position) |
+| Insecure-package command prefixes | Unchanged |
+| FTS5 name/description search | Unchanged behavior (name column becomes pname/leaf — strictly better; documented) |
+| Bloom fast-negative lookup | Kept, learns dotted paths automatically |
+| `update` (full download, minisign verify, self-update) | Unchanged; delta code path was dead (never published) and is removed |
+| `publish` | Unchanged format; **min_version now defaults to SCHEMA_VERSION in code** (§10) |
+| `dedupe` | Kept — it is the v3→v4 migration primitive and still repairs old DBs |
+| `backfill`, `reset` | Retired as visible commands (their *purpose* — repairing missing metadata, resetting a checkout — no longer exists: metadata is complete by construction and no checkout is used). Hidden deprecation stubs explain this for one release cycle |
+| `index --full/--since/--until` | Kept (same semantics over releases) |
+| Index freshness | Met or beaten (§2a) |
 
-- `nxv index` — snapshot indexing (new default). `--channel` (repeatable),
-  `--since`, `--until`, `--jobs`, `--strict`, `--report <path>`,
-  `--retry-failed`, `--head-eval`, `--full`. `--nixpkgs-path` is
-  accepted-but-warned (no longer needed) for one release cycle.
-- `nxv index --backfill-evals` — one-time 2017→2020 era (requires `nix`).
+`nxv index` flags: `--channel` (repeatable; default both), `--since`,
+`--until`, `--jobs`, `--strict`, `--report <path>`, `--retry-failed`,
+`--head-eval`, `--backfill-evals`, `--full`. `--nixpkgs-path` accepted as a
+hidden no-op with a deprecation warning for one release cycle.
 
-## 7. Dependency changes
+## 10. Migration & rollout sequencing (ordered, mandatory)
 
-- **Keep**: `git2` (still used by the unchanged `backfill`/`reset`
-  maintainer commands; statically linked, so the single-binary property
-  holds). The new index pipeline itself does not touch git.
-- **Add**: `brotli` (pure-Rust decompressor), `quick-xml` (S3 ListObjects
-  XML; tiny, pure Rust). Both compile into the single static binary.
-- reqwest (existing) does all HTTP, including the GitHub tarball for
-  `--head-eval`.
+1. **Code**: SCHEMA_VERSION=4, MIN_READABLE_SCHEMA=4 (v3 DBs remain
+   readable: their effective min is 3 ≤ 4). `nxv publish` **defaults
+   `min_version` to SCHEMA_VERSION and refuses to publish a schema-4 DB
+   with min_version unset or < 4** (today the doc claims this default but
+   the code passes None — publishing v4 ungated would let every old
+   client's `nxv update` overwrite its working v3 index and then fail to
+   open it: verified landmine L1).
+2. **cmd_update fix**: on IncompatibleIndex, still run the self-update
+   check before propagating, so old local-install binaries are told to (and
+   can) upgrade in one step.
+3. **Release the new binary first** (reads v3 and v4; index format
+   unchanged at this point). Wait an adoption window (1–2 weeks).
+4. **Initial v4 full rebuild runs out-of-band** (locally — hours for the
+   packages.json era + ~2–3h backfill), validated with the §7 report +
+   fixtures, then published manually with min_version=4.
+5. publish-index.yml flips to the new flow (§11) and passes
+   `--min-version 4` explicitly (belt-and-braces).
+6. Update issues #5/#21/#23, AGENTS.md, SKILL.md, website guide.
+7. Keep the old DB for diffing; `manifest.version` stays at its current
+   value (it gates manifest *structure*, not DB schema).
 
-## 8. CI (publish-index.yml)
+## 11. CI (publish-index.yml)
 
-Massively simplified: no nixpkgs clone, no clone-depth logic, no GitHub
-compare API. Steps: download existing index → `nxv index --strict --report` →
-publish → upload report to job summary. Schedule unchanged (6h). The
-mass-extinction/dead-scheduler detectors run as part of `--strict`.
+Steps: download existing index → `nxv index --strict --report` → **publish
+only when** (a) ≥1 release was ingested this run, AND (b) no
+pending/failed release older than the published watermark exists, AND (c)
+monitors are green. `--allow-partial-publish` exists as an operator
+override. Most 6h runs ingest 0–1 releases and exit in ~2–3 min without
+republishing the artifact. No nixpkgs clone, no clone-depth logic, no
+GitHub compare API. `nxv stats` grep-scraping is replaced by the
+`--report` JSON.
 
-## 9. Performance & memory budget
+## 12. Performance, size & search budgets
 
 | Operation | Budget |
 |---|---|
-| Full rebuild post-2020 (~2k releases, ~20 GB transfer) | hours, parse-bound, 4 workers × ~250 MB + writer ≈ **<1.5 GB RSS** |
-| Backfill 2017–2020 (~300–900 nix-env runs) | 1–2 days one-time, 2 workers × ~2.5 GB ≈ **<6 GB RSS** |
-| Incremental (CI, ~2 advances per 6h window) | **seconds–minutes**, <500 MB |
-| Memory policy | bounded channels + per-release maps dropped after write + subprocess-exit reclamation. No watchdogs, no rlimits, no in-process evaluator. |
+| Full rebuild, packages.json era (~2,866 releases, ~14.6 GB) | hours, parse-bound; 4 workers × ~250 MB + writer + aggregator ≈ **<2 GB RSS** |
+| Backfill 2016–2020 (~1,283 nix-env runs, 15–25 s each) | **~1.5–3 h**, 4 workers × ~1.5 GB |
+| Incremental (CI) | seconds–minutes, <500 MB; ~70% of runs ingest nothing and skip publish |
+| Row count, full history | ~1.1–1.4 M (attr,version) pairs (+~170k/yr) |
+| DB size | ~1.5–1.9 GB raw, **artifact target ≤250 MB zstd**; if exceeded, intern license/platforms/maintainers into dictionary side-tables behind the existing query API (measured ~50× metadata duplication — the named lever, not a v1 requirement) |
+| FTS | dropped-trigger ingest + one rebuild (~1–2 min at 1.2M rows) |
+| Write amplification | aggregator keeps writes O(distinct pairs), not O(attrs × releases) |
 
-## 10. Migration
+Search under 144k dotted attrs (verified hazards): prefix search on
+`python` would match all ~11k `python313Packages.*` rows and
+`execute_search` materializes full result sets pre-pagination. v2 ships:
+(a) ranking that orders shallower attr paths first (`attribute_path` dot
+count ASC, then name), (b) SQL-level LIMIT pushdown in the search queries.
+Bare-leaf resolution (`requests` → `python313Packages.requests`) is a named
+fast-follow, not v1.
 
-- Full republish (schema v4) replaces the production index; old DB kept
-  locally for diffing. The 2024–2025 strata are unrecoverable incrementally —
-  rebuild is the fix.
-- Client compatibility: `nxv update` clients download the new artifact; the
-  reader code tolerates schema v4 via the existing schema_version gate
-  (clients with old binaries get a "please upgrade" path — verify the gate's
-  behavior before publish).
-- Docs: AGENTS.md indexer section, SKILL.md (CLI changes), website guide,
-  issues #5/#21/#23 updated with root causes and fix.
+## 13. Explicitly rejected alternatives
 
-## 11. Explicitly rejected alternatives
-
-- **Per-commit evaluation (any variant)** — killed three branch lineages;
-  see ANALYSIS §2. The granularity is illusory: in practice it produced
-  months-long holes.
-- **nix-eval-jobs integration** — external binary dependency (violates the
-  single-binary requirement); reserved as manual fallback documentation only.
-- **In-process Nix FFI** — Boehm-GC growth, build complexity (libclang,
-  version coupling), proven OOM source.
-- **File→attr change mapping** — structurally incomplete (wrappers,
-  inherited versions, shared version files); the root cause of issue #23.
+- **Per-commit evaluation (any variant)** — killed three branch lineages
+  (ANALYSIS §2); produced months-long holes in practice.
+- **nix-eval-jobs binary integration** — violates the single-binary
+  requirement.
+- **In-process Nix FFI** — Boehm-GC growth, build complexity, proven OOMs.
+- **File→attr change mapping** — structurally incomplete; root cause of #23.
+- **Date/prefix-based era selection** — refuted by the mid-prefix boundary
+  and the 21.03pre rename; per-release probe only.
