@@ -849,6 +849,32 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         println!("Latest package change: {}", newest.format("%Y-%m-%d"));
     }
 
+    if !stats.channels.is_empty() {
+        println!();
+        println!("Release coverage");
+        println!("----------------");
+        for ch in &stats.channels {
+            print!("{}: {} ingested", ch.channel, ch.releases_ingested);
+            if ch.releases_pending > 0 {
+                print!(", {} pending", ch.releases_pending);
+            }
+            if ch.releases_failed > 0 {
+                print!(", {} failed", ch.releases_failed);
+            }
+            if ch.releases_skipped > 0 {
+                print!(", {} skipped", ch.releases_skipped);
+            }
+            if let Some(newest) = &ch.newest_release {
+                print!(" (newest: {newest}");
+                if let Some(date) = ch.newest_release_date {
+                    print!(", {}", date.format("%Y-%m-%d"));
+                }
+                print!(")");
+            }
+            println!();
+        }
+    }
+
     // Local-only info: file sizes
     if !is_remote {
         if cli.db_path.exists()

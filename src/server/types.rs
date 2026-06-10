@@ -310,6 +310,21 @@ impl From<PackageVersion> for PackageVersionSchema {
     }
 }
 
+/// Per-channel snapshot ingestion coverage (schema v4 indexes).
+#[derive(Debug, Serialize, ToSchema)]
+#[schema(as = ChannelCoverageSchema)]
+pub struct ChannelCoverageSchema {
+    pub channel: String,
+    pub releases_ingested: i64,
+    pub releases_pending: i64,
+    pub releases_failed: i64,
+    pub releases_skipped: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_release: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_release_date: Option<DateTime<Utc>>,
+}
+
 /// Index statistics schema.
 #[derive(Debug, Serialize, ToSchema)]
 #[schema(as = IndexStatsSchema)]
@@ -325,6 +340,9 @@ pub struct IndexStatsSchema {
     /// When the index was last updated (RFC3339 format).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_indexed_date: Option<String>,
+    /// Per-channel release coverage (empty for pre-v4 indexes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelCoverageSchema>,
 }
 
 impl From<IndexStats> for IndexStatsSchema {
@@ -338,6 +356,19 @@ impl From<IndexStats> for IndexStatsSchema {
             newest_commit_date: s.newest_commit_date,
             last_indexed_commit: s.last_indexed_commit,
             last_indexed_date: s.last_indexed_date,
+            channels: s
+                .channels
+                .into_iter()
+                .map(|c| ChannelCoverageSchema {
+                    channel: c.channel,
+                    releases_ingested: c.releases_ingested,
+                    releases_pending: c.releases_pending,
+                    releases_failed: c.releases_failed,
+                    releases_skipped: c.releases_skipped,
+                    newest_release: c.newest_release,
+                    newest_release_date: c.newest_release_date,
+                })
+                .collect(),
         }
     }
 }

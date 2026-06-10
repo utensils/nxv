@@ -208,6 +208,20 @@ impl PackageVersion {
     }
 }
 
+/// Per-channel snapshot ingestion coverage (schema v4 indexes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelCoverageStat {
+    pub channel: String,
+    pub releases_ingested: i64,
+    pub releases_pending: i64,
+    pub releases_failed: i64,
+    pub releases_skipped: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_release_date: Option<DateTime<Utc>>,
+}
+
 /// Index statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -222,6 +236,10 @@ pub struct IndexStats {
     /// When the index was last updated (from meta table).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_indexed_date: Option<String>,
+    /// Per-channel release coverage. Empty for pre-v4 indexes and old
+    /// servers (serde(default) keeps old clients/servers compatible).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelCoverageStat>,
 }
 
 /// Search for packages by name.
@@ -535,7 +553,57 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         newest_commit_date: newest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         last_indexed_commit,
         last_indexed_date,
+        channels: get_channel_coverage(conn).unwrap_or_default(),
     })
+}
+
+/// Per-channel release coverage from the v4 `releases` ledger. Returns an
+/// empty vec on pre-v4 databases (no releases table).
+fn get_channel_coverage(conn: &rusqlite::Connection) -> Result<Vec<ChannelCoverageStat>> {
+    let has_table: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='releases'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT r.channel,
+               SUM(r.status = 'ingested'),
+               SUM(r.status = 'pending'),
+               SUM(r.status = 'failed'),
+               SUM(r.status = 'skipped'),
+               (SELECT release_name FROM releases n
+                 WHERE n.channel = r.channel AND n.status = 'ingested'
+                 ORDER BY n.release_date DESC LIMIT 1),
+               (SELECT release_date FROM releases n
+                 WHERE n.channel = r.channel AND n.status = 'ingested'
+                 ORDER BY n.release_date DESC LIMIT 1)
+          FROM releases r GROUP BY r.channel ORDER BY r.channel
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ChannelCoverageStat {
+            channel: row.get(0)?,
+            releases_ingested: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            releases_pending: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            releases_failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            releases_skipped: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            newest_release: row.get(5)?,
+            newest_release_date: row
+                .get::<_, Option<i64>>(6)?
+                .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        })
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Search package versions by description text using SQLite FTS5.

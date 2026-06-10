@@ -39,6 +39,7 @@ use super::types::*;
         VersionHistorySchema,
         PackageVersionSchema,
         IndexStatsSchema,
+        ChannelCoverageSchema,
     )),
     tags(
         (name = "packages", description = "Package search and information"),
