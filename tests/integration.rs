@@ -2613,6 +2613,14 @@ fn fixture_packages_json_br(thunderbird_version: &str, filler: usize) -> Vec<u8>
 fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, String, String) {
     let commit1 = "a".repeat(40);
     let commit2 = "b".repeat(40);
+    // Recent dates: the run report marks stale observations unhealthy
+    // (head lag), and the absolute count floor is year-dependent.
+    let date1 = (chrono::Utc::now() - chrono::Duration::days(3))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let date2 = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
 
     let listing = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2648,7 +2656,7 @@ fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, Str
                 )
                 .as_str(),
             )
-            .with_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+            .with_header("Last-Modified", date1.as_str())
             .with_body(&commit1)
             .create(),
         server
@@ -2660,7 +2668,7 @@ fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, Str
                 )
                 .as_str(),
             )
-            .with_header("Last-Modified", "Fri, 03 Jan 2025 00:00:00 GMT")
+            .with_header("Last-Modified", date2.as_str())
             .with_body(&commit2)
             .create(),
         server
@@ -2672,7 +2680,7 @@ fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, Str
                 )
                 .as_str(),
             )
-            .with_body(fixture_packages_json_br("142.0", 120_000))
+            .with_body(fixture_packages_json_br("142.0", 132_000))
             .create(),
         server
             .mock(
@@ -2683,7 +2691,7 @@ fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, Str
                 )
                 .as_str(),
             )
-            .with_body(fixture_packages_json_br("143.0", 120_500))
+            .with_body(fixture_packages_json_br("143.0", 132_500))
             .create(),
     ];
 
@@ -2693,7 +2701,7 @@ fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, Str
 /// End-to-end: plan + ingest two mock releases, then verify the data through
 /// the real CLI — the DESIGN.md regression fixtures.
 #[test]
-#[cfg_attr(not(feature = "indexer"), ignore)]
+#[cfg(feature = "indexer")]
 fn test_index_end_to_end_with_mock_bucket() {
     let mut server = mockito::Server::new();
     let (_mocks, commit1, commit2) = mock_release_bucket(&mut server);
@@ -2808,7 +2816,7 @@ fn test_index_end_to_end_with_mock_bucket() {
 /// A truncated artifact must fail its release without polluting the table,
 /// and the release must stay retryable.
 #[test]
-#[cfg_attr(not(feature = "indexer"), ignore)]
+#[cfg(feature = "indexer")]
 fn test_index_truncated_snapshot_fails_release_without_polluting() {
     let mut server = mockito::Server::new();
     let commit1 = "c".repeat(40);
@@ -2826,6 +2834,9 @@ fn test_index_truncated_snapshot_fails_release_without_polluting() {
         .match_query(mockito::Matcher::Regex("prefix=nixpkgs".to_string()))
         .with_body(listing)
         .create();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
     let _m2 = server
         .mock(
             "GET",
@@ -2835,11 +2846,11 @@ fn test_index_truncated_snapshot_fails_release_without_polluting() {
             )
             .as_str(),
         )
-        .with_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+        .with_header("Last-Modified", recent.as_str())
         .with_body(&commit1)
         .create();
 
-    let full = fixture_packages_json_br("142.0", 120_000);
+    let full = fixture_packages_json_br("142.0", 132_000);
     let _m3 = server
         .mock(
             "GET",
@@ -2888,7 +2899,7 @@ fn test_index_truncated_snapshot_fails_release_without_polluting() {
 
 /// --strict turns failed releases into a non-zero exit.
 #[test]
-#[cfg_attr(not(feature = "indexer"), ignore)]
+#[cfg(feature = "indexer")]
 fn test_index_strict_fails_on_gate_violation() {
     let mut server = mockito::Server::new();
     let commit1 = "d".repeat(40);
@@ -2906,6 +2917,9 @@ fn test_index_strict_fails_on_gate_violation() {
         .match_query(mockito::Matcher::Regex("prefix=nixpkgs".to_string()))
         .with_body(listing)
         .create();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
     let _m2 = server
         .mock(
             "GET",
@@ -2915,7 +2929,7 @@ fn test_index_strict_fails_on_gate_violation() {
             )
             .as_str(),
         )
-        .with_header("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+        .with_header("Last-Modified", recent.as_str())
         .with_body(&commit1)
         .create();
     // Far too few packages: trips the absolute count floor.

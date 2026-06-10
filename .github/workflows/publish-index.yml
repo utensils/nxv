@@ -88,22 +88,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ./target/release/nxv index --strict --head-eval --report report.json
+          # Not --strict: gate-failed releases never write rows, so
+          # publishing the successfully ingested progress is always safe and
+          # strictly fresher than not publishing. Failures are alerted on in
+          # the final step (after publish) instead of blocking it.
+          ./target/release/nxv index --head-eval --report report.json
           echo "ingested=$(jq -r '.ingested' report.json)" >> "$GITHUB_OUTPUT"
-          echo "healthy=$(jq -r '.healthy' report.json)" >> "$GITHUB_OUTPUT"
+          echo "healthy=$(jq -r '.healthy // false' report.json)" >> "$GITHUB_OUTPUT"
+          echo "failed=$(jq -r '.failed' report.json)" >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to publish
         id: gate
         run: |
           INGESTED="${{ steps.ingest.outputs.ingested }}"
-          HEALTHY="${{ steps.ingest.outputs.healthy }}"
           FORCE="${{ inputs.force_publish }}"
-
-          if [ "$HEALTHY" != "true" ]; then
-            echo "::error::Index run unhealthy — not publishing."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
 
           if [ "${INGESTED:-0}" -gt 0 ] || [ "$FORCE" = "true" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
@@ -155,6 +153,18 @@ jobs:
             publish/manifest.json \
             publish/manifest.json.minisig \
             --clobber
+
+      # AFTER publishing: turn anomalies into a red workflow run so they
+      # page the operator. Failed releases stay in the (published) ledger
+      # with retry/backoff state; head-lag breaches and gate failures must
+      # not rot silently — that is how the old indexer lost four months.
+      - name: Alert on anomalies
+        if: always() && steps.ingest.outcome == 'success'
+        run: |
+          if [ "${{ steps.ingest.outputs.healthy }}" != "true" ] || [ "${{ steps.ingest.outputs.failed }}" != "0" ]; then
+            echo "::error::Index run reported anomalies (healthy=${{ steps.ingest.outputs.healthy }}, failed=${{ steps.ingest.outputs.failed }}) — see report in the job summary."
+            exit 1
+          fi
 
       - name: Summary
         if: always()

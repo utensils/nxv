@@ -284,6 +284,12 @@ pub struct RunReport {
     pub channels: Vec<ChannelReport>,
     /// Hours between now and the newest observation across channels.
     pub head_lag_hours: Option<i64>,
+    /// Releases dated at or before the newest ingested observation that are
+    /// neither ingested nor skipped — holes that retries still need to fill.
+    /// Publishing ingested progress is safe regardless (gate-failed
+    /// snapshots never write rows), but a persistently nonzero value means
+    /// some window's versions stay missing until its release succeeds.
+    pub unsettled_before_watermark: Option<i64>,
     /// Total distinct attribute paths in the index after the run.
     pub total_attrs: Option<i64>,
     /// Total (attr, version) rows after the run.
@@ -325,6 +331,8 @@ impl RunReport {
 
         if let Some(newest) = db.newest_ingested_release(None)? {
             self.head_lag_hours = Some((Utc::now() - newest.release_date).num_hours());
+            self.unsettled_before_watermark =
+                Some(db.unsettled_release_count_before(newest.release_date)?);
         }
 
         let conn = db.connection();
@@ -347,7 +355,11 @@ impl RunReport {
         let no_failures = self.failed == 0 && self.anomalies.iter().all(|a| a.failures.is_empty());
         let no_warnings_when_strict =
             !strict || self.anomalies.iter().all(|a| a.warnings.is_empty());
-        self.healthy = no_failures && no_warnings_when_strict && (!strict || lag_ok);
+        // Lag affects health unconditionally: CI alerts on `healthy` even in
+        // non-strict runs (publish-then-alert), and silent staleness is the
+        // exact failure mode this rewrite exists to kill. --strict only
+        // controls whether warnings are fatal and the process exit code.
+        self.healthy = no_failures && no_warnings_when_strict && lag_ok;
 
         Ok(())
     }
@@ -377,6 +389,11 @@ impl RunReport {
         }
         if let (Some(attrs), Some(rows)) = (self.total_attrs, self.total_rows) {
             eprintln!("  index: {attrs} distinct attrs, {rows} (attr, version) rows");
+        }
+        if let Some(unsettled) = self.unsettled_before_watermark
+            && unsettled > 0
+        {
+            eprintln!("  unsettled releases before watermark: {unsettled} (holes pending retry)");
         }
         if let Some(lag) = self.head_lag_hours {
             eprintln!(

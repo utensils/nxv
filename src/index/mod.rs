@@ -59,6 +59,17 @@ const RELEASES_URL_ENV: &str = "NXV_RELEASES_URL";
 pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     let mut db = Database::open(&cli.db_path)?;
 
+    // Self-heal a dropped-triggers state: bulk runs drop the FTS sync
+    // triggers and rebuild at the end — if a previous run died in between
+    // (kill, OOM, power loss), description search would silently miss every
+    // row written since. Detection is one sqlite_master query.
+    if db.fts_triggers_missing()? {
+        eprintln!(
+            "warning: FTS triggers missing (a previous bulk run was interrupted); rebuilding FTS index..."
+        );
+        db.rebuild_fts()?;
+    }
+
     let base_url =
         std::env::var(RELEASES_URL_ENV).unwrap_or_else(|_| releases::DEFAULT_BASE_URL.to_string());
     let s3 = S3Client::new(&base_url)?;
@@ -170,8 +181,15 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     }
 
     // ── --head-eval: cover channel-stuck periods ────────────────────────
-    if args.head_eval && !shutdown.load(Ordering::SeqCst) {
-        run_head_eval(&mut db, &s3, args, &mut report, &progress)?;
+    // Failures here (network, GitHub API, eval) must not abort the finish
+    // steps: the channel ingest above already succeeded and its bloom/
+    // watermark/report work must still land.
+    if args.head_eval
+        && !shutdown.load(Ordering::SeqCst)
+        && let Err(e) = run_head_eval(&mut db, &s3, args, &mut report, &progress)
+    {
+        progress(&format!("head-eval failed: {e} (continuing to finish)"));
+        report.failed += 1;
     }
 
     // ── Finish ──────────────────────────────────────────────────────────
@@ -224,8 +242,10 @@ fn parse_date_arg(value: Option<&str>, flag: &str) -> Result<Option<DateTime<Utc
     )))
 }
 
-/// What a fetch worker hands back to the coordinator.
-type FetchResult = (usize, Result<Vec<SnapshotEntry>>);
+/// What a fetch worker hands back to the coordinator: the parsed entries
+/// plus the mechanism that actually produced them (a release guessed as
+/// nix-env era may turn out to have packages.json — see [`fetch_release`]).
+type FetchResult = (usize, Result<(Vec<SnapshotEntry>, ReleaseSource)>);
 
 /// Multi-release aggregator: merges K consecutive gated snapshots so row
 /// writes are O(distinct pairs), not O(alive attrs × releases) — measured
@@ -312,14 +332,29 @@ impl Aggregator {
 }
 
 /// Fetch + parse one release (worker side; no DB access).
+///
+/// The plan-time source is a guess from the release date; the truth is
+/// per-release (DESIGN §2: probe, never date-classify). So nix-env-era
+/// releases first probe packages.json.br — the ~60 releases between the
+/// first artifact (2020-03-27) and the safe-after line get the zero-eval
+/// path, and the probe is one cheap 404 for genuinely pre-artifact releases.
 fn fetch_release(
     s3: &S3Client,
     prefix: &str,
     release: &ReleaseRecord,
-) -> Result<Vec<SnapshotEntry>> {
+) -> Result<(Vec<SnapshotEntry>, ReleaseSource)> {
     match release.source {
-        ReleaseSource::PackagesJson => s3.fetch_packages_json(prefix, &release.release_name),
-        ReleaseSource::NixEnv => eval::ingest_nix_env_release(s3, prefix, &release.release_name),
+        ReleaseSource::PackagesJson => s3
+            .fetch_packages_json(prefix, &release.release_name)
+            .map(|entries| (entries, ReleaseSource::PackagesJson)),
+        ReleaseSource::NixEnv => match s3.fetch_packages_json(prefix, &release.release_name) {
+            Ok(entries) => Ok((entries, ReleaseSource::PackagesJson)),
+            Err(NxvError::NetworkMessage(msg)) if msg.contains("HTTP 404") => {
+                eval::ingest_nix_env_release(s3, prefix, &release.release_name)
+                    .map(|entries| (entries, ReleaseSource::NixEnv))
+            }
+            Err(e) => Err(e),
+        },
         ReleaseSource::HeadEval => Err(NxvError::Config(
             "head_eval releases are ingested by the head-eval pass, not the worklist".to_string(),
         )),
@@ -342,11 +377,19 @@ fn ingest_worklist(
     let sentinels = monitor::builtin_sentinels(&[]);
 
     // Shared queue of work items; workers pull, fetch+parse, and send
-    // (seq, result) back. The bounded channel caps parsed snapshots in
-    // flight (each can be ~50-100 MB).
+    // (seq, result) back. Memory is bounded by THREE mechanisms together:
+    // the sync_channel capacity (results awaiting the coordinator), the
+    // reorder window below (workers refuse to run ahead of the coordinator,
+    // so the seq-reorder buffer can't grow past WINDOW while one slow fetch
+    // stalls next_seq), and per-release maps being dropped after write.
     let queue: Arc<Mutex<VecDeque<(usize, ReleaseRecord)>>> =
         Arc::new(Mutex::new(worklist.iter().cloned().enumerate().collect()));
     let (tx, rx) = mpsc::sync_channel::<FetchResult>(jobs.max(1));
+
+    // Published by the coordinator after each processed seq; workers park
+    // instead of claiming work more than WINDOW releases ahead of it.
+    let coordinator_seq = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let window = (2 * jobs.max(1)).max(4);
 
     let mut handles = Vec::new();
     for _ in 0..jobs.max(1) {
@@ -355,13 +398,27 @@ fn ingest_worklist(
         let s3 = s3.clone();
         let prefixes = channel_prefixes.clone();
         let shutdown = Arc::clone(shutdown);
+        let coordinator_seq = Arc::clone(&coordinator_seq);
         handles.push(std::thread::spawn(move || {
             loop {
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                let Some((seq, release)) = queue.lock().expect("queue lock").pop_front() else {
-                    break;
+                let claimed = {
+                    let mut q = queue.lock().expect("queue lock");
+                    match q.front() {
+                        None => break, // queue drained
+                        Some((seq, _))
+                            if *seq > coordinator_seq.load(Ordering::Acquire) + window =>
+                        {
+                            None // too far ahead — park
+                        }
+                        Some(_) => q.pop_front(),
+                    }
+                };
+                let Some((seq, release)) = claimed else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
                 };
                 let prefix = prefixes.get(&release.channel).cloned().unwrap_or_default();
                 let result = fetch_release(&s3, &prefix, &release);
@@ -375,7 +432,10 @@ fn ingest_worklist(
 
     // Coordinator: re-order results by seq so gating sees releases in
     // chronological order (births/deaths need consecutive snapshots).
-    let mut buffer: BTreeMap<usize, Result<Vec<SnapshotEntry>>> = BTreeMap::new();
+    let mut buffer: BTreeMap<
+        usize,
+        std::result::Result<(Vec<SnapshotEntry>, ReleaseSource), NxvError>,
+    > = BTreeMap::new();
     let mut next_seq = 0usize;
     let mut prev_attrs: HashMap<String, (HashSet<String>, ReleaseSource)> = HashMap::new();
     let mut aggregator = Aggregator::default();
@@ -385,16 +445,27 @@ fn ingest_worklist(
         buffer.insert(incoming.0, incoming.1);
 
         while let Some(result) = buffer.remove(&next_seq) {
-            let release = &worklist[next_seq];
+            let mut release = worklist[next_seq].clone();
             next_seq += 1;
+            coordinator_seq.store(next_seq, Ordering::Release);
 
             db.mark_release_attempt(release.id)?;
 
             match result {
-                Ok(entries) => {
+                Ok((entries, actual_source)) => {
+                    // A nix-env-era guess that turned out to have
+                    // packages.json: record the real mechanism so the
+                    // monitor's per-era baselines stay clean.
+                    if release.source != actual_source {
+                        db.connection().execute(
+                            "UPDATE releases SET source = ? WHERE id = ?",
+                            rusqlite::params![actual_source.as_str(), release.id],
+                        )?;
+                        release.source = actual_source;
+                    }
                     let gate = monitor::evaluate_release_gate(
                         db,
-                        release,
+                        &release,
                         &entries,
                         prev_attrs
                             .get(&release.channel)
@@ -429,7 +500,7 @@ fn ingest_worklist(
                         ),
                     );
 
-                    aggregator.add_release(release, entries);
+                    aggregator.add_release(&release, entries);
                     report.ingested += 1;
                     if report.ingested.is_multiple_of(25) || total <= 25 {
                         progress(&format!(
@@ -443,26 +514,6 @@ fn ingest_worklist(
                     }
                 }
                 Err(e) => {
-                    // A packages.json 404 just before the era boundary means
-                    // this release predates the artifact: reclassify.
-                    let safe_after: DateTime<Utc> = releases::PACKAGES_JSON_SAFE_AFTER
-                        .parse()
-                        .expect("valid constant timestamp");
-                    if release.source == ReleaseSource::PackagesJson
-                        && matches!(&e, NxvError::NetworkMessage(msg) if msg.contains("HTTP 404"))
-                        && release.release_date < safe_after
-                    {
-                        progress(&format!(
-                            "  {}: no packages.json.br — reclassified to the nix-env era",
-                            release.release_name
-                        ));
-                        db.connection().execute(
-                            "UPDATE releases SET source = 'nix_env', status = 'pending' WHERE id = ?",
-                            [release.id],
-                        )?;
-                        continue;
-                    }
-
                     progress(&format!("  FAILED {}: {e}", release.release_name));
                     db.mark_release_failed(release.id, &e.to_string())?;
                     report.failed += 1;
@@ -483,6 +534,12 @@ fn ingest_worklist(
             }
         }
     }
+
+    // Unblock workers parked in tx.send BEFORE joining them: a worker
+    // blocked inside send() never re-checks the shutdown flag and only wakes
+    // when the receiver drops — break-then-join without this deadlocks on
+    // Ctrl+C and on the hard-error path.
+    drop(rx);
 
     // Final flush of whatever the group holds (also on interrupt — the
     // gated releases in the aggregator are complete observations).

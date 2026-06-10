@@ -542,6 +542,28 @@ impl Database {
         Ok(())
     }
 
+    /// True when the FTS table exists but its sync triggers don't — the
+    /// state left behind if a bulk run died between [`Self::drop_fts_triggers`]
+    /// and [`Self::rebuild_fts`]. Callers should rebuild when this is set.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn fts_triggers_missing(&self) -> Result<bool> {
+        let fts_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='package_versions_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !fts_exists {
+            return Ok(false);
+        }
+        let trigger_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN \
+             ('package_versions_ai', 'package_versions_ad', 'package_versions_au')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(trigger_count < 3)
+    }
+
     /// Rebuild the FTS index from the content table and recreate the sync
     /// triggers dropped by [`Self::drop_fts_triggers`].
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
@@ -1281,6 +1303,62 @@ mod tests {
             )
             .unwrap();
         assert!(has_releases);
+    }
+
+    #[test]
+    fn test_fts_triggers_missing_detection_and_heal() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(!db.fts_triggers_missing().unwrap());
+
+        // Simulate a bulk run dying between drop_fts_triggers and
+        // rebuild_fts: rows written in that window never reach FTS.
+        db.drop_fts_triggers().unwrap();
+        let now = Utc::now();
+        db.upsert_observations(&[PackageVersion {
+            id: 0,
+            name: "ripgrep".to_string(),
+            version: "14.0.0".to_string(),
+            first_commit_hash: "a".repeat(40),
+            first_commit_date: now,
+            last_commit_hash: "a".repeat(40),
+            last_commit_date: now,
+            attribute_path: "ripgrep".to_string(),
+            description: Some("fast grep replacement".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }])
+        .unwrap();
+        drop(db);
+
+        // Reopen (as the next run would) and heal.
+        let db = Database::open(&db_path).unwrap();
+        assert!(
+            db.fts_triggers_missing().unwrap(),
+            "must detect the broken state"
+        );
+        db.rebuild_fts().unwrap();
+        assert!(!db.fts_triggers_missing().unwrap());
+
+        let fts_hits: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM package_versions_fts WHERE package_versions_fts MATCH 'grep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_hits, 1,
+            "rows written while triggers were absent must be re-indexed"
+        );
     }
 
     #[test]

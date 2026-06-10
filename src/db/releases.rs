@@ -343,18 +343,18 @@ impl Database {
         Ok(out)
     }
 
-    /// True when every known release at or before `watermark_date` is
-    /// `ingested` or `skipped` — the CI publish gate.
-    // TODO(indexer-v2): wired into `nxv publish` gating in the publisher pass.
-    #[allow(dead_code)]
-    pub fn releases_settled_before(&self, watermark_date: DateTime<Utc>) -> Result<bool> {
+    /// Count of releases dated at or before `watermark_date` that are
+    /// neither `ingested` nor `skipped` — holes that retries still need to
+    /// fill. Surfaced in the run report and `nxv stats`.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn unsettled_release_count_before(&self, watermark_date: DateTime<Utc>) -> Result<i64> {
         let unsettled: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM releases \
              WHERE release_date <= ? AND status NOT IN ('ingested', 'skipped')",
             rusqlite::params![watermark_date.timestamp()],
             |row| row.get(0),
         )?;
-        Ok(unsettled == 0)
+        Ok(unsettled)
     }
 }
 
@@ -514,11 +514,11 @@ mod tests {
         assert_eq!(coverage.len(), 1);
         assert_eq!(coverage[0].ingested, 1);
 
-        assert!(db.releases_settled_before(date(2_000)).unwrap());
+        assert_eq!(db.unsettled_release_count_before(date(2_000)).unwrap(), 0);
     }
 
     #[test]
-    fn test_releases_settled_before_blocks_on_pending() {
+    fn test_unsettled_release_count_before() {
         let (_dir, db) = open_test_db();
         db.insert_release_pending(
             "nixpkgs-unstable",
@@ -529,8 +529,8 @@ mod tests {
             ReleaseSource::PackagesJson,
         )
         .unwrap();
-        assert!(!db.releases_settled_before(date(2_000)).unwrap());
-        assert!(db.releases_settled_before(date(500)).unwrap());
+        assert_eq!(db.unsettled_release_count_before(date(2_000)).unwrap(), 1);
+        assert_eq!(db.unsettled_release_count_before(date(500)).unwrap(), 0);
     }
 
     #[test]
