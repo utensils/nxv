@@ -168,6 +168,26 @@ impl S3Client {
         &self.base_url
     }
 
+    /// The underlying HTTP client, for requests outside the S3 bucket
+    /// (e.g. the GitHub API in `--head-eval`).
+    pub fn http(&self) -> &reqwest::blocking::Client {
+        &self.client
+    }
+
+    /// Stream a URL to a file on disk (used for nixexprs/HEAD tarballs).
+    pub fn download_to_file(&self, url: &str, dest: &std::path::Path) -> Result<()> {
+        let mut resp = self.get_with_retry(url)?;
+        if !resp.status().is_success() {
+            return Err(NxvError::NetworkMessage(format!(
+                "download failed: HTTP {} from {url}",
+                resp.status()
+            )));
+        }
+        let mut file = std::fs::File::create(dest)?;
+        std::io::copy(&mut resp, &mut file)?;
+        Ok(())
+    }
+
     /// GET a URL with retry on transport errors and 5xx. Returns the final
     /// response (any status < 500) for the caller to interpret.
     fn get_with_retry(&self, url: &str) -> Result<reqwest::blocking::Response> {

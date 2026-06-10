@@ -14,6 +14,7 @@
 //! docs/indexer-rewrite/ANALYSIS.md for why the previous git-walking,
 //! file-change-driven indexer was replaced.
 
+pub mod eval;
 pub mod monitor;
 pub mod publisher;
 pub mod releases;
