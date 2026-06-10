@@ -16,8 +16,9 @@ Two ingestion eras:
 
 | Era | Source | Mechanism | Nix eval? |
 |---|---|---|---|
-| ~late 2020 → today | `packages.json.br` per release from releases.nixos.org (S3) | download → stream brotli → stream JSON parse | **No** |
+| ~late 2020 → today | `packages.json.br` per release from releases.nixos.org (S3), multi-channel (§2) | download → stream brotli → stream JSON parse | **No** |
 | 2017 → ~late 2020 | `nixexprs.tar.xz` per release from the same S3 dirs | `nix-env -f <tarball> -qaP --json --meta` in recycled subprocesses | Yes (a few hundred runs, one-time) |
+| master HEAD (opt-in `--head-eval`, §2a) | GitHub tarball of master HEAD | chunked recursive extraction in memory-capped subprocesses | Yes (only when channels lag) |
 
 Both eras need **no git clone at all**. The `git2` dependency is dropped from
 the indexer feature entirely.
@@ -42,14 +43,39 @@ practice.
 ## 2. Data sources
 
 - **Release enumeration:** S3 ListObjectsV2 on `nix-releases.s3.amazonaws.com`
-  (public, no auth), prefixes `nixpkgs/` (nixpkgs-unstable releases,
-  `nixpkgs-YY.MMpre<count>.<shortrev>/`). Each release dir contains
-  `git-revision` (full 40-char hash), `packages.json.br` (post-2020),
-  `nixexprs.tar.xz`. Default channel: `nixpkgs-unstable` (~2 advances/day,
-  most packages, longest unbroken S3 history).
+  (public, no auth). Each release dir contains `git-revision` (full 40-char
+  hash), `packages.json.br` (post-2020), `nixexprs.tar.xz`.
+- **Multi-channel ingestion** (one pipeline, `releases.channel` column):
+  - `nixpkgs/` → **nixpkgs-unstable**: the historical spine — longest
+    unbroken S3 history, most packages, ~1–2 advances/day.
+  - `nixos/unstable-small/` → **nixos-unstable-small**: the currency channel —
+    minimal Hydra gating, typically **hours behind master** (measured
+    2026-06-09: 9h behind, vs 1.4d for nixpkgs-unstable and 3.6d for
+    nixos-unstable). Ingested from the point its packages.json exists.
+  - Observations from all channels merge into the same widen-only rows; a
+    version is "current" the moment ANY channel observes it.
 - **Cross-check (one-time):** gsc.io channel history for pre-S3-era advance
   dates if S3 listing has holes for 2017–2018.
 - Hydra's API is explicitly NOT used (slow/unreliable, verified).
+
+## 2a. Currency guarantee ("always current")
+
+Requirement: the published index must track nixpkgs as closely as the old
+master-walking design intended (CI cadence: 6h).
+
+- Steady state: each CI run ingests every new advance from both channels.
+  Staleness ≈ unstable-small lag (hours) + scheduling delay. This matches or
+  beats the old system, which was 6h-cadence on master *when healthy* and
+  silently months stale when not.
+- Channel-stuck scenario (Hydra blocked for days): `--head-eval` (optional
+  flag, on in CI) closes the gap — resolve master HEAD via the GitHub API,
+  download the GitHub tarball (no git needed), run the salvaged recursive
+  extraction expression in memory-capped subprocess chunks, and upsert those
+  observations at the real master commit. Skipped when a channel observation
+  is newer than N hours (default 24), so it costs nothing in steady state.
+- The monitor reports "index head lag vs master" (commit dates) at the end of
+  every run, and `--strict` fails CI if lag exceeds a threshold (default 72h)
+  so stuck-channel periods page us instead of rotting silently.
 
 ## 3. Database schema (v4)
 
@@ -105,8 +131,9 @@ CREATE TABLE releases (
 mod.rs        coordinator: plan → ingest (parallel) → monitor (in-order) → publish-ready
 releases.rs   S3 listing/pagination, release parsing, git-revision fetch, plan diffing
 snapshot.rs   one release → SnapshotData: streaming .br download+decompress+JSON parse
-eval.rs       pre-2021 fallback: nix-env -qaP --json --meta subprocess workers (recycled)
-monitor.rs    data-quality gates: counts, sentinels, births/deaths, report
+eval.rs       eval-based ingestion: pre-2021 nix-env over nixexprs.tar.xz AND the
+              --head-eval master-tarball path; recycled memory-capped subprocesses
+monitor.rs    data-quality gates: counts, sentinels, births/deaths, head-lag, report
 ```
 
 Flow per run (`nxv index`):
@@ -158,24 +185,39 @@ Per-release gates, evaluated in chronological order during the run:
 - **Regression fixtures** (tests): thunderbird 142.0 must not span
   2025-08→2026-01; `nh` present; nested attr present + bloom-resolvable.
 
-## 6. CLI surface
+## 6. CLI surface & feature parity
 
-- `nxv index` — snapshot indexing (new default). `--channel`, `--since`,
-  `--until`, `--jobs`, `--strict`, `--report <path>`, `--retry-failed`.
-  `--nixpkgs-path` is gone (the indexer no longer reads a clone) — the
-  argument is accepted-but-warned for one release cycle.
+**Hard requirement: no user-visible feature regresses.** Parity matrix:
+
+| Current feature | v2 fate |
+|---|---|
+| `search` / `info` / `history` / `stats` / `serve` / API / web UI / completions | Unchanged (same table shape; `stats` additionally reports release coverage + head lag) |
+| All metadata fields (description, license, homepage, maintainers, platforms, source_path, known_vulnerabilities) | Kept — sourced from packages.json `meta` (position → source_path); fields missing from old snapshots stay NULL exactly as today |
+| Insecure-package command prefixes (`NIXPKGS_ALLOW_INSECURE`) | Unchanged (driven by known_vulnerabilities) |
+| FTS5 name/description search | Unchanged |
+| Bloom fast-negative lookup | Kept, extended with dotted attr paths + final segments |
+| `update` (delta downloads, minisign verify, self-update) | Unchanged (verify delta generation in publisher against slim schema during implementation) |
+| `publish` artifacts/manifest | Unchanged format, schema_version=4, min_schema_version=4 (old clients get the existing "please upgrade" path) |
+| `dedupe` | Kept (still repairs old DBs; new schema can't produce duplicates) |
+| `backfill`, `reset` (maintainer tools operating on a local clone) | Kept as-is (git-based; unaffected by the new index pipeline) |
+| `index --full`, `--since`, `--until` | Kept (same semantics over releases instead of commits) |
+| Index freshness (6h CI cadence on master) | Met or beaten via unstable-small + `--head-eval` (§2a) |
+
+- `nxv index` — snapshot indexing (new default). `--channel` (repeatable),
+  `--since`, `--until`, `--jobs`, `--strict`, `--report <path>`,
+  `--retry-failed`, `--head-eval`, `--full`. `--nixpkgs-path` is
+  accepted-but-warned (no longer needed) for one release cycle.
 - `nxv index --backfill-evals` — one-time 2017→2020 era (requires `nix`).
-- `nxv index-reset` — removed (no checkout to reset). `nxv backfill` —
-  removed (packages.json carries position/homepage/etc.).
-- `nxv publish`, `nxv stats`, search/serve commands unchanged (stats gains
-  release coverage).
 
 ## 7. Dependency changes
 
-- **Remove**: `git2` (indexer feature becomes `["ctrlc"]` + pure-Rust deps).
+- **Keep**: `git2` (still used by the unchanged `backfill`/`reset`
+  maintainer commands; statically linked, so the single-binary property
+  holds). The new index pipeline itself does not touch git.
 - **Add**: `brotli` (pure-Rust decompressor), `quick-xml` (S3 ListObjects
   XML; tiny, pure Rust). Both compile into the single static binary.
-- reqwest (existing) does all HTTP.
+- reqwest (existing) does all HTTP, including the GitHub tarball for
+  `--head-eval`.
 
 ## 8. CI (publish-index.yml)
 
