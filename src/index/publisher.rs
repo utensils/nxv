@@ -4,7 +4,7 @@ use crate::bloom::PackageBloomFilter;
 use crate::db::Database;
 use crate::db::queries::get_all_unique_attrs;
 use crate::error::{NxvError, Result};
-use crate::remote::download::{compress_zstd, file_sha256};
+use crate::remote::download::file_sha256;
 use crate::remote::manifest::{DeltaFile, IndexFile, Manifest};
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -385,7 +385,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     url_prefix: Option<&str>,
     show_progress: bool,
     min_version: Option<u32>,
-) -> Result<(IndexFile, String)> {
+) -> Result<(IndexFile, String, u32)> {
     let db_path = db_path.as_ref();
     let output_dir = output_dir.as_ref();
 
@@ -397,27 +397,34 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     let db = Database::open(db_path)?;
     let last_commit = db.get_meta("last_indexed_commit")?.unwrap_or_default();
 
-    // Validate min_version against the database's schema version
-    if let Some(min_ver) = min_version {
-        let schema_version: u32 = db
-            .get_meta("schema_version")?
-            .unwrap_or_else(|| "0".to_string())
-            .parse()
-            .unwrap_or(0);
-        if min_ver > schema_version {
-            return Err(NxvError::Config(format!(
-                "--min-version ({}) cannot be greater than database schema version ({})",
-                min_ver, schema_version
-            )));
-        }
+    let schema_version: u32 = db
+        .get_meta("schema_version")?
+        .unwrap_or_else(|| "0".to_string())
+        .parse()
+        .unwrap_or(0);
+
+    // min_version defaults to the database's schema version. This is the
+    // pre-download gate that stops OLD clients from overwriting a working
+    // index with one they cannot read — publishing a schema-4 index
+    // ungated would brick every pre-v4 client's local index.
+    let min_version = min_version.unwrap_or(schema_version);
+    if min_version > schema_version {
+        return Err(NxvError::Config(format!(
+            "--min-version ({}) cannot be greater than database schema version ({})",
+            min_version, schema_version
+        )));
+    }
+    if schema_version >= 4 && min_version < 4 {
+        return Err(NxvError::Config(format!(
+            "refusing to publish a schema-{schema_version} index with min_version {min_version}: \
+             pre-v4 clients would download it over a working index and fail to open it"
+        )));
     }
 
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     // Write min_schema_version to database for direct-download validation
-    if let Some(min_ver) = min_version {
-        db.set_meta("min_schema_version", &min_ver.to_string())?;
-    }
+    db.set_meta("min_schema_version", &min_version.to_string())?;
     // Flush WAL to ensure meta updates are in the main DB file before compression
     db.checkpoint()?;
     let input_size = fs::metadata(db_path)?.len();
@@ -461,153 +468,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
         sha256,
     };
 
-    Ok((index_file, last_commit))
-}
-
-/// Generate a delta pack between two commits.
-///
-/// Creates a compressed SQL file with INSERT/UPDATE statements for changes
-/// between from_commit and to_commit.
-///
-/// Note: This function is implemented but not yet exposed via CLI. It will be
-/// used for incremental index updates in a future release.
-#[allow(dead_code)]
-pub fn generate_delta_pack<P: AsRef<Path>, Q: AsRef<Path>>(
-    db_path: P,
-    from_commit: &str,
-    to_commit: &str,
-    output_dir: Q,
-) -> Result<DeltaFile> {
-    let db_path = db_path.as_ref();
-    let output_dir = output_dir.as_ref();
-
-    fs::create_dir_all(output_dir)?;
-
-    let from_short = &from_commit[..7.min(from_commit.len())];
-    let to_short = &to_commit[..7.min(to_commit.len())];
-    let delta_name = format!("delta-{}-{}.sql.zst", from_short, to_short);
-    let delta_path = output_dir.join(&delta_name);
-    let sql_temp_path = output_dir.join(format!("delta-{}-{}.sql", from_short, to_short));
-
-    // Open database and export delta as SQL
-    let db = Database::open(db_path)?;
-
-    // Query for new or updated rows since from_commit
-    // We'll export rows where the first_commit_date or last_commit_date is after from_commit's date
-    let conn = db.connection();
-
-    // Get the timestamp of the from_commit to use as a filter
-    let from_commit_date: Option<i64> = conn
-        .query_row(
-            "SELECT first_commit_date FROM package_versions WHERE first_commit_hash LIKE ?1 || '%' LIMIT 1",
-            [from_commit],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let min_date = from_commit_date.unwrap_or(0);
-
-    // Export new/updated rows as INSERT OR REPLACE statements
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT name, version, first_commit_hash, first_commit_date,
-               last_commit_hash, last_commit_date, attribute_path,
-               description, license, homepage, maintainers, platforms
-        FROM package_versions
-        WHERE first_commit_date > ?1 OR last_commit_date > ?1
-        "#,
-    )?;
-
-    let mut sql_content = String::new();
-    sql_content.push_str("-- Delta pack from ");
-    sql_content.push_str(from_commit);
-    sql_content.push_str(" to ");
-    sql_content.push_str(to_commit);
-    sql_content.push('\n');
-    sql_content.push_str("BEGIN TRANSACTION;\n");
-
-    let rows = stmt.query_map([min_date], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, i64>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, Option<String>>(7)?,
-            row.get::<_, Option<String>>(8)?,
-            row.get::<_, Option<String>>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, Option<String>>(11)?,
-        ))
-    })?;
-
-    for row_result in rows {
-        let (
-            name,
-            version,
-            first_commit_hash,
-            first_commit_date,
-            last_commit_hash,
-            last_commit_date,
-            attribute_path,
-            description,
-            license,
-            homepage,
-            maintainers,
-            platforms,
-        ) = row_result?;
-
-        sql_content.push_str(&format!(
-            "INSERT OR REPLACE INTO package_versions (name, version, first_commit_hash, first_commit_date, last_commit_hash, last_commit_date, attribute_path, description, license, homepage, maintainers, platforms) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});\n",
-            sql_quote(&name),
-            sql_quote(&version),
-            sql_quote(&first_commit_hash),
-            first_commit_date,
-            sql_quote(&last_commit_hash),
-            last_commit_date,
-            sql_quote(&attribute_path),
-            sql_quote_opt(&description),
-            sql_quote_opt(&license),
-            sql_quote_opt(&homepage),
-            sql_quote_opt(&maintainers),
-            sql_quote_opt(&platforms),
-        ));
-    }
-
-    // Update the last_indexed_commit and last_indexed_date meta
-    sql_content.push_str(&format!(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_commit', {});\n",
-        sql_quote(to_commit)
-    ));
-    sql_content.push_str(&format!(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed_date', {});\n",
-        sql_quote(&Utc::now().to_rfc3339())
-    ));
-
-    sql_content.push_str("COMMIT;\n");
-
-    // Write SQL file
-    fs::write(&sql_temp_path, &sql_content)?;
-
-    // Compress the SQL file
-    compress_zstd(&sql_temp_path, &delta_path, COMPRESSION_LEVEL)?;
-
-    // Clean up temp file
-    let _ = fs::remove_file(&sql_temp_path);
-
-    // Calculate hash
-    let sha256 = file_sha256(&delta_path)?;
-    let size = fs::metadata(&delta_path)?.len();
-
-    Ok(DeltaFile {
-        url: delta_name,
-        sha256,
-        size_bytes: size,
-        from_commit: from_commit.to_string(),
-        to_commit: to_commit.to_string(),
-    })
+    Ok((index_file, last_commit, min_version))
 }
 
 /// Generate a manifest file for the index.
@@ -744,7 +605,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     if show_progress {
         eprintln!("Generating compressed index...");
     }
-    let (full_index, last_commit) =
+    let (full_index, last_commit, resolved_min_version) =
         generate_full_index(db_path, output_dir, url_prefix, show_progress, min_version)?;
 
     if show_progress {
@@ -763,7 +624,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
         &last_commit,
         vec![],
         bloom_filter.clone(),
-        min_version,
+        Some(resolved_min_version),
     )?;
 
     // Sign the manifest if a secret key was provided
@@ -807,21 +668,6 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     }
 
     Ok(())
-}
-
-/// Helper to quote a string for SQL (used by `generate_delta_pack`).
-#[allow(dead_code)]
-fn sql_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
-
-/// Helper to quote an optional string for SQL (used by `generate_delta_pack`).
-#[allow(dead_code)]
-fn sql_quote_opt(s: &Option<String>) -> String {
-    match s {
-        Some(v) => sql_quote(v),
-        None => "NULL".to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -874,13 +720,18 @@ mod tests {
 
         create_test_db(&db_path);
 
-        let (index_file, last_commit) =
+        let (index_file, last_commit, resolved_min) =
             generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
 
         assert!(!index_file.sha256.is_empty());
         assert!(index_file.size_bytes > 0);
         assert_eq!(index_file.url, INDEX_DB_NAME);
         assert_eq!(last_commit, "abc1234567890def");
+        assert_eq!(
+            resolved_min,
+            crate::db::SCHEMA_VERSION,
+            "min_version must default to the schema version"
+        );
 
         // Verify the compressed file exists
         let compressed_path = output_dir.join(INDEX_DB_NAME);
@@ -896,14 +747,14 @@ mod tests {
         create_test_db(&db_path);
 
         let url_prefix = "https://example.com/releases";
-        let (index_file, _) =
+        let (index_file, _, _) =
             generate_full_index(&db_path, &output_dir, Some(url_prefix), false, None).unwrap();
 
         assert_eq!(index_file.url, format!("{}/{}", url_prefix, INDEX_DB_NAME));
     }
 
     #[test]
-    fn test_generate_full_index_writes_min_schema_version() {
+    fn test_generate_full_index_writes_min_schema_version_by_default() {
         use crate::remote::download::decompress_zstd;
 
         let dir = tempdir().unwrap();
@@ -912,40 +763,31 @@ mod tests {
 
         create_test_db(&db_path);
 
-        // Generate with min_version=3
-        generate_full_index(&db_path, &output_dir, None, false, Some(3)).unwrap();
+        // min_version omitted: must default to the schema version and be
+        // written into the published DB (the pre-download gate depends on it).
+        generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
 
-        // Decompress and verify min_schema_version was written
         let compressed_path = output_dir.join(INDEX_DB_NAME);
         let decompressed_path = dir.path().join("decompressed.db");
         decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
 
         let db = Database::open(&decompressed_path).unwrap();
         let min_ver = db.get_meta("min_schema_version").unwrap();
-        assert_eq!(min_ver, Some("3".to_string()));
+        assert_eq!(min_ver, Some(crate::db::SCHEMA_VERSION.to_string()));
     }
 
     #[test]
-    fn test_generate_full_index_no_min_schema_version_when_none() {
-        use crate::remote::download::decompress_zstd;
-
+    fn test_generate_full_index_refuses_v4_with_low_min_version() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let output_dir = dir.path().join("output");
 
         create_test_db(&db_path);
 
-        // Generate with min_version=None
-        generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
-
-        // Decompress and verify min_schema_version was NOT written
-        let compressed_path = output_dir.join(INDEX_DB_NAME);
-        let decompressed_path = dir.path().join("decompressed.db");
-        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
-
-        let db = Database::open(&decompressed_path).unwrap();
-        let min_ver = db.get_meta("min_schema_version").unwrap();
-        assert_eq!(min_ver, None);
+        // Publishing a schema-4 index readable-gated below 4 would let old
+        // clients overwrite their working index with one they can't open.
+        let err = generate_full_index(&db_path, &output_dir, None, false, Some(3)).unwrap_err();
+        assert!(err.to_string().contains("refusing to publish"));
     }
 
     #[test]
@@ -1044,19 +886,6 @@ mod tests {
 
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.min_version, Some(3));
-    }
-
-    #[test]
-    fn test_sql_quote() {
-        assert_eq!(sql_quote("hello"), "'hello'");
-        assert_eq!(sql_quote("it's"), "'it''s'");
-        assert_eq!(sql_quote(""), "''");
-    }
-
-    #[test]
-    fn test_sql_quote_opt() {
-        assert_eq!(sql_quote_opt(&Some("hello".to_string())), "'hello'");
-        assert_eq!(sql_quote_opt(&None), "NULL");
     }
 
     #[test]

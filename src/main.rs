@@ -410,7 +410,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         eprintln!("Checking for updates...");
     }
 
-    let status = perform_update(
+    let status = match perform_update(
         manifest_url,
         &cli.db_path,
         args.force,
@@ -418,7 +418,31 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         args.skip_verify,
         args.public_key.as_deref(),
         Some(cli.api_timeout),
-    )?;
+    ) {
+        Ok(status) => status,
+        // An incompatible published index means this binary is too old. The
+        // self-update check is exactly what fixes that — run it before
+        // propagating, so old local installs can upgrade in one step
+        // instead of being told "please upgrade" with no way to do it.
+        Err(e @ crate::error::NxvError::IncompatibleIndex(_)) => {
+            eprintln!("{e}");
+            if !args.no_self_update {
+                eprintln!();
+                let _ = self_update::run(self_update::SelfUpdateOptions {
+                    check: false,
+                    force: false,
+                    version: None,
+                    connect_timeout_secs: cli.api_timeout,
+                    show_progress,
+                    quiet: cli.quiet,
+                });
+                eprintln!();
+                eprintln!("If the binary was updated, re-run `nxv update` to fetch the index.");
+            }
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     match status {
         UpdateStatus::UpToDate { commit } => {
