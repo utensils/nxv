@@ -1,6 +1,3 @@
-// TODO(indexer-v2): drop the file-level allow once the coordinator is wired up.
-#![allow(dead_code)]
-
 //! Data-quality gates and the end-of-run coverage report.
 //!
 //! Gates run on the parsed snapshot BEFORE any row is written: a release

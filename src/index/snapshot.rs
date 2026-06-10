@@ -1,6 +1,3 @@
-// TODO(indexer-v2): drop the file-level allow once the coordinator is wired up.
-#![allow(dead_code)]
-
 //! Snapshot parsing: one channel release's package set.
 //!
 //! Two wire formats, one output shape:
@@ -75,11 +72,6 @@ pub fn split_attr_segments(raw: &str) -> Vec<String> {
     }
     segments.push(current);
     segments
-}
-
-/// Normalize an attr path: unquote segments, re-join with dots.
-pub fn normalize_attr_path(raw: &str) -> String {
-    split_attr_segments(raw).join(".")
 }
 
 /// Raw per-package entry as found in both wire formats.

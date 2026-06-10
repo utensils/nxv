@@ -441,8 +441,9 @@ impl Database {
     /// # Returns
     ///
     /// The number of row operations (inserts and updates combined).
-    // TODO(indexer-v2): drop the allow once the coordinator is wired up.
-    #[allow(dead_code)]
+    // Public write API; the indexer writes through commit_flush_group, tests
+    // and external tooling use this directly.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn upsert_observations(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let written = Self::upsert_observations_tx(&tx, packages)?;
@@ -529,8 +530,7 @@ impl Database {
     /// Drop the FTS sync triggers for bulk ingestion. Pair with
     /// [`Self::rebuild_fts`] (which also recreates the triggers) in a
     /// `--full`/catch-up run's finish step; measured 28x writer speedup.
-    // TODO(indexer-v2): drop the allow once the coordinator is wired up.
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn drop_fts_triggers(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
@@ -544,8 +544,7 @@ impl Database {
 
     /// Rebuild the FTS index from the content table and recreate the sync
     /// triggers dropped by [`Self::drop_fts_triggers`].
-    // TODO(indexer-v2): drop the allow once the coordinator is wired up.
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn rebuild_fts(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"

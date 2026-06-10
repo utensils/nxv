@@ -1,6 +1,3 @@
-// TODO(indexer-v2): drop the file-level allow once the coordinator is wired up.
-#![allow(dead_code)]
-
 //! The `releases` table: a ledger of channel releases (snapshots) and their
 //! ingestion state.
 //!
@@ -61,6 +58,8 @@ pub enum ReleaseStatus {
 }
 
 impl ReleaseStatus {
+    // Symmetric with from_str; consumed by stats display.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn as_str(&self) -> &'static str {
         match self {
             ReleaseStatus::Pending => "pending",
@@ -81,6 +80,9 @@ impl ReleaseStatus {
 }
 
 /// One row of the `releases` ledger.
+// Some fields are carried for stats/reporting surfaces rather than read by
+// the pipeline itself.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ReleaseRecord {
     pub id: i64,
@@ -126,6 +128,7 @@ const RELEASE_COLUMNS: &str = "id, channel, release_name, commit_hash, commit_co
      release_date, source, status, attempts, last_attempt_at, attr_count, error, ingested_at";
 
 /// Per-channel ingestion summary used by `nxv stats` and the monitor.
+#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 #[derive(Debug, Clone, Default)]
 pub struct ChannelCoverage {
     pub channel: String,
@@ -253,6 +256,7 @@ impl Database {
     }
 
     /// Newest ingested release, optionally constrained to one channel.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn newest_ingested_release(&self, channel: Option<&str>) -> Result<Option<ReleaseRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             r#"
@@ -298,6 +302,7 @@ impl Database {
     /// Per-channel status summary (for `nxv stats` and the run report).
     /// Returns an empty vec when the releases table doesn't exist (pre-v4 DB
     /// opened read-only).
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn channel_coverage(&self) -> Result<Vec<ChannelCoverage>> {
         let has_table: bool = self.conn.query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='releases'",
@@ -340,7 +345,8 @@ impl Database {
 
     /// True when every known release at or before `watermark_date` is
     /// `ingested` or `skipped` — the CI publish gate.
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    // TODO(indexer-v2): wired into `nxv publish` gating in the publisher pass.
+    #[allow(dead_code)]
     pub fn releases_settled_before(&self, watermark_date: DateTime<Utc>) -> Result<bool> {
         let unsettled: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM releases \

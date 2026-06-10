@@ -6,9 +6,13 @@
 //! - `packages.json.br` per release from releases.nixos.org (2020-03-27 →
 //!   today; no Nix evaluation at all),
 //! - `nix-env -qaP --json --meta` over each release's `nixexprs.tar.xz`
-//!   (2016-09-28 → 2020-03-27),
+//!   (2016-09-28 → 2020-03-27, behind `--backfill-evals`),
 //! - an optional `--head-eval` pass over the GitHub tarball of master HEAD
 //!   for channel-stuck periods.
+//!
+//! Pipeline (DESIGN.md §4): plan → parallel fetch/parse → in-order gate
+//! (BEFORE any write) → aggregated widen-only upserts (atomic with the
+//! release ledger) → finish (FTS/bloom rebuild, watermarks, report).
 //!
 //! See docs/indexer-rewrite/DESIGN.md for the full specification and
 //! docs/indexer-rewrite/ANALYSIS.md for why the previous git-walking,
@@ -21,25 +25,555 @@ pub mod releases;
 pub mod snapshot;
 
 use crate::bloom::PackageBloomFilter;
+use crate::cli::{Cli, IndexArgs};
 use crate::db::Database;
+use crate::db::queries::PackageVersion;
+use crate::db::releases::{ReleaseRecord, ReleaseSource};
 use crate::error::{NxvError, Result};
+use chrono::{DateTime, NaiveDate, Utc};
+use monitor::RunReport;
+use releases::S3Client;
+use snapshot::SnapshotEntry;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+
+/// Flush the aggregator after this many gated releases (full/catch-up runs).
+const FLUSH_GROUP_RELEASES: usize = 64;
+
+/// ... or when it holds this many distinct (attr, version) pairs.
+const FLUSH_GROUP_MAX_PAIRS: usize = 400_000;
+
+/// Drop FTS triggers (and rebuild at the end) when ingesting at least this
+/// many releases in one run.
+const FTS_BULK_THRESHOLD: usize = 50;
+
+/// `--head-eval` only fires when the newest channel observation is older
+/// than this many hours.
+const HEAD_EVAL_LAG_HOURS: i64 = 24;
+
+/// Environment override for the release bucket URL (tests, mirrors).
+const RELEASES_URL_ENV: &str = "NXV_RELEASES_URL";
 
 /// Entry point for `nxv index`.
-///
-/// Coordinator under construction: the snapshot pipeline modules (releases,
-/// snapshot, monitor, eval) land in subsequent commits per DESIGN.md.
-pub fn run_index(_cli: &crate::cli::Cli, _args: &crate::cli::IndexArgs) -> Result<()> {
-    Err(NxvError::Config(
-        "the snapshot indexer coordinator is not wired up yet (rewrite in progress)".to_string(),
-    ))
+pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
+    let mut db = Database::open(&cli.db_path)?;
+
+    let base_url =
+        std::env::var(RELEASES_URL_ENV).unwrap_or_else(|_| releases::DEFAULT_BASE_URL.to_string());
+    let s3 = S3Client::new(&base_url)?;
+
+    let channel_names = args.channels.clone().unwrap_or_else(|| {
+        releases::builtin_channels()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    });
+    let channels = releases::resolve_channels(&channel_names)?;
+
+    let since = parse_date_arg(args.since.as_deref(), "since")?;
+    let until = parse_date_arg(args.until.as_deref(), "until")?;
+
+    // Graceful Ctrl+C: finish the in-flight release group, then stop. An
+    // interrupted run leaves pending rows that the next run picks up.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        let _ = ctrlc::set_handler(move || {
+            eprintln!("\nReceived Ctrl+C, finishing in-flight work...");
+            flag.store(true, Ordering::SeqCst);
+        });
+    }
+
+    let quiet = cli.quiet;
+    let progress = |msg: &str| {
+        if !quiet {
+            eprintln!("{msg}");
+        }
+    };
+
+    // ── Plan ────────────────────────────────────────────────────────────
+    if args.full {
+        let reset = db.connection().execute(
+            "UPDATE releases SET status = 'pending', attempts = 0, error = NULL \
+             WHERE status IN ('ingested', 'failed', 'skipped')",
+            [],
+        )?;
+        if reset > 0 {
+            progress(&format!("--full: re-queued {reset} known releases"));
+        }
+    }
+
+    let plan = releases::plan_releases(&db, &s3, &channels, since, until, &progress)?;
+    progress(&format!(
+        "plan: {} release dirs seen, {} new, {} unparseable (skipped)",
+        plan.dirs_seen, plan.new_releases, plan.skipped_unparseable
+    ));
+
+    // ── Work list ───────────────────────────────────────────────────────
+    let channel_prefixes: HashMap<String, String> = channels
+        .iter()
+        .map(|c| (c.name.clone(), c.s3_prefix.clone()))
+        .collect();
+
+    let mut worklist: Vec<ReleaseRecord> = db
+        .release_worklist(args.retry_failed)?
+        .into_iter()
+        .filter(|r| channel_prefixes.contains_key(&r.channel))
+        .filter(|r| match (since, until) {
+            (Some(s), _) if r.release_date < s => false,
+            (_, Some(u)) if r.release_date > u => false,
+            _ => true,
+        })
+        .filter(|r| args.backfill_evals || r.source != ReleaseSource::NixEnv)
+        .collect();
+    if let Some(max) = args.max_releases {
+        worklist.truncate(max);
+    }
+
+    let mut report = RunReport {
+        planned: worklist.len(),
+        ..Default::default()
+    };
+
+    if worklist.is_empty() {
+        progress("nothing to ingest: all known releases are settled");
+    } else {
+        progress(&format!("ingesting {} releases...", worklist.len()));
+        let jobs = args.jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(2)
+        });
+
+        let bulk = worklist.len() >= FTS_BULK_THRESHOLD;
+        if bulk {
+            db.drop_fts_triggers()?;
+        }
+
+        let outcome = ingest_worklist(
+            &mut db,
+            &s3,
+            &channel_prefixes,
+            worklist,
+            jobs,
+            &shutdown,
+            &mut report,
+            &progress,
+        );
+
+        if bulk {
+            progress("rebuilding FTS index...");
+            db.rebuild_fts()?;
+        }
+        outcome?;
+    }
+
+    // ── --head-eval: cover channel-stuck periods ────────────────────────
+    if args.head_eval && !shutdown.load(Ordering::SeqCst) {
+        run_head_eval(&mut db, &s3, args, &mut report, &progress)?;
+    }
+
+    // ── Finish ──────────────────────────────────────────────────────────
+    progress("rebuilding bloom filter...");
+    let bloom_path = crate::paths::get_bloom_path_for_db(&cli.db_path);
+    save_bloom_filter(&db, &bloom_path)?;
+
+    // Watermarks: load-bearing for manifest.latest_commit, `nxv update`'s
+    // UpToDate check, /health, /api/v1/stats and the frontend stats panel.
+    if let Some(newest) = db.newest_ingested_release(None)? {
+        db.set_meta("last_indexed_commit", &newest.commit_hash)?;
+        db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+    }
+
+    report.finalize(&db, args.strict)?;
+    if !quiet {
+        report.print();
+    }
+    if let Some(path) = &args.report {
+        report.write_json(path)?;
+        progress(&format!("report written to {}", path.display()));
+    }
+
+    if shutdown.load(Ordering::SeqCst) {
+        progress("interrupted: unfinished releases stay pending; run again to continue");
+    }
+
+    if args.strict && !report.healthy {
+        return Err(NxvError::Config(
+            "index run is unhealthy under --strict (see report above)".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Parse a `--since`/`--until` argument (YYYY-MM-DD or RFC 3339).
+fn parse_date_arg(value: Option<&str>, flag: &str) -> Result<Option<DateTime<Utc>>> {
+    let Some(value) = value else { return Ok(None) };
+    if let Ok(dt) = value.parse::<DateTime<Utc>>() {
+        return Ok(Some(dt));
+    }
+    if let Ok(date) = value.parse::<NaiveDate>()
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(dt.and_utc()));
+    }
+    Err(NxvError::Config(format!(
+        "invalid --{flag} value {value:?}: expected YYYY-MM-DD or RFC 3339"
+    )))
+}
+
+/// What a fetch worker hands back to the coordinator.
+type FetchResult = (usize, Result<Vec<SnapshotEntry>>);
+
+/// Multi-release aggregator: merges K consecutive gated snapshots so row
+/// writes are O(distinct pairs), not O(alive attrs × releases) — measured
+/// churn is ~63 new pairs per advance vs ~144k alive rows.
+#[derive(Default)]
+struct Aggregator {
+    pairs: HashMap<(String, String), PackageVersion>,
+    releases: Vec<(i64, i64)>,
+}
+
+impl Aggregator {
+    fn add_release(&mut self, release: &ReleaseRecord, entries: Vec<SnapshotEntry>) {
+        let attr_count = entries.len() as i64;
+        for entry in entries {
+            let key = (entry.attribute_path.clone(), entry.version.clone());
+            match self.pairs.get_mut(&key) {
+                Some(existing) => {
+                    // Widen bounds; metadata follows the newest observation.
+                    if release.release_date < existing.first_commit_date {
+                        existing.first_commit_hash = release.commit_hash.clone();
+                        existing.first_commit_date = release.release_date;
+                    }
+                    if release.release_date >= existing.last_commit_date {
+                        existing.last_commit_hash = release.commit_hash.clone();
+                        existing.last_commit_date = release.release_date;
+                        existing.description = entry.description;
+                        existing.license = entry.license;
+                        existing.homepage = entry.homepage;
+                        existing.maintainers = entry.maintainers;
+                        existing.platforms = entry.platforms;
+                        if entry.source_path.is_some() {
+                            existing.source_path = entry.source_path;
+                        }
+                        existing.known_vulnerabilities = entry.known_vulnerabilities;
+                        existing.name = entry.name;
+                    }
+                }
+                None => {
+                    self.pairs.insert(
+                        key,
+                        PackageVersion {
+                            id: 0,
+                            name: entry.name,
+                            version: entry.version,
+                            first_commit_hash: release.commit_hash.clone(),
+                            first_commit_date: release.release_date,
+                            last_commit_hash: release.commit_hash.clone(),
+                            last_commit_date: release.release_date,
+                            attribute_path: entry.attribute_path,
+                            description: entry.description,
+                            license: entry.license,
+                            homepage: entry.homepage,
+                            maintainers: entry.maintainers,
+                            platforms: entry.platforms,
+                            source_path: entry.source_path,
+                            known_vulnerabilities: entry.known_vulnerabilities,
+                        },
+                    );
+                }
+            }
+        }
+        self.releases.push((release.id, attr_count));
+    }
+
+    fn should_flush(&self) -> bool {
+        self.releases.len() >= FLUSH_GROUP_RELEASES || self.pairs.len() >= FLUSH_GROUP_MAX_PAIRS
+    }
+
+    fn is_empty(&self) -> bool {
+        self.releases.is_empty()
+    }
+
+    /// Write everything in one transaction: rows + `ingested` marks commit
+    /// atomically (a release can never be `ingested` without its rows).
+    fn flush(&mut self, db: &mut Database) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<PackageVersion> = std::mem::take(&mut self.pairs).into_values().collect();
+        let marks = std::mem::take(&mut self.releases);
+        db.commit_flush_group(&rows, &marks)?;
+        Ok(())
+    }
+}
+
+/// Fetch + parse one release (worker side; no DB access).
+fn fetch_release(
+    s3: &S3Client,
+    prefix: &str,
+    release: &ReleaseRecord,
+) -> Result<Vec<SnapshotEntry>> {
+    match release.source {
+        ReleaseSource::PackagesJson => s3.fetch_packages_json(prefix, &release.release_name),
+        ReleaseSource::NixEnv => eval::ingest_nix_env_release(s3, prefix, &release.release_name),
+        ReleaseSource::HeadEval => Err(NxvError::Config(
+            "head_eval releases are ingested by the head-eval pass, not the worklist".to_string(),
+        )),
+    }
+}
+
+/// The parallel ingest pipeline over a planned work list.
+#[allow(clippy::too_many_arguments)]
+fn ingest_worklist(
+    db: &mut Database,
+    s3: &S3Client,
+    channel_prefixes: &HashMap<String, String>,
+    worklist: Vec<ReleaseRecord>,
+    jobs: usize,
+    shutdown: &Arc<AtomicBool>,
+    report: &mut RunReport,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let total = worklist.len();
+    let sentinels = monitor::builtin_sentinels(&[]);
+
+    // Shared queue of work items; workers pull, fetch+parse, and send
+    // (seq, result) back. The bounded channel caps parsed snapshots in
+    // flight (each can be ~50-100 MB).
+    let queue: Arc<Mutex<VecDeque<(usize, ReleaseRecord)>>> =
+        Arc::new(Mutex::new(worklist.iter().cloned().enumerate().collect()));
+    let (tx, rx) = mpsc::sync_channel::<FetchResult>(jobs.max(1));
+
+    let mut handles = Vec::new();
+    for _ in 0..jobs.max(1) {
+        let queue = Arc::clone(&queue);
+        let tx = tx.clone();
+        let s3 = s3.clone();
+        let prefixes = channel_prefixes.clone();
+        let shutdown = Arc::clone(shutdown);
+        handles.push(std::thread::spawn(move || {
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some((seq, release)) = queue.lock().expect("queue lock").pop_front() else {
+                    break;
+                };
+                let prefix = prefixes.get(&release.channel).cloned().unwrap_or_default();
+                let result = fetch_release(&s3, &prefix, &release);
+                if tx.send((seq, result)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    drop(tx);
+
+    // Coordinator: re-order results by seq so gating sees releases in
+    // chronological order (births/deaths need consecutive snapshots).
+    let mut buffer: BTreeMap<usize, Result<Vec<SnapshotEntry>>> = BTreeMap::new();
+    let mut next_seq = 0usize;
+    let mut prev_attrs: HashMap<String, (HashSet<String>, ReleaseSource)> = HashMap::new();
+    let mut aggregator = Aggregator::default();
+    let mut hard_error: Option<NxvError> = None;
+
+    'outer: for incoming in rx.iter() {
+        buffer.insert(incoming.0, incoming.1);
+
+        while let Some(result) = buffer.remove(&next_seq) {
+            let release = &worklist[next_seq];
+            next_seq += 1;
+
+            db.mark_release_attempt(release.id)?;
+
+            match result {
+                Ok(entries) => {
+                    let gate = monitor::evaluate_release_gate(
+                        db,
+                        release,
+                        &entries,
+                        prev_attrs
+                            .get(&release.channel)
+                            .map(|(attrs, source)| (attrs, *source)),
+                        &sentinels,
+                    )?;
+
+                    if !gate.passed() {
+                        for failure in &gate.failures {
+                            progress(&format!(
+                                "  GATE FAILED {}: {failure}",
+                                release.release_name
+                            ));
+                        }
+                        db.mark_release_failed(release.id, &gate.failures.join("; "))?;
+                        report.failed += 1;
+                        report.anomalies.push(gate);
+                        continue;
+                    }
+                    if !gate.warnings.is_empty() {
+                        for warning in &gate.warnings {
+                            progress(&format!("  warn {}: {warning}", release.release_name));
+                        }
+                        report.anomalies.push(gate.clone());
+                    }
+
+                    prev_attrs.insert(
+                        release.channel.clone(),
+                        (
+                            entries.iter().map(|e| e.attribute_path.clone()).collect(),
+                            release.source,
+                        ),
+                    );
+
+                    aggregator.add_release(release, entries);
+                    report.ingested += 1;
+                    if report.ingested.is_multiple_of(25) || total <= 25 {
+                        progress(&format!(
+                            "  [{}/{}] {} ({} attrs)",
+                            next_seq, total, release.release_name, gate.attr_count
+                        ));
+                    }
+
+                    if aggregator.should_flush() {
+                        aggregator.flush(db)?;
+                    }
+                }
+                Err(e) => {
+                    // A packages.json 404 just before the era boundary means
+                    // this release predates the artifact: reclassify.
+                    let safe_after: DateTime<Utc> = releases::PACKAGES_JSON_SAFE_AFTER
+                        .parse()
+                        .expect("valid constant timestamp");
+                    if release.source == ReleaseSource::PackagesJson
+                        && matches!(&e, NxvError::NetworkMessage(msg) if msg.contains("HTTP 404"))
+                        && release.release_date < safe_after
+                    {
+                        progress(&format!(
+                            "  {}: no packages.json.br — reclassified to the nix-env era",
+                            release.release_name
+                        ));
+                        db.connection().execute(
+                            "UPDATE releases SET source = 'nix_env', status = 'pending' WHERE id = ?",
+                            [release.id],
+                        )?;
+                        continue;
+                    }
+
+                    progress(&format!("  FAILED {}: {e}", release.release_name));
+                    db.mark_release_failed(release.id, &e.to_string())?;
+                    report.failed += 1;
+
+                    // Hard-fail fast on configuration errors (e.g. nix
+                    // missing for --backfill-evals) instead of failing every
+                    // release in the list.
+                    if matches!(&e, NxvError::NixEval(msg) if msg.contains("is nix installed")) {
+                        hard_error = Some(e);
+                        shutdown.store(true, Ordering::SeqCst);
+                        break 'outer;
+                    }
+                }
+            }
+
+            if shutdown.load(Ordering::SeqCst) {
+                break 'outer;
+            }
+        }
+    }
+
+    // Final flush of whatever the group holds (also on interrupt — the
+    // gated releases in the aggregator are complete observations).
+    aggregator.flush(db)?;
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    if let Some(e) = hard_error {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `--head-eval`: when every channel observation is stale, evaluate master
+/// HEAD directly so the index keeps tracking nixpkgs during channel stalls.
+fn run_head_eval(
+    db: &mut Database,
+    s3: &S3Client,
+    _args: &IndexArgs,
+    report: &mut RunReport,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let newest = db.newest_ingested_release(None)?;
+    let lag_hours = newest
+        .as_ref()
+        .map(|r| (Utc::now() - r.release_date).num_hours())
+        .unwrap_or(i64::MAX);
+    if lag_hours < HEAD_EVAL_LAG_HOURS {
+        progress(&format!(
+            "head-eval skipped: newest channel observation is {lag_hours}h old (< {HEAD_EVAL_LAG_HOURS}h)"
+        ));
+        return Ok(());
+    }
+
+    progress("head-eval: channel observations are stale; evaluating master HEAD...");
+    let head = eval::resolve_master_head(s3)?;
+    let release_name = format!("master-{}", &head.sha[..12]);
+
+    if !db.insert_release_pending(
+        "master",
+        &release_name,
+        &head.sha,
+        None,
+        head.committed_at,
+        ReleaseSource::HeadEval,
+    )? {
+        progress(&format!("head-eval: {release_name} already ingested"));
+        return Ok(());
+    }
+
+    let release = db
+        .release_worklist(false)?
+        .into_iter()
+        .find(|r| r.release_name == release_name)
+        .ok_or_else(|| NxvError::Config("head-eval release vanished from ledger".to_string()))?;
+
+    db.mark_release_attempt(release.id)?;
+    match eval::ingest_master_head(s3, &head) {
+        Ok(entries) => {
+            let sentinels = monitor::builtin_sentinels(&[]);
+            let gate = monitor::evaluate_release_gate(db, &release, &entries, None, &sentinels)?;
+            if !gate.passed() {
+                db.mark_release_failed(release.id, &gate.failures.join("; "))?;
+                report.failed += 1;
+                report.anomalies.push(gate);
+                return Ok(());
+            }
+            let mut aggregator = Aggregator::default();
+            aggregator.add_release(&release, entries);
+            aggregator.flush(db)?;
+            report.ingested += 1;
+            progress(&format!(
+                "head-eval: ingested {} ({} attrs)",
+                release_name, gate.attr_count
+            ));
+        }
+        Err(e) => {
+            progress(&format!("head-eval failed: {e}"));
+            db.mark_release_failed(release.id, &e.to_string())?;
+            report.failed += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Build a bloom filter over every distinct attribute path in the database.
 ///
 /// Dotted (nested) attribute paths are inserted verbatim — the query layer
 /// checks exact attribute paths against the filter.
-// TODO(indexer-v2): drop the allow once the coordinator is wired up.
-#[allow(dead_code)]
 pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
     use crate::db::queries;
 
@@ -55,8 +589,6 @@ pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
 }
 
 /// Build and save a bloom filter for the index.
-// TODO(indexer-v2): drop the allow once the coordinator is wired up.
-#[allow(dead_code)]
 pub fn save_bloom_filter<P: AsRef<std::path::Path>>(db: &Database, bloom_path: P) -> Result<()> {
     let filter = build_bloom_filter(db)?;
     let bloom_path = bloom_path.as_ref();
@@ -72,9 +604,7 @@ pub fn save_bloom_filter<P: AsRef<std::path::Path>>(db: &Database, bloom_path: P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::queries::PackageVersion;
     use chrono::TimeZone;
-    use chrono::Utc;
     use tempfile::tempdir;
 
     fn test_package(attr: &str, version: &str) -> PackageVersion {
@@ -95,6 +625,122 @@ mod tests {
             source_path: None,
             known_vulnerabilities: None,
         }
+    }
+
+    fn entry(attr: &str, version: &str) -> SnapshotEntry {
+        SnapshotEntry {
+            attribute_path: attr.to_string(),
+            name: attr.rsplit('.').next().unwrap_or(attr).to_string(),
+            version: version.to_string(),
+            description: Some(format!("{attr} description")),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }
+    }
+
+    fn release_at(id: i64, secs: i64, hash_char: char) -> ReleaseRecord {
+        ReleaseRecord {
+            id,
+            channel: "nixpkgs-unstable".to_string(),
+            release_name: format!("nixpkgs-test-{id}"),
+            commit_hash: hash_char.to_string().repeat(40),
+            commit_count: Some(id),
+            release_date: Utc.timestamp_opt(secs, 0).unwrap(),
+            source: ReleaseSource::PackagesJson,
+            status: crate::db::releases::ReleaseStatus::Pending,
+            attempts: 0,
+            last_attempt_at: None,
+            attr_count: None,
+            error: None,
+            ingested_at: None,
+        }
+    }
+
+    #[test]
+    fn test_aggregator_merges_consecutive_releases() {
+        let r1 = release_at(1, 1_000, 'a');
+        let r2 = release_at(2, 2_000, 'b');
+        let r3 = release_at(3, 3_000, 'c');
+
+        let mut agg = Aggregator::default();
+        agg.add_release(&r1, vec![entry("firefox", "100.0"), entry("hello", "2.12")]);
+        agg.add_release(&r2, vec![entry("firefox", "100.0"), entry("hello", "2.12")]);
+        agg.add_release(&r3, vec![entry("firefox", "101.0"), entry("hello", "2.12")]);
+
+        assert_eq!(agg.pairs.len(), 3, "two firefox versions + one hello");
+        assert_eq!(agg.releases.len(), 3);
+
+        let ff100 = agg
+            .pairs
+            .get(&("firefox".to_string(), "100.0".to_string()))
+            .unwrap();
+        assert_eq!(ff100.first_commit_hash, "a".repeat(40));
+        assert_eq!(
+            ff100.last_commit_hash,
+            "b".repeat(40),
+            "100.0 last seen at r2"
+        );
+
+        let hello = agg
+            .pairs
+            .get(&("hello".to_string(), "2.12".to_string()))
+            .unwrap();
+        assert_eq!(hello.first_commit_hash, "a".repeat(40));
+        assert_eq!(
+            hello.last_commit_hash,
+            "c".repeat(40),
+            "hello spans all three"
+        );
+    }
+
+    #[test]
+    fn test_aggregator_flush_marks_releases_ingested() {
+        let dir = tempdir().unwrap();
+        let mut db = Database::open(dir.path().join("t.db")).unwrap();
+        db.insert_release_pending(
+            "nixpkgs-unstable",
+            "release-1",
+            &"a".repeat(40),
+            Some(1),
+            Utc.timestamp_opt(1_000, 0).unwrap(),
+            ReleaseSource::PackagesJson,
+        )
+        .unwrap();
+        let ledger = db.release_worklist(false).unwrap().remove(0);
+
+        let mut agg = Aggregator::default();
+        agg.add_release(&ledger, vec![entry("firefox", "100.0")]);
+        agg.flush(&mut db).unwrap();
+        assert!(agg.is_empty());
+
+        let newest = db.newest_ingested_release(None).unwrap().unwrap();
+        assert_eq!(newest.attr_count, Some(1));
+
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_parse_date_arg() {
+        assert_eq!(parse_date_arg(None, "since").unwrap(), None);
+        let d = parse_date_arg(Some("2024-01-15"), "since")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.to_rfc3339(), "2024-01-15T00:00:00+00:00");
+        let d = parse_date_arg(Some("2024-01-15T12:30:00Z"), "until")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.to_rfc3339(), "2024-01-15T12:30:00+00:00");
+        assert!(parse_date_arg(Some("yesterday"), "since").is_err());
     }
 
     #[test]

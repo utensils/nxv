@@ -1,6 +1,3 @@
-// TODO(indexer-v2): drop the file-level allow once the coordinator is wired up.
-#![allow(dead_code)]
-
 //! Channel-release discovery from the releases.nixos.org S3 bucket.
 //!
 //! The bucket (`nix-releases`) is publicly listable. Each release lives in a
@@ -141,6 +138,8 @@ fn encode_query_value(value: &str) -> String {
 }
 
 /// Minimal blocking HTTP client for the S3 bucket with retry/backoff.
+/// Cheap to clone (reqwest clients share their connection pool).
+#[derive(Clone)]
 pub struct S3Client {
     client: reqwest::blocking::Client,
     base_url: String,
@@ -172,6 +171,27 @@ impl S3Client {
     /// (e.g. the GitHub API in `--head-eval`).
     pub fn http(&self) -> &reqwest::blocking::Client {
         &self.client
+    }
+
+    /// Download and parse `<prefix><release>/packages.json.br`, streaming
+    /// through brotli + JSON so the ~381 MB decompressed document is never
+    /// materialized. A 404 surfaces as a `NetworkMessage` containing
+    /// "HTTP 404" — the coordinator uses it to reclassify pre-boundary
+    /// releases to the nix-env era.
+    pub fn fetch_packages_json(
+        &self,
+        prefix: &str,
+        release: &str,
+    ) -> Result<Vec<crate::index::snapshot::SnapshotEntry>> {
+        let url = format!("{}/{}{}/packages.json.br", self.base_url, prefix, release);
+        let resp = self.get_with_retry(&url)?;
+        if !resp.status().is_success() {
+            return Err(NxvError::NetworkMessage(format!(
+                "packages.json fetch failed: HTTP {} from {url}",
+                resp.status()
+            )));
+        }
+        crate::index::snapshot::parse_packages_json_br(resp)
     }
 
     /// Stream a URL to a file on disk (used for nixexprs/HEAD tarballs).

@@ -1,6 +1,3 @@
-// TODO(indexer-v2): drop the file-level allow once the coordinator is wired up.
-#![allow(dead_code)]
-
 //! Eval-based ingestion: the pre-packages.json era and `--head-eval`.
 //!
 //! Both paths use one verified recipe — `nix-env -f <tree> -qaP --json
