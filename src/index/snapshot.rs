@@ -3,7 +3,7 @@
 //! Two wire formats, one output shape:
 //!
 //! - `packages.json.br` (2020-03-27 →): brotli-compressed
-//!   `{"version": 2, "packages": { <attrpath>: {name, pname, version, system, meta} }}`.
+//!   `{"version": "2", "packages": { <attrpath>: {name, pname, version, system, meta} }}`.
 //!   Parsed **streaming** — the decompressed JSON reaches ~381 MB and is never
 //!   materialized; entries fold one at a time into the output vector.
 //! - `nix-env -qaP --json --meta` output (pre-2020 era): the same entry shape
@@ -352,7 +352,16 @@ pub fn parse_packages_json<R: Read>(reader: R) -> Result<Vec<SnapshotEntry>> {
         {
             while let Some(key) = map.next_key::<String>()? {
                 match key.as_str() {
-                    "version" => self.version_seen = Some(map.next_value::<u64>()?),
+                    // The format version is the STRING "2" in real artifacts
+                    // (and trails the packages map); tolerate numbers too.
+                    "version" => {
+                        let v: Value = map.next_value()?;
+                        self.version_seen = match &v {
+                            Value::Number(n) => n.as_u64(),
+                            Value::String(s) => s.parse().ok(),
+                            _ => None,
+                        };
+                    }
                     "packages" => map.next_value_seed(PackagesMapSeed {
                         out: &mut self.entries,
                     })?,
@@ -430,7 +439,7 @@ mod tests {
     #[test]
     fn test_modern_packages_json_with_era_2026_fields() {
         let json = r#"{
-          "version": 2,
+          "version": "2",
           "packages": {
             "firefox": {
               "name": "firefox-146.0.1",
@@ -515,7 +524,7 @@ mod tests {
     #[test]
     fn test_2020_era_position_prefix_and_pname_drift() {
         let json = r#"{
-          "version": 2,
+          "version": "2",
           "packages": {
             "python38Packages.requests": {
               "name": "python3.8-requests-2.23.0",
@@ -552,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_envelope_version_is_asserted() {
-        let bad = r#"{"version": 3, "packages": {}}"#;
+        let bad = r#"{"version": "3", "packages": {}}"#;
         assert!(parse_packages_json(bad.as_bytes()).is_err());
 
         let missing = r#"{"packages": {}}"#;
@@ -607,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_brotli_roundtrip_and_truncation() {
-        let json = br#"{"version": 2, "packages": {"hello": {"pname": "hello", "version": "2.12", "meta": {}}}}"#;
+        let json = br#"{"version": "2", "packages": {"hello": {"pname": "hello", "version": "2.12", "meta": {}}}}"#;
 
         let mut compressed = Vec::new();
         {

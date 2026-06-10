@@ -407,7 +407,7 @@ pub fn plan_releases(
 
     for channel in channels {
         progress(&format!(
-            "listing {} ({}{})...",
+            "listing {} ({}/{})...",
             channel.name,
             s3.base_url(),
             channel.s3_prefix
@@ -435,13 +435,16 @@ pub fn plan_releases(
             }
         }
 
-        // Chronological by commit count so interrupted planning leaves a
-        // contiguous ledger prefix.
-        new_dirs.sort_by_key(|p| p.commit_count);
+        // Newest-first: commit_count is monotone with time (verified:
+        // preNNNNNN == `git rev-list --count`), so when --since is set we can
+        // stop fetching git-revision as soon as we descend past the window —
+        // this keeps incremental planning to a handful of GETs instead of
+        // one per historical release.
+        new_dirs.sort_by_key(|p| std::cmp::Reverse(p.commit_count));
 
         if !new_dirs.is_empty() {
             progress(&format!(
-                "{}: {} new releases to record",
+                "{}: {} new release dirs to examine",
                 channel.name,
                 new_dirs.len()
             ));
@@ -473,7 +476,10 @@ pub fn plan_releases(
             if let Some(since) = since
                 && release_date < since
             {
-                continue;
+                // Descending by commit count: every remaining dir is older.
+                // (The handful of re-uploaded ancient dirs with bogus 2020
+                // dates sit at the very bottom and are pruned with them.)
+                break;
             }
             if let Some(until) = until
                 && release_date > until
