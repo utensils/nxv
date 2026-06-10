@@ -155,7 +155,10 @@
     // version whose last-seen commit is current, so prefer last_commit_hash
     // here. For legacy (pre-flake) tarball imports either hash works; keep
     // the historical preference for first_commit_hash.
-    const ref = isLegacy ? shortHash(r.hash || r.lastHash) : shortHash(r.lastHash || r.hash);
+    // Commands always embed the FULL hash: `nix` resolves github: refs via
+    // GitHub's API, which 422s on abbreviated SHAs that are ambiguous in
+    // nixpkgs' ~1M-commit history (issue #21).
+    const ref = isLegacy ? r.hash || r.lastHash : r.lastHash || r.hash;
     return isLegacy
       ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${ref}.tar.gz") {}).${r.attr}'`
       : `${insecurePrefix}nix shell${impure} nixpkgs/${ref}#${r.attr}`;
@@ -428,7 +431,7 @@
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
         else if (action === 'copy-run')
-          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+          copy(`nix run nixpkgs/${r.lastHash || r.hash}#${r.attr}`);
         else if (action === 'history') openDrawer(r);
       });
     });
@@ -451,7 +454,7 @@
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
         else if (action === 'copy-run')
-          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+          copy(`nix run nixpkgs/${r.lastHash || r.hash}#${r.attr}`);
         else if (action === 'history') openDrawer(r);
       });
     });

@@ -139,6 +139,10 @@ impl PackageVersion {
     }
 
     /// Generate the appropriate nix shell command based on commit date and security status.
+    ///
+    /// Commands always embed the full commit hash: `nix` resolves `github:` refs
+    /// through GitHub's API, which rejects abbreviated SHAs that are ambiguous
+    /// in nixpkgs' ~1M-commit history (issue #21).
     pub fn nix_shell_cmd(&self) -> String {
         let insecure_prefix = if self.is_insecure() {
             "NIXPKGS_ALLOW_INSECURE=1 "
@@ -149,18 +153,13 @@ impl PackageVersion {
         if self.predates_flakes() {
             format!(
                 "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}'",
-                insecure_prefix,
-                self.last_commit_short(),
-                self.attribute_path
+                insecure_prefix, self.last_commit_hash, self.attribute_path
             )
         } else {
             let impure_flag = if self.is_insecure() { " --impure" } else { "" };
             format!(
                 "{}nix shell{} nixpkgs/{}#{}",
-                insecure_prefix,
-                impure_flag,
-                self.last_commit_short(),
-                self.attribute_path
+                insecure_prefix, impure_flag, self.last_commit_hash, self.attribute_path
             )
         }
     }
@@ -182,19 +181,13 @@ impl PackageVersion {
         if self.predates_flakes() {
             format!(
                 "{}nix-shell -p '(import (builtins.fetchTarball \"https://github.com/NixOS/nixpkgs/archive/{}.tar.gz\") {{}}).{}' --run {}",
-                insecure_prefix,
-                self.last_commit_short(),
-                self.attribute_path,
-                self.attribute_path
+                insecure_prefix, self.last_commit_hash, self.attribute_path, self.attribute_path
             )
         } else {
             let impure_flag = if self.is_insecure() { " --impure" } else { "" };
             format!(
                 "{}nix run{} nixpkgs/{}#{}",
-                insecure_prefix,
-                impure_flag,
-                self.last_commit_short(),
-                self.attribute_path
+                insecure_prefix, impure_flag, self.last_commit_hash, self.attribute_path
             )
         }
     }
@@ -1271,7 +1264,7 @@ mod tests {
         // Modern commit (after flakes), no vulnerabilities
         let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
         let cmd = pkg.nix_shell_cmd();
-        assert_eq!(cmd, "nix shell nixpkgs/def1234#test");
+        assert_eq!(cmd, "nix shell nixpkgs/def1234567890#test");
         assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
         assert!(!cmd.contains("--impure"));
     }
@@ -1286,7 +1279,7 @@ mod tests {
         let cmd = pkg.nix_shell_cmd();
         assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
         assert!(cmd.contains(" --impure "));
-        assert!(cmd.contains("nixpkgs/def1234#test"));
+        assert!(cmd.contains("nixpkgs/def1234567890#test"));
     }
 
     #[test]
@@ -1320,7 +1313,7 @@ mod tests {
         // Modern commit (after flakes), no vulnerabilities
         let pkg = make_test_package(Utc.timestamp_opt(1700000000, 0).unwrap(), None);
         let cmd = pkg.nix_run_cmd();
-        assert_eq!(cmd, "nix run nixpkgs/def1234#test");
+        assert_eq!(cmd, "nix run nixpkgs/def1234567890#test");
         assert!(!cmd.contains("NIXPKGS_ALLOW_INSECURE"));
         assert!(!cmd.contains("--impure"));
     }
@@ -1335,7 +1328,7 @@ mod tests {
         let cmd = pkg.nix_run_cmd();
         assert!(cmd.starts_with("NIXPKGS_ALLOW_INSECURE=1 "));
         assert!(cmd.contains(" --impure "));
-        assert!(cmd.contains("nixpkgs/def1234#test"));
+        assert!(cmd.contains("nixpkgs/def1234567890#test"));
     }
 
     #[test]
