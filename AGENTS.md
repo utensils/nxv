@@ -204,20 +204,24 @@ at `website/guide/skill.md`.
 
 ## Releasing
 
-**Use `/release` to prepare and execute a release.** This skill:
-
-1. Runs pre-flight checks (fmt, clippy, tests, nix flake check, clean git status)
-2. Generates release notes from git history
-3. Shows a complete summary of what will happen
-4. Asks for explicit confirmation with the version number
-5. Bumps version, updates Docker timestamp, commits, and tags
-6. CI/CD handles the rest (builds, GitHub release, crates.io, Docker, FlakeHub)
+Releases are automated with **release-plz** (`release-plz.toml` +
+`.github/workflows/release-plz.yml`). On every push to main it maintains a
+`chore: release vX.Y.Z` PR (version bump + CHANGELOG from conventional
+commits; `feat:` bumps the 0.x minor via `features_always_increment_minor`).
+**Merging that PR ships the release**: release-plz pushes the `vX.Y.Z` tag,
+which triggers `release.yml` and `flakehub-publish-tagged.yml`. Both
+release-plz jobs author with a GitHub App token (secrets
+`RELEASE_PLZ_APP_ID` / `RELEASE_PLZ_APP_PRIVATE_KEY`) — the default
+`GITHUB_TOKEN` would neither trigger CI on the release PR nor fire the
+tag-push workflows. Use `/release` to review and merge the release PR with
+confirmation; never merge it without explicit user approval.
 
 ## CI/CD & Index Publishing
 
 ### GitHub Actions Workflows
 
 - `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
+- `release-plz.yml`: On pushes to main - maintains the release PR; tags `vX.Y.Z` when it merges (see Releasing)
 - `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
 - `publish-index.yml`: Every 6 hours or manual - ingests new channel-release snapshots into the index and republishes to `index-latest` only when something was ingested and monitors are green (`--strict --head-eval --report`)
 - `pages.yml`: Deploys the VitePress docs site (`website/`) to GitHub Pages on pushes to main
