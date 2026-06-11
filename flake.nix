@@ -418,6 +418,12 @@
           checks = {
             inherit nxv;
 
+            # The indexer build runs its test suite inside the Nix sandbox
+            # (read-only HOME, loopback-only network) — an environment no
+            # other check exercises. Without this, sandbox-only failures
+            # surface first in the main-branch Docker image build.
+            inherit nxv-indexer;
+
             nxv-clippy = craneLib.cargoClippy (
               commonArgs
               // {
