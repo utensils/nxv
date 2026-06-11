@@ -19,9 +19,16 @@ use std::collections::HashSet;
 /// feed the relative count floor.
 const BASELINE_WINDOW: usize = 10;
 
-/// Relative floor: a release may not lose more than this fraction of the
-/// rolling baseline's package count.
-const BASELINE_FRACTION: f64 = 0.90;
+/// Relative thresholds against the rolling baseline. Real nixpkgs history
+/// contains legitimate step-function drops bigger than 10% (measured: -11.6%
+/// in one advance in Jan 2021; python2 purge era in Apr 2021), and a hard
+/// gate at 10% WEDGES: the baseline only updates from ingested releases, so
+/// after a real level shift every subsequent release fails forever. So:
+/// moderate drops warn (visible in the report/CI), only catastrophic drops
+/// (the parser-bug class) hard-fail; the absolute year-ladder floor and
+/// sentinels remain the unconditional hard gates.
+const BASELINE_WARN_FRACTION: f64 = 0.90;
+const BASELINE_HARD_FRACTION: f64 = 0.70;
 
 /// Deaths in a single advance beyond this fraction of the total trigger an
 /// advisory (mass renames are legitimate, e.g. python3xPackages flips).
@@ -220,16 +227,26 @@ pub fn evaluate_release_gate(
         release.release_date,
     )?;
     if let Some(&baseline) = recent.iter().max() {
-        let relative_floor = (baseline as f64 * BASELINE_FRACTION) as i64;
-        if (entries.len() as i64) < relative_floor {
+        let hard_floor = (baseline as f64 * BASELINE_HARD_FRACTION) as i64;
+        let warn_floor = (baseline as f64 * BASELINE_WARN_FRACTION) as i64;
+        let count = entries.len() as i64;
+        if count < hard_floor {
             result.failures.push(format!(
                 "package count {} is more than {:.0}% below the rolling baseline {} \
                  (max of last {} ingested {} releases)",
-                entries.len(),
-                (1.0 - BASELINE_FRACTION) * 100.0,
+                count,
+                (1.0 - BASELINE_HARD_FRACTION) * 100.0,
                 baseline,
                 recent.len(),
                 release.channel,
+            ));
+        } else if count < warn_floor {
+            result.warnings.push(format!(
+                "package count {} is {:.1}% below the rolling baseline {} \
+                 (legitimate mass-removals reach this range; verify if unexpected)",
+                count,
+                100.0 * (1.0 - count as f64 / baseline as f64),
+                baseline,
             ));
         }
     }
@@ -567,11 +584,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rolling_baseline_blocks_slow_leak() {
+    fn test_rolling_baseline_warns_on_moderate_drop_fails_on_catastrophic() {
         let dir = tempdir().unwrap();
         let mut db = Database::open(dir.path().join("t.db")).unwrap();
 
-        // Seed an ingested release with a healthy count.
+        // Seed an ingested release with a 200k count, dated BEFORE the
+        // candidates (the baseline is date-bounded).
         db.insert_release_pending(
             "nixpkgs-unstable",
             "release-prev",
@@ -582,11 +600,27 @@ mod tests {
         )
         .unwrap();
         let id = db.release_worklist(false).unwrap()[0].id;
-        db.commit_flush_group(&[], &[(id, 150_000)]).unwrap();
+        db.commit_flush_group(&[], &[(id, 200_000)]).unwrap();
 
         let rel = release("nixpkgs-unstable", ReleaseSource::PackagesJson, T_2026);
-        let entries = base_entries(132_000); // >130k absolute floor, but 12% below baseline
 
+        // 15% below baseline (above the absolute floor): a plausible
+        // real-world mass-removal — ingest with a warning. A hard gate here
+        // wedges after legitimate level shifts (verified against the
+        // Jan/Apr 2021 history).
+        let entries = base_entries(170_000);
+        let gate =
+            evaluate_release_gate(&db, &rel, &entries, None, &builtin_sentinels(&[])).unwrap();
+        assert!(
+            gate.passed(),
+            "moderate drops are advisory: {:?}",
+            gate.failures
+        );
+        assert!(gate.warnings.iter().any(|w| w.contains("rolling baseline")));
+
+        // 32.5% below baseline (still above the absolute floor): the
+        // parser-bug class hard-fails.
+        let entries = base_entries(135_000);
         let gate =
             evaluate_release_gate(&db, &rel, &entries, None, &builtin_sentinels(&[])).unwrap();
         assert!(!gate.passed());
