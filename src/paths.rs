@@ -66,7 +66,6 @@ pub fn get_bloom_path_for_db<P: AsRef<Path>>(db_path: P) -> PathBuf {
 /// let path = PathBuf::from("/tmp/foo");
 /// assert_eq!(expand_tilde(&path), path);
 /// ```
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
     let path = path.as_ref();
     if let Ok(stripped) = path.strip_prefix("~")
@@ -75,26 +74,6 @@ pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
         return home.join(stripped);
     }
     path.to_path_buf()
-}
-
-/// Ensures the nxv data directory exists, creating it and any missing parents if necessary.
-///
-/// This creates the directory returned by `get_data_dir()` when it does not already exist.
-/// I/O errors from creating directories are returned to the caller.
-///
-/// # Examples
-///
-/// ```
-/// // Create the data directory if needed; propagate or assert success in tests.
-/// assert!(nxv::paths::ensure_data_dir().is_ok());
-/// ```
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-pub fn ensure_data_dir() -> std::io::Result<()> {
-    let data_dir = get_data_dir();
-    if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

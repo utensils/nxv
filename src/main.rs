@@ -48,7 +48,13 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Shell tilde expansion doesn't happen for `--db-path=~/...` or
+    // NXV_DB_PATH=~/...; expand it once here so every command (and the
+    // parent-dir creation in cmd_index) sees a real path instead of a
+    // literal `~` directory.
+    cli.db_path = paths::expand_tilde(&cli.db_path);
 
     // Handle no-color flag
     if cli.no_color {
@@ -1238,8 +1244,16 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         );
     }
 
-    // Ensure data directory exists before opening database
-    paths::ensure_data_dir()?;
+    // Ensure the database's parent directory exists before opening it. Use
+    // the resolved --db-path, NOT the default platform data dir: with an
+    // overridden path the default dir is never touched, which matters when
+    // HOME is read-only (Nix build sandbox, locked-down service accounts).
+    if let Some(parent) = cli.db_path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
 
     Ok(crate::index::run_index(cli, args)?)
 }

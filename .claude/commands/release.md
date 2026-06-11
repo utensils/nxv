@@ -1,171 +1,67 @@
 ---
-description: Prepare and execute a release with pre-flight checks and user confirmation
+description: Review and merge the release-plz release PR with explicit user confirmation
 allowed-tools: Bash, Read, Grep, Edit, AskUserQuestion
 ---
 
 # Release
 
-Prepare and execute a release for nxv. Run pre-flight checks, generate release
-notes, and require explicit user confirmation before making any changes.
+Releases are driven by **release-plz** (`release-plz.toml` +
+`.github/workflows/release-plz.yml`). On every push to main it maintains a
+`chore: release vX.Y.Z` PR with the version bump and CHANGELOG update derived
+from conventional commits. **Merging that PR ships the release** — release-plz
+pushes the `vX.Y.Z` tag, which triggers `release.yml` (static binaries, GitHub
+release, crates.io, Docker) and `flakehub-publish-tagged.yml`.
 
-## Phase 1: Pre-flight Checks
+This command walks that flow safely. Never merge the release PR without
+explicit user confirmation — it is an outward-facing, hard-to-reverse action.
 
-Run these checks and stop immediately if any fail:
-
-```bash
-cargo fmt --check
-cargo clippy --features indexer -- -D warnings
-cargo test --features indexer
-markdownlint '**/*.md' --ignore node_modules
-nix flake check
-git status --porcelain
-```
-
-If `git status` shows uncommitted changes, stop and inform the user.
-
-## Phase 2: Gather Release Information
-
-1. Get the current version from `Cargo.toml`.
-2. Get the last tag with `git describe --tags --abbrev=0`.
-3. Get commits since last tag with `git log --oneline <last-tag>..HEAD`.
-4. Read current `CHANGELOG.md` to see unreleased section.
-
-## Phase 3: Determine Version
-
-Follow semantic versioning (`MAJOR.MINOR.PATCH`):
-
-- **MAJOR** - Breaking changes (API incompatibility, removed features)
-- **MINOR** - New features (backward compatible additions)
-- **PATCH** - Bug fixes (backward compatible fixes)
-
-Pre-release versions use hyphen suffix (e.g., `0.2.0-rc1`).
-
-Review the commits and suggest an appropriate version bump based on the changes.
-
-## Phase 4: Generate Release Notes
-
-Create markdown release notes with these sections:
-
-- **Features** - New functionality (commits starting with `feat:`)
-- **Fixes** - Bug fixes (commits starting with `fix:`)
-- **Other** - Everything else (refactor, chore, docs, etc.)
-
-## Phase 5: User Confirmation
-
-Present a summary and ask for confirmation before proceeding:
-
-```text
-=== RELEASE SUMMARY ===
-
-Current version: X.Y.Z
-Suggested version: A.B.C (reason: <major/minor/patch bump rationale>)
-
-Commits to be released:
-  <commit list>
-
-Release Notes:
-  <generated notes>
-
-Files to modify:
-  1. Cargo.toml - bump version to A.B.C
-  2. CHANGELOG.md - move Unreleased items to [A.B.C] section
-  3. Cargo.lock - updated automatically by cargo build
-
-Actions after verification:
-  4. Run cargo build/test/clippy to verify changes
-  5. Commit with message "chore: release A.B.C"
-  6. Run isolated Docker nix build (optional)
-  7. Create and push tag vA.B.C
-
-CI/CD will then:
-  - Build static binaries (Linux x86_64/aarch64, macOS x86_64/ARM64)
-  - Create GitHub Release with binaries and checksums
-  - Publish to crates.io
-  - Push Docker image to ghcr.io/utensils/nxv (timestamp derived from commit)
-  - Publish to FlakeHub
-
-Proceed? Enter version number to confirm, or "abort" to cancel.
-```
-
-Use `AskUserQuestion` to get confirmation. The user must provide the version
-number (e.g., `0.1.4` or `0.2.0`).
-
-## Phase 6: Execute Release
-
-Only proceed after explicit user confirmation with a version number.
-
-### Step 1: Update Cargo.toml
-
-Edit the `version` field to the new version.
-
-### Step 2: Update CHANGELOG.md
-
-Move the `[Unreleased]` section contents to a new version section:
-
-1. Create new section `## [A.B.C] - YYYY-MM-DD` below `[Unreleased]`.
-2. Move all content from `[Unreleased]` to the new section.
-3. Leave `[Unreleased]` empty (keep the heading).
-4. Update the comparison links at the bottom:
-   - Change `[unreleased]` link to compare against new tag.
-   - Add new version link.
-
-### Step 3: Verify changes
-
-Run a full build and test suite to ensure the version bump doesn't break anything
-and to regenerate Cargo.lock with the new version:
+## Phase 1: Locate the release PR
 
 ```bash
-cargo build --features indexer
-cargo test --features indexer
-cargo clippy --features indexer -- -D warnings
+gh pr list --repo utensils/nxv --search "chore: release in:title" --state open
 ```
 
-If any verification fails, stop and inform the user before committing.
+If none exists, check whether main has unreleased conventional commits since
+the last tag (`git log $(git describe --tags --abbrev=0)..origin/main --oneline`).
+If there are releasable commits but no PR, check the latest `Release-plz`
+workflow run for errors (`gh run list --workflow release-plz.yml`).
 
-### Step 4: Commit changes
+## Phase 2: Review what will ship
 
-Include Cargo.lock to ensure reproducible builds:
+1. Show the PR's version bump (Cargo.toml diff) and CHANGELOG addition.
+2. Verify the version follows the project convention: `feat:` commits bump
+   the 0.x minor (`features_always_increment_minor = true`), fixes bump patch.
+3. If the version or changelog is wrong, edit the release PR directly
+   (it is a normal editable PR) — release-plz preserves manual edits unless
+   new commits land on main.
+
+## Phase 3: Pre-flight
+
+1. All CI checks on the release PR must be green. If checks show "Expected /
+   Waiting", the App token is misconfigured — see `release-plz.yml` comments.
+2. Confirm no other PR is about to land that should be in this release.
+
+## Phase 4: Confirm and merge
+
+Present a summary (version, commit list, changelog) and require the user to
+confirm with the explicit version number (AskUserQuestion). Then:
 
 ```bash
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "chore: release A.B.C"
+gh pr merge <PR> --repo utensils/nxv --squash
 ```
 
-### Step 5: Verify isolated nix build (optional but recommended)
+## Phase 5: Monitor
 
-Run the isolated Docker build to verify the flake builds correctly with no local
-state. This catches issues like missing Cargo.lock that would fail in CI:
+1. The `Release-plz` workflow on main pushes the tag.
+2. The `Release` workflow builds binaries and publishes — monitor with
+   `gh run list --workflow release.yml` / `gh run watch`.
+3. Verify the GitHub release has all four binaries + SHA256SUMS.txt,
+   crates.io has the new version, and ghcr.io has the version tag.
 
-```bash
-./scripts/verify-nix-build.sh
-```
+## Manual escape hatches
 
-If Docker is not available or the user wants to skip, proceed with caution.
-
-### Step 6: Create tag locally
-
-```bash
-git tag vA.B.C
-```
-
-### Step 7: Push commit and tag
-
-```bash
-git push origin main
-git push origin vA.B.C
-```
-
-### Step 8: Report completion
-
-Provide link to [GitHub Actions][actions] and remind user to monitor the
-release workflow.
-
-[actions]: https://github.com/utensils/nxv/actions
-
-## Important Notes
-
-- Never proceed past Phase 5 without explicit user confirmation.
-- Stop immediately if any pre-flight check fails.
-- The changelog must be updated as part of the release.
-- Version bumps must follow semver conventions.
-- Docker image timestamp is derived automatically from git commit date.
+- Tagging failed after the release PR merged: re-run the `Release-plz`
+  workflow on main (it is idempotent — existing tags are the gate).
+- The old fully-manual flow (bump Cargo.toml, edit CHANGELOG, tag by hand)
+  still works in emergencies but must match release-plz's expectations
+  (tag `vX.Y.Z`, CHANGELOG section `## [X.Y.Z] - YYYY-MM-DD`).
