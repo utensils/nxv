@@ -96,8 +96,12 @@ pub struct ParsedReleaseName {
     pub short_rev: String,
 }
 
-/// Parse a release dir name of the form
-/// `(nixpkgs|nixos)-YY.MM(pre|beta...)NNNNNN.shortrev`.
+/// Parse a release dir name. Three verified shapes share the
+/// `<channel>-YY.MM<sep><count>.<shortrev>` form:
+///
+/// - unstable: `nixpkgs-26.11pre1012902.8c3cede7ddc2` (sep = `pre`)
+/// - stable:   `nixos-25.05.813814.ac62194c3917`      (sep = `.`)
+/// - beta:     `nixos-25.05beta801537.2e1496bf8652`   (sep = `beta`)
 ///
 /// Returns `None` for the ancient formats that aren't channel releases
 /// (`nixpkgs-0.5`, `nixpkgs-1.0pre26905_1c8f786`, `nixpkgs-14.04`, ...).
@@ -106,10 +110,27 @@ pub fn parse_release_name(name: &str) -> Option<ParsedReleaseName> {
         .strip_prefix("nixpkgs-")
         .or_else(|| name.strip_prefix("nixos-"))?;
 
-    // rest = "26.11pre1012902.8c3cede7ddc2"
-    let pre_pos = rest.find("pre")?;
-    let after_pre = &rest[pre_pos + 3..];
-    let (count_str, short_rev) = after_pre.split_once('.')?;
+    // rest = "26.11pre1012902.8c3cede7ddc2" | "25.05.813814.ac62194c3917" | ...
+    let version_len = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    // Version must look like YY.MM; the all-digits-and-dots prefix of a
+    // stable name ("25.05.813814.ac62194c3917") extends past it, so split
+    // at the second dot when present.
+    let mut dots = rest.char_indices().filter(|(_, c)| *c == '.');
+    let _first_dot = dots.next()?;
+    let version_end = match dots.next() {
+        Some((second_dot, _)) if second_dot < version_len => second_dot,
+        _ => version_len,
+    };
+
+    let after_version = &rest[version_end..];
+    let counted = after_version
+        .strip_prefix("pre")
+        .or_else(|| after_version.strip_prefix("beta"))
+        .or_else(|| after_version.strip_prefix('.'))?;
+
+    let (count_str, short_rev) = counted.split_once('.')?;
     let commit_count: i64 = count_str.parse().ok()?;
     if short_rev.is_empty() || !short_rev.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -550,6 +571,18 @@ mod tests {
         let parsed = parse_release_name("nixpkgs-17.03pre91913.cdec20a").unwrap();
         assert_eq!(parsed.commit_count, 91_913);
         assert_eq!(parsed.short_rev, "cdec20a");
+    }
+
+    #[test]
+    fn test_parse_release_name_stable_and_beta() {
+        // Stable channels: no `pre`, the count follows a plain dot.
+        let parsed = parse_release_name("nixos-25.05.813814.ac62194c3917").unwrap();
+        assert_eq!(parsed.commit_count, 813_814);
+        assert_eq!(parsed.short_rev, "ac62194c3917");
+
+        let parsed = parse_release_name("nixos-25.05beta801537.2e1496bf8652").unwrap();
+        assert_eq!(parsed.commit_count, 801_537);
+        assert_eq!(parsed.short_rev, "2e1496bf8652");
     }
 
     #[test]
