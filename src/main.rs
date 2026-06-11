@@ -48,7 +48,13 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Shell tilde expansion doesn't happen for `--db-path=~/...` or
+    // NXV_DB_PATH=~/...; expand it once here so every command (and the
+    // parent-dir creation in cmd_index) sees a real path instead of a
+    // literal `~` directory.
+    cli.db_path = paths::expand_tilde(&cli.db_path);
 
     // Handle no-color flag
     if cli.no_color {

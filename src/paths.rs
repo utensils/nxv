@@ -66,7 +66,6 @@ pub fn get_bloom_path_for_db<P: AsRef<Path>>(db_path: P) -> PathBuf {
 /// let path = PathBuf::from("/tmp/foo");
 /// assert_eq!(expand_tilde(&path), path);
 /// ```
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
 pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
     let path = path.as_ref();
     if let Ok(stripped) = path.strip_prefix("~")
