@@ -2,6 +2,7 @@
 
 pub mod import;
 pub mod queries;
+pub mod releases;
 
 use crate::error::{NxvError, Result};
 use queries::PackageVersion;
@@ -14,12 +15,14 @@ use std::time::Duration;
 const DEFAULT_BUSY_TIMEOUT_SECS: u64 = 5;
 
 /// Current schema version.
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-const SCHEMA_VERSION: u32 = 3;
+///
+/// v4 (the snapshot indexer): one row per `(attribute_path, version)` with
+/// widen-only observation bounds, plus the `releases` ingestion ledger.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Minimum schema version this build can read.
 /// Indexes with min_schema_version > this value are incompatible.
-pub const MIN_READABLE_SCHEMA: u32 = 3;
+pub const MIN_READABLE_SCHEMA: u32 = 4;
 
 /// Database connection wrapper.
 pub struct Database {
@@ -59,7 +62,7 @@ impl Database {
             "#,
         )?;
 
-        let db = Self { conn };
+        let mut db = Self { conn };
         db.init_schema()?;
         db.migrate_if_needed()?;
         Ok(db)
@@ -167,7 +170,9 @@ impl Database {
                 value TEXT NOT NULL
             );
 
-            -- Main package version table
+            -- Main package version table. One row per (attribute_path, version):
+            -- "this pair was OBSERVED at first_commit and at last_commit". Interior
+            -- presence is interpolated, not guaranteed (see DESIGN.md range semantics).
             CREATE TABLE IF NOT EXISTS package_versions (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -184,8 +189,30 @@ impl Database {
                 platforms TEXT,
                 source_path TEXT,
                 known_vulnerabilities TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
+                UNIQUE(attribute_path, version),
+                CHECK(first_commit_date <= last_commit_date)
             );
+
+            -- Channel-release ingestion ledger: which snapshots have been observed,
+            -- which are pending/failed, and their retry/backoff state.
+            CREATE TABLE IF NOT EXISTS releases (
+                id INTEGER PRIMARY KEY,
+                channel TEXT NOT NULL,
+                release_name TEXT NOT NULL,
+                commit_hash TEXT NOT NULL,
+                commit_count INTEGER,
+                release_date INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at INTEGER,
+                attr_count INTEGER,
+                error TEXT,
+                ingested_at INTEGER,
+                UNIQUE(channel, release_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status, release_date);
+            CREATE INDEX IF NOT EXISTS idx_releases_channel_date ON releases(channel, release_date DESC);
 
             -- Indexes for common query patterns
             CREATE INDEX IF NOT EXISTS idx_packages_name ON package_versions(name);
@@ -193,9 +220,6 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
-            -- Used by the incremental indexer's resume path (load_open_ranges_at_commit)
-            -- to avoid a full table scan at the start of every run on large DBs.
-            CREATE INDEX IF NOT EXISTS idx_packages_last_commit_hash ON package_versions(last_commit_hash);
             "#,
         )?;
 
@@ -223,7 +247,11 @@ impl Database {
                     VALUES ('delete', old.id, old.name, old.description);
                 END;
 
-                CREATE TRIGGER IF NOT EXISTS package_versions_au AFTER UPDATE ON package_versions BEGIN
+                -- Guarded: pure range-widening updates (the indexer's hot path —
+                -- every alive attr per snapshot) must not churn the FTS index.
+                CREATE TRIGGER IF NOT EXISTS package_versions_au AFTER UPDATE ON package_versions
+                WHEN old.name IS NOT new.name OR old.description IS NOT new.description
+                BEGIN
                     INSERT INTO package_versions_fts(package_versions_fts, rowid, name, description)
                     VALUES ('delete', old.id, old.name, old.description);
                     INSERT INTO package_versions_fts(rowid, name, description)
@@ -275,7 +303,7 @@ impl Database {
     /// db.migrate_if_needed().unwrap();
     /// ```
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    fn migrate_if_needed(&self) -> Result<()> {
+    fn migrate_if_needed(&mut self) -> Result<()> {
         let version_str = self.get_meta("schema_version")?;
         let current_version: u32 = version_str.as_deref().unwrap_or("0").parse().unwrap_or(0);
 
@@ -323,6 +351,43 @@ impl Database {
             )?;
         }
 
+        if current_version > 0 && current_version < 4 {
+            // Migration v3 -> v4: tighten the unique key to (attribute_path, version).
+            //
+            // The v4 widen-only upsert targets ON CONFLICT(attribute_path, version),
+            // which needs a matching unique index. Pre-v4 DBs (a) may hold duplicate
+            // (attr, version) rows from the old incremental indexer, and (b) only
+            // have the legacy 3-column unique constraint — which stays behind as a
+            // harmlessly redundant index (ALTER TABLE can't drop it without a table
+            // rebuild, and the new index subsumes it).
+            self.dedupe_ranges(false)?;
+            self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_attr_version
+                 ON package_versions(attribute_path, version)",
+                [],
+            )?;
+
+            // The old AFTER UPDATE FTS trigger fires on every range-widening
+            // update; replace it with the guarded variant (matches init_schema).
+            self.conn.execute_batch(
+                r#"
+                DROP TRIGGER IF EXISTS package_versions_au;
+                CREATE TRIGGER package_versions_au AFTER UPDATE ON package_versions
+                WHEN old.name IS NOT new.name OR old.description IS NOT new.description
+                BEGIN
+                    INSERT INTO package_versions_fts(package_versions_fts, rowid, name, description)
+                    VALUES ('delete', old.id, old.name, old.description);
+                    INSERT INTO package_versions_fts(rowid, name, description)
+                    VALUES (new.id, new.name, new.description);
+                END;
+                "#,
+            )?;
+
+            // Retired with the checkpoint-resume model.
+            self.conn
+                .execute("DROP INDEX IF EXISTS idx_packages_last_commit_hash", [])?;
+        }
+
         if current_version < SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
@@ -360,120 +425,174 @@ impl Database {
         &self.conn
     }
 
-    /// Upserts multiple package version records in a single transaction.
+    /// Upserts package version *observations* in a single transaction.
     ///
-    /// On conflict against UNIQUE(attribute_path, version, first_commit_hash) the
-    /// existing row is extended: `last_commit_hash` / `last_commit_date` and most
-    /// metadata fields are overwritten with the incoming values, while `source_path`
-    /// is preserved if the DB already has one (mirrors `OpenRange::update_metadata`).
+    /// Keyed on `UNIQUE(attribute_path, version)`. Bounds only ever widen
+    /// (order-agnostic: parallel and out-of-order ingestion are safe), and
+    /// metadata follows the **newest** observation — an older snapshot
+    /// arriving late can extend `first_*` backwards but never overwrite
+    /// metadata written by a newer one. `source_path` is additionally sticky
+    /// against NULL (a newer snapshot without position info keeps the old one).
+    ///
+    /// SQLite evaluates all `DO UPDATE SET` right-hand sides against the
+    /// pre-update row, so the `last_commit_date` comparisons below are
+    /// consistent regardless of column order.
     ///
     /// # Returns
     ///
-    /// The number of rows written (inserts *and* conflict-driven updates). SQLite
-    /// reports `1` for both paths, so the returned count is the total number of
-    /// successful row operations, not strictly new rows.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use crate::db::Database;
-    /// # use crate::db::queries::PackageVersion;
-    /// # fn example(mut db: Database, packages: Vec<PackageVersion>) {
-    /// let written = db.insert_package_ranges_batch(&packages).unwrap();
-    /// assert!(written <= packages.len());
-    /// # }
-    /// ```
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    pub fn insert_package_ranges_batch(&mut self, packages: &[PackageVersion]) -> Result<usize> {
+    /// The number of row operations (inserts and updates combined).
+    // Public write API; the indexer writes through commit_flush_group, tests
+    // and external tooling use this directly.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn upsert_observations(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let mut written = 0;
-
-        {
-            // Upsert keyed on the UNIQUE(attribute_path, version, first_commit_hash)
-            // constraint. On conflict we extend the existing range (last_commit_hash /
-            // last_commit_date) and refresh metadata. source_path is sticky: once a
-            // row has one, we never overwrite it with NULL, matching OpenRange::update_metadata.
-            let mut stmt = tx.prepare_cached(
-                r#"
-                INSERT INTO package_versions
-                    (name, version, first_commit_hash, first_commit_date,
-                     last_commit_hash, last_commit_date, attribute_path,
-                     description, license, homepage, maintainers, platforms, source_path,
-                     known_vulnerabilities)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(attribute_path, version, first_commit_hash) DO UPDATE SET
-                    last_commit_hash = excluded.last_commit_hash,
-                    last_commit_date = excluded.last_commit_date,
-                    description = excluded.description,
-                    license = excluded.license,
-                    homepage = excluded.homepage,
-                    maintainers = excluded.maintainers,
-                    platforms = excluded.platforms,
-                    source_path = COALESCE(source_path, excluded.source_path),
-                    known_vulnerabilities = excluded.known_vulnerabilities
-                "#,
-            )?;
-
-            for pkg in packages {
-                let changes = stmt.execute(rusqlite::params![
-                    pkg.name,
-                    pkg.version,
-                    pkg.first_commit_hash,
-                    pkg.first_commit_date.timestamp(),
-                    pkg.last_commit_hash,
-                    pkg.last_commit_date.timestamp(),
-                    pkg.attribute_path,
-                    pkg.description,
-                    pkg.license,
-                    pkg.homepage,
-                    pkg.maintainers,
-                    pkg.platforms,
-                    pkg.source_path,
-                    pkg.known_vulnerabilities,
-                ])?;
-                written += changes;
-            }
-        }
-
+        let written = Self::upsert_observations_tx(&tx, packages)?;
         tx.commit()?;
         Ok(written)
     }
 
-    /// Load the "open" ranges at a given checkpoint commit — one row per
-    /// (attribute_path, version) still present in nixpkgs as of `commit_hash`.
-    ///
-    /// Used to seed the in-memory `open_ranges` map at the start of an incremental
-    /// indexing run so that subsequent commits *extend* existing rows instead of
-    /// creating duplicates stamped with a new `first_commit_hash`.
-    ///
-    /// Already-bloated databases can hold several rows for the same
-    /// `(attribute_path, version)` pair but different `first_commit_hash` values
-    /// — this function picks the row with the smallest `id` per pair via
-    /// `GROUP BY` so seeding is deterministic. A full rebuild is still required
-    /// to actually remove the duplicate rows.
-    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-    pub fn load_open_ranges_at_commit(&self, commit_hash: &str) -> Result<Vec<PackageVersion>> {
-        let mut stmt = self.conn.prepare(
+    /// Like [`Self::upsert_observations`] but runs inside a caller-provided
+    /// transaction, so row writes can commit atomically with `releases`
+    /// status updates.
+    #[allow(dead_code)]
+    pub(crate) fn upsert_observations_tx(
+        tx: &rusqlite::Transaction<'_>,
+        packages: &[PackageVersion],
+    ) -> Result<usize> {
+        let mut written = 0;
+        let mut stmt = tx.prepare_cached(
             r#"
-            SELECT id, name, version, first_commit_hash, first_commit_date,
-                   last_commit_hash, last_commit_date, attribute_path,
-                   description, license, homepage, maintainers, platforms,
-                   source_path, known_vulnerabilities
-              FROM package_versions
-             WHERE last_commit_hash = ?1
-               AND id IN (
-                   SELECT MIN(id) FROM package_versions
-                    WHERE last_commit_hash = ?1
-                    GROUP BY attribute_path, version
-               )
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path,
+                 description, license, homepage, maintainers, platforms, source_path,
+                 known_vulnerabilities)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attribute_path, version) DO UPDATE SET
+                first_commit_hash = CASE
+                    WHEN excluded.first_commit_date < first_commit_date
+                    THEN excluded.first_commit_hash ELSE first_commit_hash END,
+                first_commit_date = MIN(first_commit_date, excluded.first_commit_date),
+                last_commit_hash = CASE
+                    WHEN excluded.last_commit_date > last_commit_date
+                    THEN excluded.last_commit_hash ELSE last_commit_hash END,
+                name = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.name ELSE name END,
+                description = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.description ELSE description END,
+                license = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.license ELSE license END,
+                homepage = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.homepage ELSE homepage END,
+                maintainers = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.maintainers ELSE maintainers END,
+                platforms = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.platforms ELSE platforms END,
+                source_path = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN COALESCE(excluded.source_path, source_path) ELSE source_path END,
+                known_vulnerabilities = CASE
+                    WHEN excluded.last_commit_date >= last_commit_date
+                    THEN excluded.known_vulnerabilities ELSE known_vulnerabilities END,
+                last_commit_date = MAX(last_commit_date, excluded.last_commit_date)
             "#,
         )?;
-        let rows = stmt.query_map([commit_hash], PackageVersion::from_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
+
+        for pkg in packages {
+            let changes = stmt.execute(rusqlite::params![
+                pkg.name,
+                pkg.version,
+                pkg.first_commit_hash,
+                pkg.first_commit_date.timestamp(),
+                pkg.last_commit_hash,
+                pkg.last_commit_date.timestamp(),
+                pkg.attribute_path,
+                pkg.description,
+                pkg.license,
+                pkg.homepage,
+                pkg.maintainers,
+                pkg.platforms,
+                pkg.source_path,
+                pkg.known_vulnerabilities,
+            ])?;
+            written += changes;
         }
-        Ok(out)
+
+        Ok(written)
+    }
+
+    /// Drop the FTS sync triggers for bulk ingestion. Pair with
+    /// [`Self::rebuild_fts`] (which also recreates the triggers) in a
+    /// `--full`/catch-up run's finish step; measured 28x writer speedup.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn drop_fts_triggers(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DROP TRIGGER IF EXISTS package_versions_ai;
+            DROP TRIGGER IF EXISTS package_versions_ad;
+            DROP TRIGGER IF EXISTS package_versions_au;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    /// True when the FTS table exists but its sync triggers don't — the
+    /// state left behind if a bulk run died between [`Self::drop_fts_triggers`]
+    /// and [`Self::rebuild_fts`]. Callers should rebuild when this is set.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn fts_triggers_missing(&self) -> Result<bool> {
+        let fts_exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='package_versions_fts'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !fts_exists {
+            return Ok(false);
+        }
+        let trigger_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN \
+             ('package_versions_ai', 'package_versions_ad', 'package_versions_au')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(trigger_count < 3)
+    }
+
+    /// Rebuild the FTS index from the content table and recreate the sync
+    /// triggers dropped by [`Self::drop_fts_triggers`].
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn rebuild_fts(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            INSERT INTO package_versions_fts(package_versions_fts) VALUES('rebuild');
+
+            CREATE TRIGGER IF NOT EXISTS package_versions_ai AFTER INSERT ON package_versions BEGIN
+                INSERT INTO package_versions_fts(rowid, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS package_versions_ad AFTER DELETE ON package_versions BEGIN
+                INSERT INTO package_versions_fts(package_versions_fts, rowid, name, description)
+                VALUES ('delete', old.id, old.name, old.description);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS package_versions_au AFTER UPDATE ON package_versions
+            WHEN old.name IS NOT new.name OR old.description IS NOT new.description
+            BEGIN
+                INSERT INTO package_versions_fts(package_versions_fts, rowid, name, description)
+                VALUES ('delete', old.id, old.name, old.description);
+                INSERT INTO package_versions_fts(rowid, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+            "#,
+        )?;
+        Ok(())
     }
 
     /// Collapse duplicate `(attribute_path, version)` rows into one.
@@ -661,41 +780,6 @@ impl Database {
         self.conn.execute_batch("VACUUM;")?;
         Ok(())
     }
-
-    /// Update the last_commit fields for an existing package version range.
-    ///
-    /// Used during incremental indexing to extend a range's end point.
-    #[allow(dead_code)]
-    pub fn update_package_range_end(
-        &self,
-        attr_path: &str,
-        version: &str,
-        first_commit_hash: &str,
-        last_commit_hash: &str,
-        last_commit_date: i64,
-        description: Option<&str>,
-    ) -> Result<bool> {
-        let changes = self.conn.execute(
-            r#"
-            UPDATE package_versions
-            SET last_commit_hash = ?,
-                last_commit_date = ?,
-                description = COALESCE(?, description)
-            WHERE attribute_path = ?
-              AND version = ?
-              AND first_commit_hash = ?
-            "#,
-            rusqlite::params![
-                last_commit_hash,
-                last_commit_date,
-                description,
-                attr_path,
-                version,
-                first_commit_hash
-            ],
-        )?;
-        Ok(changes > 0)
-    }
 }
 
 #[cfg(test)]
@@ -760,7 +844,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let version = db.get_meta("schema_version").unwrap();
-        assert_eq!(version, Some("3".to_string()));
+        assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
     }
 
     #[test]
@@ -809,7 +893,7 @@ mod tests {
             },
         ];
 
-        let inserted = db.insert_package_ranges_batch(&packages).unwrap();
+        let inserted = db.upsert_observations(&packages).unwrap();
         assert_eq!(inserted, 2);
 
         // Verify data was inserted
@@ -823,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_insert_extends_existing_range() {
+    fn test_upsert_widens_range_and_updates_metadata() {
         use chrono::Utc;
 
         let dir = tempdir().unwrap();
@@ -849,23 +933,21 @@ mod tests {
             known_vulnerabilities: None,
         };
 
-        let written1 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
+        let written1 = db.upsert_observations(std::slice::from_ref(&pkg)).unwrap();
         assert_eq!(written1, 1);
 
-        // Second write with same unique key but extended last_commit_hash should
-        // update the existing row, not create a duplicate.
+        // A newer observation extends the range end and refreshes metadata,
+        // without creating a duplicate row.
         let t1 = t0 + chrono::Duration::days(30);
+        pkg.first_commit_hash = "newer_first".to_string();
+        pkg.first_commit_date = t1;
         pkg.last_commit_hash = "last_commit_b".to_string();
         pkg.last_commit_date = t1;
         pkg.description = Some("Python 3.11 interpreter".to_string());
         // source_path arriving as None must not clobber the existing value.
         pkg.source_path = None;
 
-        let written2 = db
-            .insert_package_ranges_batch(std::slice::from_ref(&pkg))
-            .unwrap();
+        let written2 = db.upsert_observations(std::slice::from_ref(&pkg)).unwrap();
         assert_eq!(written2, 1);
 
         let count: i32 = db
@@ -876,7 +958,8 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "upsert must not create a duplicate row");
 
-        let (last_hash, last_ts, description, source_path): (
+        let (first_hash, last_hash, last_ts, description, source_path): (
+            String,
             String,
             i64,
             Option<String>,
@@ -884,11 +967,15 @@ mod tests {
         ) = db
             .conn
             .query_row(
-                "SELECT last_commit_hash, last_commit_date, description, source_path FROM package_versions",
+                "SELECT first_commit_hash, last_commit_hash, last_commit_date, description, source_path FROM package_versions",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
+        assert_eq!(
+            first_hash, "first_commit",
+            "first bound must not move forward"
+        );
         assert_eq!(last_hash, "last_commit_b");
         assert_eq!(last_ts, t1.timestamp());
         assert_eq!(description.as_deref(), Some("Python 3.11 interpreter"));
@@ -900,61 +987,76 @@ mod tests {
     }
 
     #[test]
-    fn test_load_open_ranges_at_commit() {
+    fn test_upsert_out_of_order_older_observation_widens_back_without_clobbering() {
         use chrono::Utc;
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut db = Database::open(&db_path).unwrap();
 
-        let t0 = Utc::now();
-        let make = |name: &str, version: &str, first: &str, last: &str| PackageVersion {
+        let t1 = Utc::now();
+        let t0 = t1 - chrono::Duration::days(90);
+
+        let newer = PackageVersion {
             id: 0,
-            name: name.to_string(),
-            version: version.to_string(),
-            first_commit_hash: first.to_string(),
-            first_commit_date: t0,
-            last_commit_hash: last.to_string(),
-            last_commit_date: t0,
-            attribute_path: name.to_string(),
-            description: None,
+            name: "firefox".to_string(),
+            version: "100.0".to_string(),
+            first_commit_hash: "newer_commit".to_string(),
+            first_commit_date: t1,
+            last_commit_hash: "newer_commit".to_string(),
+            last_commit_date: t1,
+            attribute_path: "firefox".to_string(),
+            description: Some("new description".to_string()),
             license: None,
             homepage: None,
             maintainers: None,
             platforms: None,
-            source_path: None,
+            source_path: Some("pkgs/by-name/fi/firefox/package.nix".to_string()),
             known_vulnerabilities: None,
         };
+        let older = PackageVersion {
+            first_commit_hash: "older_commit".to_string(),
+            first_commit_date: t0,
+            last_commit_hash: "older_commit".to_string(),
+            last_commit_date: t0,
+            description: Some("stale description".to_string()),
+            source_path: None,
+            ..newer.clone()
+        };
 
-        let pkgs = vec![
-            make("firefox", "100.0", "c1", "checkpoint"),
-            make("firefox", "99.0", "c0", "checkpoint"),
-            make("chromium", "90.0", "c1", "older"),
-            // Simulate a bloated DB: same (attribute_path, version) with
-            // different first_commit_hash values — the previous indexer bug.
-            make("firefox", "100.0", "c2", "checkpoint"),
-            make("firefox", "100.0", "c3", "checkpoint"),
-        ];
-        db.insert_package_ranges_batch(&pkgs).unwrap();
-
-        let open = db.load_open_ranges_at_commit("checkpoint").unwrap();
-        assert_eq!(
-            open.len(),
-            2,
-            "must collapse duplicate (attribute_path, version) tuples"
-        );
-        assert!(open.iter().all(|p| p.last_commit_hash == "checkpoint"));
-
-        // Deterministic: the row with the smallest id per key should win
-        // (i.e. the first inserted, which has first_commit_hash = "c1").
-        let firefox_100 = open
-            .iter()
-            .find(|p| p.attribute_path == "firefox" && p.version == "100.0")
+        // Ingest newest first (parallel/out-of-order ingestion), then the older
+        // snapshot arrives late.
+        db.upsert_observations(std::slice::from_ref(&newer))
             .unwrap();
-        assert_eq!(firefox_100.first_commit_hash, "c1");
+        db.upsert_observations(std::slice::from_ref(&older))
+            .unwrap();
 
-        let none = db.load_open_ranges_at_commit("does_not_exist").unwrap();
-        assert!(none.is_empty());
+        let (first_hash, first_ts, last_hash, last_ts, description): (
+            String,
+            i64,
+            String,
+            i64,
+            Option<String>,
+        ) = db
+            .conn
+            .query_row(
+                "SELECT first_commit_hash, first_commit_date, last_commit_hash, last_commit_date, description FROM package_versions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            first_hash, "older_commit",
+            "first bound must widen backwards"
+        );
+        assert_eq!(first_ts, t0.timestamp());
+        assert_eq!(last_hash, "newer_commit", "last bound must not shrink");
+        assert_eq!(last_ts, t1.timestamp());
+        assert_eq!(
+            description.as_deref(),
+            Some("new description"),
+            "late-arriving older metadata must not clobber newer metadata"
+        );
     }
 
     #[test]
@@ -984,7 +1086,7 @@ mod tests {
             known_vulnerabilities: None,
         };
 
-        db.insert_package_ranges_batch(&[pkg]).unwrap();
+        db.upsert_observations(&[pkg]).unwrap();
 
         // FTS5 should be searchable
         let fts_count: i32 = db
@@ -1029,7 +1131,7 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let inserted = db.insert_package_ranges_batch(&packages).unwrap();
+        let inserted = db.upsert_observations(&packages).unwrap();
         let duration = start.elapsed();
 
         assert_eq!(inserted, 10_000);
@@ -1053,94 +1155,84 @@ mod tests {
         assert_eq!(count, 10_000);
     }
 
+    /// Build an on-disk v3-schema database (the old 3-column unique key, no
+    /// releases table) with duplicate (attr, version) rows — the shape the
+    /// v3->v4 migration must repair.
+    fn create_v3_database(db_path: &std::path::Path) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT,
+                UNIQUE(attribute_path, version, first_commit_hash)
+            );
+            CREATE INDEX idx_packages_last_commit_hash ON package_versions(last_commit_hash);
+            CREATE VIRTUAL TABLE package_versions_fts
+            USING fts5(name, description, content=package_versions, content_rowid=id);
+            CREATE TRIGGER package_versions_ai AFTER INSERT ON package_versions BEGIN
+                INSERT INTO package_versions_fts(rowid, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+            CREATE TRIGGER package_versions_au AFTER UPDATE ON package_versions BEGIN
+                INSERT INTO package_versions_fts(package_versions_fts, rowid, name, description)
+                VALUES ('delete', old.id, old.name, old.description);
+                INSERT INTO package_versions_fts(rowid, name, description)
+                VALUES (new.id, new.name, new.description);
+            END;
+            INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+
+            -- Duplicate (firefox, 100.0) rows with different first hashes:
+            -- the old incremental-indexer bloat.
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                ('firefox', '100.0', 'c0',  1000, 'c10', 1010, 'firefox', 'browser'),
+                ('firefox', '100.0', 'c5',  1005, 'c20', 1020, 'firefox', 'browser'),
+                ('firefox', '100.0', 'c15', 1015, 'c30', 1030, 'firefox', 'browser'),
+                ('chromium', '90.0', 'x0',  1000, 'x1',  1001, 'chromium', NULL);
+            "#,
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn test_dedupe_collapses_duplicates_and_coalesces_range() {
-        use chrono::{Duration, Utc};
+    fn test_migration_v3_to_v4_dedupes_and_tightens_unique_key() {
+        use chrono::TimeZone;
 
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
+        create_v3_database(&db_path);
+
+        // Opening the v3 DB runs the migration.
         let mut db = Database::open(&db_path).unwrap();
 
-        let t0 = Utc::now();
-        let mk = |first_hash: &str,
-                  first_offset_days: i64,
-                  last_hash: &str,
-                  last_offset_days: i64|
-         -> PackageVersion {
-            PackageVersion {
-                id: 0,
-                name: "firefox".to_string(),
-                version: "100.0".to_string(),
-                first_commit_hash: first_hash.to_string(),
-                first_commit_date: t0 + Duration::days(first_offset_days),
-                last_commit_hash: last_hash.to_string(),
-                last_commit_date: t0 + Duration::days(last_offset_days),
-                attribute_path: "firefox".to_string(),
-                description: Some("browser".to_string()),
-                license: None,
-                homepage: None,
-                maintainers: None,
-                platforms: None,
-                source_path: None,
-                known_vulnerabilities: None,
-            }
-        };
+        assert_eq!(db.get_meta("schema_version").unwrap().as_deref(), Some("4"));
 
-        // Three duplicate rows with overlapping ranges. Earliest first_date is
-        // at offset 0; latest last_date is at offset 30.
-        db.insert_package_ranges_batch(&[
-            mk("c0", 0, "c10", 10),
-            mk("c5", 5, "c20", 20),
-            mk("c15", 15, "c30", 30),
-        ])
-        .unwrap();
-
-        // Unrelated single-row group — must not be touched.
-        db.insert_package_ranges_batch(&[PackageVersion {
-            id: 0,
-            name: "chromium".to_string(),
-            version: "90.0".to_string(),
-            first_commit_hash: "x0".to_string(),
-            first_commit_date: t0,
-            last_commit_hash: "x1".to_string(),
-            last_commit_date: t0,
-            attribute_path: "chromium".to_string(),
-            description: None,
-            license: None,
-            homepage: None,
-            maintainers: None,
-            platforms: None,
-            source_path: None,
-            known_vulnerabilities: None,
-        }])
-        .unwrap();
-
-        // Dry run: report stats but don't mutate.
-        let dry = db.dedupe_ranges(true).unwrap();
-        assert_eq!(dry.groups_total, 2);
-        assert_eq!(dry.groups_with_duplicates, 1);
-        assert_eq!(dry.rows_before, 4);
-        assert_eq!(dry.rows_after, 2);
-        assert_eq!(dry.rows_deleted, 2);
-
-        let rows_after_dry: i64 = db
+        // Duplicates collapsed; survivor carries the widened range.
+        let count: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(rows_after_dry, 4, "dry run must not delete rows");
+        assert_eq!(count, 2);
 
-        // Real run.
-        let stats = db.dedupe_ranges(false).unwrap();
-        assert_eq!(stats.groups_total, 2);
-        assert_eq!(stats.groups_with_duplicates, 1);
-        assert_eq!(stats.rows_before, 4);
-        assert_eq!(stats.rows_after, 2);
-        assert_eq!(stats.rows_updated, 1);
-        assert_eq!(stats.rows_deleted, 2);
-
-        // Survivor must carry earliest-first and latest-last.
         let (first_hash, first_ts, last_hash, last_ts): (String, i64, String, i64) = db
             .conn
             .query_row(
@@ -1151,25 +1243,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first_hash, "c0", "earliest first_commit_hash must survive");
-        assert_eq!(first_ts, (t0 + Duration::days(0)).timestamp());
+        assert_eq!(first_ts, 1000);
         assert_eq!(last_hash, "c30", "latest last_commit_hash must win");
-        assert_eq!(last_ts, (t0 + Duration::days(30)).timestamp());
+        assert_eq!(last_ts, 1030);
 
-        // Unrelated row untouched.
-        let chromium_count: i64 = db
+        // The tightened unique key must exist and the v4 upsert must prepare
+        // and execute against the migrated DB.
+        let has_uq: bool = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM package_versions WHERE attribute_path = 'chromium'",
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name='uq_attr_version'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(chromium_count, 1);
+        assert!(has_uq, "migration must create uq_attr_version");
 
-        // Running dedupe again on a clean DB must be a no-op.
-        let again = db.dedupe_ranges(false).unwrap();
-        assert_eq!(again.rows_deleted, 0);
-        assert_eq!(again.rows_updated, 0);
+        let pkg = PackageVersion {
+            id: 0,
+            name: "firefox".to_string(),
+            version: "100.0".to_string(),
+            first_commit_hash: "c40".to_string(),
+            first_commit_date: chrono::Utc.timestamp_opt(1040, 0).unwrap(),
+            last_commit_hash: "c40".to_string(),
+            last_commit_date: chrono::Utc.timestamp_opt(1040, 0).unwrap(),
+            attribute_path: "firefox".to_string(),
+            description: Some("browser".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        };
+        db.upsert_observations(&[pkg]).unwrap();
+
+        let (last_hash, count): (String, i64) = db
+            .conn
+            .query_row(
+                "SELECT last_commit_hash, (SELECT COUNT(*) FROM package_versions WHERE attribute_path='firefox') \
+                   FROM package_versions WHERE attribute_path = 'firefox'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(last_hash, "c40");
+        assert_eq!(
+            count, 1,
+            "upsert against migrated DB must widen, not duplicate"
+        );
+
+        // The releases ledger must exist after migration.
+        let has_releases: bool = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='releases'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_releases);
+    }
+
+    #[test]
+    fn test_fts_triggers_missing_detection_and_heal() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(!db.fts_triggers_missing().unwrap());
+
+        // Simulate a bulk run dying between drop_fts_triggers and
+        // rebuild_fts: rows written in that window never reach FTS.
+        db.drop_fts_triggers().unwrap();
+        let now = Utc::now();
+        db.upsert_observations(&[PackageVersion {
+            id: 0,
+            name: "ripgrep".to_string(),
+            version: "14.0.0".to_string(),
+            first_commit_hash: "a".repeat(40),
+            first_commit_date: now,
+            last_commit_hash: "a".repeat(40),
+            last_commit_date: now,
+            attribute_path: "ripgrep".to_string(),
+            description: Some("fast grep replacement".to_string()),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }])
+        .unwrap();
+        drop(db);
+
+        // Reopen (as the next run would) and heal.
+        let db = Database::open(&db_path).unwrap();
+        assert!(
+            db.fts_triggers_missing().unwrap(),
+            "must detect the broken state"
+        );
+        db.rebuild_fts().unwrap();
+        assert!(!db.fts_triggers_missing().unwrap());
+
+        let fts_hits: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM package_versions_fts WHERE package_versions_fts MATCH 'grep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_hits, 1,
+            "rows written while triggers were absent must be re-indexed"
+        );
     }
 
     #[test]

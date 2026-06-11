@@ -64,17 +64,19 @@ pub enum Commands {
     /// Show version history for a package.
     History(HistoryArgs),
 
-    /// Build the index from a local nixpkgs repository.
+    /// Build the index from nixpkgs channel-release snapshots.
     #[cfg(feature = "indexer")]
     Index(IndexArgs),
 
-    /// Backfill missing metadata (source_path, homepage) from current nixpkgs.
+    /// Retired: metadata now comes from channel snapshots (see `nxv index`).
     #[cfg(feature = "indexer")]
-    Backfill(BackfillArgs),
+    #[command(hide = true)]
+    Backfill(RetiredArgs),
 
-    /// Reset/clean the nixpkgs repository to a known state.
+    /// Retired: the snapshot indexer does not use a nixpkgs checkout.
     #[cfg(feature = "indexer")]
-    Reset(ResetArgs),
+    #[command(hide = true)]
+    Reset(RetiredArgs),
 
     /// Collapse duplicate `(attribute_path, version)` rows in the index.
     ///
@@ -339,127 +341,74 @@ pub struct ServeArgs {
 }
 
 /// Arguments for the index command (feature-gated).
+///
+/// The indexer ingests channel-release snapshots from releases.nixos.org:
+/// `packages.json.br` where it exists (2020-03-27 onward; no Nix evaluation),
+/// and optionally `nix-env` over `nixexprs.tar.xz` for the pre-2020 era
+/// (`--backfill-evals`, requires `nix`).
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
 pub struct IndexArgs {
-    /// Path to the nixpkgs repository.
-    #[arg(long)]
-    pub nixpkgs_path: PathBuf,
+    /// Channels to ingest (repeatable). Defaults to nixpkgs-unstable (history
+    /// spine) plus nixos-unstable-small (currency).
+    #[arg(long = "channel", value_delimiter = ',')]
+    pub channels: Option<Vec<String>>,
 
-    /// Force full rebuild (ignore last indexed commit).
-    #[arg(long)]
-    pub full: bool,
-
-    /// Commits between checkpoints.
-    #[arg(long, default_value_t = 100)]
-    pub checkpoint_interval: usize,
-
-    /// Comma-separated list of systems to evaluate (e.g. x86_64-linux,aarch64-linux).
-    #[arg(long, value_delimiter = ',')]
-    pub systems: Option<Vec<String>>,
-
-    /// Limit commits to those after this date (YYYY-MM-DD) or git date string.
+    /// Only ingest releases dated on/after this date (YYYY-MM-DD).
     #[arg(long)]
     pub since: Option<String>,
 
-    /// Limit commits to those before this date (YYYY-MM-DD) or git date string.
+    /// Only ingest releases dated on/before this date (YYYY-MM-DD).
     #[arg(long)]
     pub until: Option<String>,
 
-    /// Limit the number of commits processed.
+    /// Parallel snapshot download/parse workers.
     #[arg(long)]
-    pub max_commits: Option<usize>,
+    pub jobs: Option<usize>,
+
+    /// Treat monitor warnings (count floors, sentinels, head lag) as fatal.
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Write the end-of-run coverage report as JSON to this path.
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+
+    /// Retry releases that were parked as failed/skipped.
+    #[arg(long)]
+    pub retry_failed: bool,
+
+    /// Also ingest the pre-2020 era by evaluating nixexprs.tar.xz with
+    /// nix-env (requires `nix`; one-time, ~1.5-3h).
+    #[arg(long)]
+    pub backfill_evals: bool,
+
+    /// Evaluate nixpkgs master HEAD directly (GitHub tarball) when channel
+    /// observations lag behind; requires `nix`.
+    #[arg(long)]
+    pub head_eval: bool,
+
+    /// Re-plan every known release instead of only new ones.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Limit the number of releases ingested this run (for testing).
+    #[arg(long)]
+    pub max_releases: Option<usize>,
+
+    /// Deprecated: the snapshot indexer does not read a nixpkgs checkout.
+    /// Accepted (with a warning) for one release cycle.
+    #[arg(long, hide = true)]
+    pub nixpkgs_path: Option<PathBuf>,
 }
 
-/// Fields that can be backfilled from nixpkgs.
-#[cfg(feature = "indexer")]
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackfillField {
-    /// Source path (e.g., pkgs/development/python-modules/foo/default.nix)
-    SourcePath,
-    /// Homepage URL
-    Homepage,
-    /// Known security vulnerabilities (CVEs)
-    KnownVulnerabilities,
-}
-
-#[cfg(feature = "indexer")]
-impl BackfillField {
-    /// Convert to the string representation used in the database.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BackfillField::SourcePath => "source_path",
-            BackfillField::Homepage => "homepage",
-            BackfillField::KnownVulnerabilities => "known_vulnerabilities",
-        }
-    }
-}
-
-/// Arguments for the backfill command (feature-gated).
-///
-/// Backfill updates existing database records with metadata extracted from nixpkgs.
-/// This is useful for populating fields that weren't captured during initial indexing.
-///
-/// Two modes are available:
-///
-/// HEAD MODE (default):
-///   Extracts metadata from the current nixpkgs checkout. Fast (single nix eval),
-///   but can only update packages that still exist in that checkout. Packages that
-///   have been removed or renamed won't be found.
-///
-/// HISTORICAL MODE (--history):
-///   For each package, checks out the original commit where it was indexed and
-///   extracts metadata from there. Much slower (many git checkouts + nix evals),
-///   but can update old/removed packages like Python 2.7.
-///
-/// Examples:
-///   # Fast backfill from current HEAD (only updates packages that still exist)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities
-///
-///   # Full historical backfill (slower, but updates old/removed packages)
-///   nxv backfill --nixpkgs-path ./nixpkgs --fields known-vulnerabilities --history
+/// Catch-all arguments for retired subcommands (hidden deprecation stubs).
 #[cfg(feature = "indexer")]
 #[derive(Parser, Debug)]
-pub struct BackfillArgs {
-    /// Path to the nixpkgs repository checkout.
-    #[arg(long)]
-    pub nixpkgs_path: PathBuf,
-
-    /// Comma-separated list of fields to backfill.
-    /// Default: all fields.
-    #[arg(long, value_enum, value_delimiter = ',')]
-    pub fields: Option<Vec<BackfillField>>,
-
-    /// Limit the number of packages to backfill (for testing).
-    #[arg(long)]
-    pub limit: Option<usize>,
-
-    /// Dry run - show what would be updated without making changes.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Use historical mode: traverse git to each package's original commit.
-    /// Slower but can update packages that no longer exist in current nixpkgs.
-    /// Without this flag, only packages in the current checkout can be updated.
-    #[arg(long)]
-    pub history: bool,
-}
-
-/// Arguments for the reset command (feature-gated).
-#[cfg(feature = "indexer")]
-#[derive(Parser, Debug)]
-pub struct ResetArgs {
-    /// Path to the nixpkgs repository.
-    #[arg(long)]
-    pub nixpkgs_path: PathBuf,
-
-    /// Reset to a specific commit or ref (default: origin/master).
-    #[arg(long)]
-    pub to: Option<String>,
-
-    /// Also fetch from origin before resetting.
-    #[arg(long)]
-    pub fetch: bool,
+pub struct RetiredArgs {
+    /// Ignored.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    pub rest: Vec<String>,
 }
 
 /// Arguments for the dedupe command (feature-gated).
@@ -775,21 +724,34 @@ mod tests {
 
     #[cfg(feature = "indexer")]
     #[test]
-    fn test_index_systems_parsing() {
+    fn test_index_channel_parsing() {
         let args = Cli::try_parse_from([
             "nxv",
             "index",
-            "--nixpkgs-path",
-            "./nixpkgs",
-            "--systems",
-            "x86_64-linux,aarch64-linux",
+            "--channel",
+            "nixpkgs-unstable,nixos-unstable-small",
+            "--strict",
         ])
         .unwrap();
 
         match args.command {
             Commands::Index(index) => {
-                let systems = index.systems.unwrap();
-                assert_eq!(systems, vec!["x86_64-linux", "aarch64-linux"]);
+                let channels = index.channels.unwrap();
+                assert_eq!(channels, vec!["nixpkgs-unstable", "nixos-unstable-small"]);
+                assert!(index.strict);
+                assert!(!index.backfill_evals);
+            }
+            _ => panic!("Expected Index command"),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    #[test]
+    fn test_index_accepts_deprecated_nixpkgs_path() {
+        let args = Cli::try_parse_from(["nxv", "index", "--nixpkgs-path", "./nixpkgs"]).unwrap();
+        match args.command {
+            Commands::Index(index) => {
+                assert!(index.nixpkgs_path.is_some());
             }
             _ => panic!("Expected Index command"),
         }

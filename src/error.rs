@@ -49,16 +49,8 @@ pub enum NxvError {
     ChecksumMismatch { expected: String, actual: String },
 
     #[cfg(feature = "indexer")]
-    #[error("Git error: {0}")]
-    Git(#[from] git2::Error),
-
-    #[cfg(feature = "indexer")]
     #[error("Nix evaluation failed: {0}")]
     NixEval(String),
-
-    #[cfg(feature = "indexer")]
-    #[error("Not a nixpkgs repository: {0}")]
-    NotNixpkgsRepo(String),
 
     #[cfg(feature = "indexer")]
     #[error("Signing error: {0}")]
@@ -214,14 +206,6 @@ mod tests {
             let err = NxvError::NixEval("evaluation failed".to_string());
             let msg = err.to_string();
             assert!(msg.contains("evaluation failed"));
-        }
-
-        #[test]
-        fn test_not_nixpkgs_repo_error_message() {
-            let err = NxvError::NotNixpkgsRepo("/some/path".to_string());
-            let msg = err.to_string();
-            assert!(msg.contains("/some/path"));
-            assert!(msg.contains("nixpkgs"));
         }
 
         #[test]

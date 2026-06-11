@@ -5,7 +5,36 @@
 
   const API_BASE = '/api/v1';
   const PAGE_SIZE = 50;
-  const FLAKES_EPOCH = new Date('2020-02-10T00:00:00Z');
+  // flake.nix landed 2020-02-10, but v4 rows carry channel-release
+  // observation dates that lag commits by hours-to-weeks. 2020-03-26 sits in
+  // the gap between the eras: observations after it are guaranteed
+  // flake-capable; the legacy form emitted before it works on any tree.
+  const FLAKES_EPOCH = new Date('2020-03-26T00:00:00Z');
+
+  // Nix keywords + non-identifier segments must be re-quoted in emitted
+  // commands (aspellDicts.or -> aspellDicts."or"), and the ref then needs
+  // shell quoting.
+  const NIX_KEYWORDS = new Set([
+    'or', 'if', 'then', 'else', 'assert', 'with', 'let', 'in', 'rec', 'inherit',
+  ]);
+  const isPlainNixIdent = (s) => /^[A-Za-z_][A-Za-z0-9_'-]*$/.test(s) && !NIX_KEYWORDS.has(s);
+  const attrForCmd = (attr) => {
+    let quoted = false;
+    const printable = (attr || '')
+      .split('.')
+      .map((seg) => {
+        if (isPlainNixIdent(seg)) return seg;
+        quoted = true;
+        return `"${seg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+      })
+      .join('.');
+    return { printable, quoted };
+  };
+  const flakeRef = (hash, attr) => {
+    const { printable, quoted } = attrForCmd(attr);
+    const ref = `nixpkgs/${hash}#${printable}`;
+    return quoted ? `'${ref}'` : ref;
+  };
 
   const STATE = {
     query: '',
@@ -155,10 +184,13 @@
     // version whose last-seen commit is current, so prefer last_commit_hash
     // here. For legacy (pre-flake) tarball imports either hash works; keep
     // the historical preference for first_commit_hash.
-    const ref = isLegacy ? shortHash(r.hash || r.lastHash) : shortHash(r.lastHash || r.hash);
+    // Commands always embed the FULL hash: `nix` resolves github: refs via
+    // GitHub's API, which 422s on abbreviated SHAs that are ambiguous in
+    // nixpkgs' ~1M-commit history (issue #21).
+    const ref = isLegacy ? r.hash || r.lastHash : r.lastHash || r.hash;
     return isLegacy
-      ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${ref}.tar.gz") {}).${r.attr}'`
-      : `${insecurePrefix}nix shell${impure} nixpkgs/${ref}#${r.attr}`;
+      ? `${insecurePrefix}nix-shell -p '(import (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/${ref}.tar.gz") {}).${attrForCmd(r.attr).printable}'`
+      : `${insecurePrefix}nix shell${impure} ${flakeRef(ref, r.attr)}`;
   }
 
   // ---------- URL state (refresh-safe, shareable) ----------
@@ -428,7 +460,7 @@
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
         else if (action === 'copy-run')
-          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+          copy(`nix run ${flakeRef(r.lastHash || r.hash, r.attr)}`);
         else if (action === 'history') openDrawer(r);
       });
     });
@@ -451,7 +483,7 @@
         if (!r) return;
         if (action === 'copy-flake') copy(buildFlakeCmd(r));
         else if (action === 'copy-run')
-          copy(`nix run nixpkgs/${shortHash(r.lastHash || r.hash)}#${r.attr}`);
+          copy(`nix run ${flakeRef(r.lastHash || r.hash, r.attr)}`);
         else if (action === 'history') openDrawer(r);
       });
     });

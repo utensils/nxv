@@ -1322,7 +1322,7 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
     // Calculate SHA256 of compressed data
     let mut hasher = Sha256::new();
     hasher.update(&compressed);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = base16ct::lower::encode_string(&hasher.finalize());
 
     (compressed, hash)
 }
@@ -1343,7 +1343,7 @@ fn create_test_bloom_filter() -> (Vec<u8>, String) {
     // Calculate SHA256
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = base16ct::lower::encode_string(&hasher.finalize());
 
     (bytes, hash)
 }
@@ -1543,7 +1543,7 @@ COMMIT;
     // Calculate SHA256 of compressed delta
     let mut hasher = Sha256::new();
     hasher.update(&compressed_delta);
-    let delta_hash = format!("{:x}", hasher.finalize());
+    let delta_hash = base16ct::lower::encode_string(&hasher.finalize());
 
     // Start mock server
     let mut server = mockito::Server::new();
@@ -2347,11 +2347,11 @@ fn test_full_delta_update_workflow() {
 
     let mut initial_db_hasher = Sha256::new();
     initial_db_hasher.update(&initial_db_compressed);
-    let initial_db_hash = format!("{:x}", initial_db_hasher.finalize());
+    let initial_db_hash = base16ct::lower::encode_string(&initial_db_hasher.finalize());
 
     let mut initial_bloom_hasher = Sha256::new();
     initial_bloom_hasher.update(&initial_bloom_data);
-    let initial_bloom_hash = format!("{:x}", initial_bloom_hasher.finalize());
+    let initial_bloom_hash = base16ct::lower::encode_string(&initial_bloom_hasher.finalize());
 
     // Initial manifest
     let initial_manifest = serde_json::json!({
@@ -2441,7 +2441,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
 
     let mut delta_hasher = Sha256::new();
     delta_hasher.update(&delta_compressed);
-    let delta_hash = format!("{:x}", delta_hasher.finalize());
+    let delta_hash = base16ct::lower::encode_string(&delta_hasher.finalize());
 
     // Create updated bloom filter (contains both firefox and nodejs)
     let updated_bloom_data = {
@@ -2453,7 +2453,7 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
 
     let mut updated_bloom_hasher = Sha256::new();
     updated_bloom_hasher.update(&updated_bloom_data);
-    let updated_bloom_hash = format!("{:x}", updated_bloom_hasher.finalize());
+    let updated_bloom_hash = base16ct::lower::encode_string(&updated_bloom_hasher.finalize());
 
     // New server for phase 2 (recreate mocks)
     drop(_manifest_mock);
@@ -2571,286 +2571,397 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
 }
 
 // ============================================================================
-// Indexer Integration Tests (require `indexer` feature and nix)
+// Indexer Integration Tests (mock release bucket; require `indexer` feature)
 // ============================================================================
 
-/// Test that the `nxv index` command creates an index from the nixpkgs submodule.
-/// This test requires the `indexer` feature and nix to be installed.
-#[test]
-#[ignore] // Requires indexer feature and nix to be installed
-fn test_index_command_creates_database() {
-    let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
-    if !nixpkgs_path.exists() {
-        eprintln!("Skipping: nixpkgs submodule not present");
-        return;
+/// Build a packages.json document with `filler` synthetic packages plus the
+/// monitor's sentinel packages and the given thunderbird version, brotli
+/// compressed like the real artifacts. Counts are sized to clear the
+/// 2020-era absolute floor (50k).
+#[cfg(feature = "indexer")]
+fn fixture_packages_json_br(thunderbird_version: &str, filler: usize) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut json = String::with_capacity(filler * 120 + 4096);
+    json.push_str("{\"packages\":{");
+    for i in 0..filler {
+        json.push_str(&format!(
+            "\"pkg{i}\":{{\"name\":\"pkg{i}-1.0\",\"pname\":\"pkg{i}\",\"version\":\"1.0\",\"system\":\"x86_64-linux\",\"meta\":{{}}}},"
+        ));
     }
+    json.push_str(&format!(
+        "\"thunderbird\":{{\"pname\":\"thunderbird\",\"version\":\"{thunderbird_version}\",\"system\":\"x86_64-linux\",\"meta\":{{\"description\":\"Mail client\"}}}},"
+    ));
+    json.push_str(
+        "\"firefox\":{\"pname\":\"firefox\",\"version\":\"100.0\",\"system\":\"x86_64-linux\",\"meta\":{}},\
+         \"nh\":{\"pname\":\"nh\",\"version\":\"4.0.0\",\"system\":\"x86_64-linux\",\"meta\":{}},\
+         \"python313Packages.requests\":{\"pname\":\"requests\",\"version\":\"2.32.3\",\"system\":\"x86_64-linux\",\"meta\":{}}"
+    );
+    json.push_str("},\"version\":\"2\"}");
+
+    let mut compressed = Vec::new();
+    {
+        let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, 3, 22);
+        writer.write_all(json.as_bytes()).unwrap();
+    }
+    compressed
+}
+
+/// Stand up a mock release bucket with two releases (thunderbird 142.0 then
+/// 143.0) and return (server, db_path guard dir, commit hashes).
+#[cfg(feature = "indexer")]
+fn mock_release_bucket(server: &mut mockito::Server) -> (Vec<mockito::Mock>, String, String) {
+    let commit1 = "a".repeat(40);
+    let commit2 = "b".repeat(40);
+    // Recent dates: the run report marks stale observations unhealthy
+    // (head lag), and the absolute count floor is year-dependent.
+    let date1 = (chrono::Utc::now() - chrono::Duration::days(3))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let date2 = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+
+    let listing = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>nixpkgs/nixpkgs-25.05pre100000.{c1short}</Key>
+    <LastModified>2025-01-01T00:00:00.000Z</LastModified>
+    <ETag>"x"</ETag>
+    <ChecksumAlgorithm>CRC64NVME</ChecksumAlgorithm>
+    <Size>1</Size>
+  </Contents>
+  <CommonPrefixes><Prefix>nixpkgs/nixpkgs-25.05pre100000.{c1short}/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>nixpkgs/nixpkgs-25.05pre100100.{c2short}/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>nixpkgs/nixpkgs-0.5/</Prefix></CommonPrefixes>
+</ListBucketResult>"#,
+        c1short = &commit1[..12],
+        c2short = &commit2[..12],
+    );
+
+    let mocks = vec![
+        server
+            .mock("GET", "/")
+            .match_query(mockito::Matcher::Regex("prefix=nixpkgs".to_string()))
+            .with_body(listing)
+            .create(),
+        server
+            .mock(
+                "GET",
+                format!(
+                    "/nixpkgs/nixpkgs-25.05pre100000.{}/git-revision",
+                    &commit1[..12]
+                )
+                .as_str(),
+            )
+            .with_header("Last-Modified", date1.as_str())
+            .with_body(&commit1)
+            .create(),
+        server
+            .mock(
+                "GET",
+                format!(
+                    "/nixpkgs/nixpkgs-25.05pre100100.{}/git-revision",
+                    &commit2[..12]
+                )
+                .as_str(),
+            )
+            .with_header("Last-Modified", date2.as_str())
+            .with_body(&commit2)
+            .create(),
+        server
+            .mock(
+                "GET",
+                format!(
+                    "/nixpkgs/nixpkgs-25.05pre100000.{}/packages.json.br",
+                    &commit1[..12]
+                )
+                .as_str(),
+            )
+            .with_body(fixture_packages_json_br("142.0", 132_000))
+            .create(),
+        server
+            .mock(
+                "GET",
+                format!(
+                    "/nixpkgs/nixpkgs-25.05pre100100.{}/packages.json.br",
+                    &commit2[..12]
+                )
+                .as_str(),
+            )
+            .with_body(fixture_packages_json_br("143.0", 132_500))
+            .create(),
+    ];
+
+    (mocks, commit1, commit2)
+}
+
+/// End-to-end: plan + ingest two mock releases, then verify the data through
+/// the real CLI — the DESIGN.md regression fixtures.
+#[test]
+#[cfg(feature = "indexer")]
+fn test_index_end_to_end_with_mock_bucket() {
+    let mut server = mockito::Server::new();
+    let (_mocks, commit1, commit2) = mock_release_bucket(&mut server);
 
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test-index.db");
+    let db_path = dir.path().join("index.db");
 
-    // Run the index command with a small checkpoint interval
-    // Use --full to ensure we test full indexing
-    let _result = nxv()
+    nxv()
+        .env("NXV_RELEASES_URL", server.url())
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
             "index",
-            "--nixpkgs-path",
-            nixpkgs_path.to_str().unwrap(),
-            "--full",
-            "--checkpoint-interval",
-            "10",
+            "--channel",
+            "nixpkgs-unstable",
         ])
-        .timeout(std::time::Duration::from_secs(600)) // 10 minute timeout
-        .assert();
+        .timeout(std::time::Duration::from_secs(120))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("status: healthy"));
 
-    // The command might succeed or fail depending on nix availability
-    // Just check it doesn't panic and creates some database
-    if db_path.exists() {
-        // If a database was created, verify it has the expected schema
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let table_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('meta', 'package_versions')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(table_count >= 1, "Database should have at least meta table");
-    }
-}
+    // Regression fixture (issue #23): nh must be present.
+    nxv()
+        .args(["--db-path", db_path.to_str().unwrap(), "search", "-e", "nh"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("4.0.0"));
 
-/// Test that incremental indexing only processes new commits.
-/// This test requires the `indexer` feature and nix to be installed.
-#[test]
-#[ignore] // Requires indexer feature and nix to be installed
-fn test_incremental_index_processes_only_new_commits() {
-    let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
-    if !nixpkgs_path.exists() {
-        eprintln!("Skipping: nixpkgs submodule not present");
-        return;
-    }
-
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test-index.db");
-
-    // Create a database with an initial commit marker
-    {
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE package_versions (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                version TEXT NOT NULL,
-                first_commit_hash TEXT NOT NULL,
-                first_commit_date INTEGER NOT NULL,
-                last_commit_hash TEXT NOT NULL,
-                last_commit_date INTEGER NOT NULL,
-                attribute_path TEXT NOT NULL,
-                description TEXT,
-                license TEXT,
-                homepage TEXT,
-                maintainers TEXT,
-                platforms TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
-            );
-            CREATE INDEX idx_packages_name ON package_versions(name);
-            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
-            "#,
-        )
-        .unwrap();
-
-        // Get the latest commit from nixpkgs to use as checkpoint
-        let output = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&nixpkgs_path)
-            .output()
-            .expect("Failed to get nixpkgs HEAD");
-
-        let head_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // Set the last indexed commit to HEAD - this should mean no new commits to process
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('last_indexed_commit', ?)",
-            [&head_commit],
-        )
-        .unwrap();
-    }
-
-    // Run incremental index - should report no new commits
+    // Regression fixture (issue #5): nested attrs present and searchable.
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
+            "search",
+            "-e",
+            "python313Packages.requests",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2.32.3"));
+
+    // Range semantics (issue #21 class): both observed versions exist, each
+    // bounded by REAL observed commits — 142.0 must not extend past the
+    // release where 143.0 replaced it, and a never-observed version must
+    // not exist.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let (first, last): (String, String) = conn
+        .query_row(
+            "SELECT first_commit_hash, last_commit_hash FROM package_versions \
+             WHERE attribute_path = 'thunderbird' AND version = '142.0'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(first, commit1);
+    assert_eq!(
+        last, commit1,
+        "142.0 was only observed at the first release"
+    );
+
+    let (first, last): (String, String) = conn
+        .query_row(
+            "SELECT first_commit_hash, last_commit_hash FROM package_versions \
+             WHERE attribute_path = 'thunderbird' AND version = '143.0'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(first, commit2);
+    assert_eq!(last, commit2);
+
+    let phantom: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM package_versions \
+             WHERE attribute_path = 'thunderbird' AND version = '144.0'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(phantom, 0, "never-observed versions must not be fabricated");
+
+    // Ledger: both releases ingested with attr counts.
+    let ingested: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM releases WHERE status = 'ingested'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ingested, 2);
+
+    // Bloom filter must resolve dotted attrs (written next to the DB).
+    let bloom_path = dir.path().join("index.bloom");
+    assert!(bloom_path.exists(), "bloom filter should be written");
+
+    // Idempotence: a second run ingests nothing and stays healthy.
+    nxv()
+        .env("NXV_RELEASES_URL", server.url())
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
             "index",
-            "--nixpkgs-path",
-            nixpkgs_path.to_str().unwrap(),
+            "--channel",
+            "nixpkgs-unstable",
         ])
         .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("up to date")
-                .or(predicate::str::contains("No new commits"))
-                .or(predicate::str::contains("0 commits")),
-        );
+        .stderr(predicate::str::contains("nothing to ingest"));
 }
 
-/// Test that indexing can be resumed after interruption.
-/// This verifies the checkpoint/recovery mechanism works correctly.
+/// A truncated artifact must fail its release without polluting the table,
+/// and the release must stay retryable.
 #[test]
-#[ignore] // Requires indexer feature and nix to be installed
-fn test_index_resumable_after_interrupt() {
-    let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
-    if !nixpkgs_path.exists() {
-        eprintln!("Skipping: nixpkgs submodule not present");
-        return;
-    }
+#[cfg(feature = "indexer")]
+fn test_index_truncated_snapshot_fails_release_without_polluting() {
+    let mut server = mockito::Server::new();
+    let commit1 = "c".repeat(40);
 
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test-index.db");
-
-    // Simulate a partially completed indexing run by creating a database
-    // with a checkpoint from an older commit
-    {
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            r#"
-            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE package_versions (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                version TEXT NOT NULL,
-                first_commit_hash TEXT NOT NULL,
-                first_commit_date INTEGER NOT NULL,
-                last_commit_hash TEXT NOT NULL,
-                last_commit_date INTEGER NOT NULL,
-                attribute_path TEXT NOT NULL,
-                description TEXT,
-                license TEXT,
-                homepage TEXT,
-                maintainers TEXT,
-                platforms TEXT,
-                UNIQUE(attribute_path, version, first_commit_hash)
-            );
-            CREATE INDEX idx_packages_name ON package_versions(name);
-            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
-            "#,
-        )
-        .unwrap();
-
-        // Get a commit from ~10 commits ago
-        let output = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD~10"])
-            .current_dir(&nixpkgs_path)
-            .output()
-            .expect("Failed to get nixpkgs commit");
-
-        let old_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // Set checkpoint to old commit
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('last_indexed_commit', ?)",
-            [&old_commit],
-        )
-        .unwrap();
-    }
-
-    // Run incremental index - should pick up from checkpoint
-    let _result = nxv()
-        .args([
-            "--db-path",
-            db_path.to_str().unwrap(),
-            "index",
-            "--nixpkgs-path",
-            nixpkgs_path.to_str().unwrap(),
-        ])
-        .timeout(std::time::Duration::from_secs(600))
-        .assert();
-
-    // Verify checkpoint was updated
-    let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let last_commit: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'last_indexed_commit'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    assert!(
-        last_commit.is_some(),
-        "Checkpoint should be preserved after indexing"
+    let listing = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+  <CommonPrefixes><Prefix>nixpkgs/nixpkgs-25.05pre100000.{short}/</Prefix></CommonPrefixes>
+</ListBucketResult>"#,
+        short = &commit1[..12],
     );
-}
+    let _m1 = server
+        .mock("GET", "/")
+        .match_query(mockito::Matcher::Regex("prefix=nixpkgs".to_string()))
+        .with_body(listing)
+        .create();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let _m2 = server
+        .mock(
+            "GET",
+            format!(
+                "/nixpkgs/nixpkgs-25.05pre100000.{}/git-revision",
+                &commit1[..12]
+            )
+            .as_str(),
+        )
+        .with_header("Last-Modified", recent.as_str())
+        .with_body(&commit1)
+        .create();
 
-/// End-to-end workflow test: index a few commits, then search for packages.
-/// This verifies the complete indexer → database → search pipeline.
-#[test]
-#[ignore] // Requires indexer feature and nix to be installed
-fn test_index_then_search_workflow() {
-    let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
-    if !nixpkgs_path.exists() {
-        eprintln!("Skipping: nixpkgs submodule not present");
-        return;
-    }
+    let full = fixture_packages_json_br("142.0", 132_000);
+    let _m3 = server
+        .mock(
+            "GET",
+            format!(
+                "/nixpkgs/nixpkgs-25.05pre100000.{}/packages.json.br",
+                &commit1[..12]
+            )
+            .as_str(),
+        )
+        .with_body(&full[..full.len() / 2])
+        .create();
 
     let dir = tempdir().unwrap();
-    let db_path = dir.path().join("test-index.db");
+    let db_path = dir.path().join("index.db");
 
-    // Index from nixpkgs (will take a while but should find packages)
-    let _index_result = nxv()
+    nxv()
+        .env("NXV_RELEASES_URL", server.url())
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
             "index",
-            "--nixpkgs-path",
-            nixpkgs_path.to_str().unwrap(),
-            "--full",
-            "--checkpoint-interval",
-            "5",
+            "--channel",
+            "nixpkgs-unstable",
         ])
-        .timeout(std::time::Duration::from_secs(1800)) // 30 minute timeout
-        .assert();
+        .timeout(std::time::Duration::from_secs(120))
+        .assert()
+        .success() // not --strict: failures are recorded, run completes
+        .stderr(predicate::str::contains("FAILED"));
 
-    // If indexing succeeded and created a database, test search
-    if db_path.exists() {
-        // Check that we can query the database
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let package_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
-                row.get(0)
-            })
-            .unwrap_or(0);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 0, "a failed snapshot must never write rows");
 
-        if package_count > 0 {
-            // Search for a common package (should exist in any nixpkgs)
-            nxv()
-                .args([
-                    "--db-path",
-                    db_path.to_str().unwrap(),
-                    "search",
-                    "hello", // hello is a simple package that should always exist
-                ])
-                .assert()
-                .success();
+    let (status, error): (String, Option<String>) = conn
+        .query_row("SELECT status, error FROM releases", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert!(error.is_some());
+}
 
-            // Test history command
-            nxv()
-                .args(["--db-path", db_path.to_str().unwrap(), "history", "hello"])
-                .assert()
-                .success();
+/// --strict turns failed releases into a non-zero exit.
+#[test]
+#[cfg(feature = "indexer")]
+fn test_index_strict_fails_on_gate_violation() {
+    let mut server = mockito::Server::new();
+    let commit1 = "d".repeat(40);
 
-            // Test stats command
-            nxv()
-                .args(["--db-path", db_path.to_str().unwrap(), "stats"])
-                .assert()
-                .success()
-                .stdout(predicate::str::contains("Total version ranges"));
-        }
-    }
+    let listing = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+  <CommonPrefixes><Prefix>nixpkgs/nixpkgs-25.05pre100000.{short}/</Prefix></CommonPrefixes>
+</ListBucketResult>"#,
+        short = &commit1[..12],
+    );
+    let _m1 = server
+        .mock("GET", "/")
+        .match_query(mockito::Matcher::Regex("prefix=nixpkgs".to_string()))
+        .with_body(listing)
+        .create();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let _m2 = server
+        .mock(
+            "GET",
+            format!(
+                "/nixpkgs/nixpkgs-25.05pre100000.{}/git-revision",
+                &commit1[..12]
+            )
+            .as_str(),
+        )
+        .with_header("Last-Modified", recent.as_str())
+        .with_body(&commit1)
+        .create();
+    // Far too few packages: trips the absolute count floor.
+    let _m3 = server
+        .mock(
+            "GET",
+            format!(
+                "/nixpkgs/nixpkgs-25.05pre100000.{}/packages.json.br",
+                &commit1[..12]
+            )
+            .as_str(),
+        )
+        .with_body(fixture_packages_json_br("142.0", 100))
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+
+    nxv()
+        .env("NXV_RELEASES_URL", server.url())
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "index",
+            "--channel",
+            "nixpkgs-unstable",
+            "--strict",
+        ])
+        .timeout(std::time::Duration::from_secs(120))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("GATE FAILED"));
 }
 
 // ============================================================================

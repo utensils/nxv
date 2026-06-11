@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # nxv — Nix Version Index
 
-`nxv` is a Rust CLI + HTTP API that indexes the entire nixpkgs git history (2017+) into a local SQLite database with a bloom filter for fast lookups. It answers: *"which exact nixpkgs commit shipped version X of package Y?"* and produces the `nix shell nixpkgs/<commit>#pkg` command you need to actually use it.
+`nxv` is a Rust CLI + HTTP API that indexes nixpkgs channel-release history (2016+) into a local SQLite database with a bloom filter for fast lookups. It answers: *"which exact nixpkgs commit shipped version X of package Y?"* and produces the `nix shell nixpkgs/<commit>#pkg` command you need to actually use it.
 
 ## Quick Reference
 
@@ -32,7 +32,7 @@ nxv completions zsh                      # Generate shell completions
 
 Parse `$ARGUMENTS` to determine the action:
 
-- If arguments look like a **subcommand** (`search`, `info`, `history`, `stats`, `update`, `serve`, `completions`, and indexer-only `index`, `backfill`, `dedupe`, `publish`, `keygen`, `reset`), run that subcommand.
+- If arguments look like a **subcommand** (`search`, `info`, `history`, `stats`, `update`, `serve`, `completions`, and indexer-only `index`, `dedupe`, `publish`, `keygen`), run that subcommand.
 - If arguments look like a **package name** (e.g. `python`, `nodejs 15`, `ruby 2.6`), default to `nxv search`.
 - If arguments look like a **question** ("when was X added", "which commit has Y"), pick `search` or `history` accordingly.
 - If no arguments, run `nxv stats` to give the user a quick health check of their index.
@@ -227,24 +227,22 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | jq '.data'
 
 ## Indexer Commands (feature-gated)
 
-These require nxv built with `--features indexer` (`cargo build --features indexer` or `nix build .#nxv-indexer`) and a local nixpkgs git checkout:
+These require nxv built with `--features indexer` (`cargo build --features indexer` or `nix build .#nxv-indexer`). The indexer ingests channel-release snapshots from releases.nixos.org — no nixpkgs checkout and no Nix evaluation needed for the main path:
 
 ```bash
-# Build the index from a local nixpkgs clone
-nxv index --nixpkgs-path ./nixpkgs                   # Incremental from last commit
-nxv index --nixpkgs-path ./nixpkgs --full            # Full rebuild from scratch
-nxv index --nixpkgs-path ./nixpkgs --since 2023-01-01
+# Ingest new channel releases (default channels: nixpkgs-unstable + nixos-unstable-small)
+nxv index                                            # Incremental: only new releases
+nxv index --channel nixpkgs-unstable                 # Restrict to one channel
+nxv index --since 2024-01-01 --until 2024-06-30      # Bound by release date
+nxv index --strict --report report.json              # CI mode: gates fatal, JSON report
+nxv index --backfill-evals                           # One-time 2016-2020 era (needs `nix`, ~2-3h)
+nxv index --head-eval                                # Evaluate master HEAD when channels stall (needs `nix`)
+nxv index --retry-failed                             # Re-attempt failed/parked releases
+nxv index --max-releases 5                           # Bound a run (testing)
 
-# Backfill missing metadata (source_path, homepage, known-vulnerabilities)
-nxv backfill --nixpkgs-path ./nixpkgs                # Fast: HEAD only
-nxv backfill --nixpkgs-path ./nixpkgs --history      # Slow: traverses git for accuracy
-
-# Repair pre-0.1.5 incremental indexer bug
+# Repair duplicate rows in pre-v4 databases (also runs during v3->v4 migration)
 nxv dedupe --dry-run                                 # Preview
 nxv dedupe                                           # Run
-
-# Reset nixpkgs checkout to a known state
-nxv reset --nixpkgs-path ./nixpkgs --to origin/master --fetch
 
 # Publish distribution-ready compressed artifacts + manifest
 nxv publish --output ./publish --url-prefix https://your-server/nxv
@@ -253,6 +251,10 @@ nxv publish --output ./publish --url-prefix https://... --sign --secret-key nxv.
 # Generate a minisign keypair for signing manifests
 nxv keygen --secret-key ./nxv.key --public-key ./nxv.pub
 ```
+
+Every recorded commit is a real, Hydra-built channel commit — `nix shell` commands produced from the index hit the binary cache instead of compiling from source. Version ranges mean "observed at both endpoints"; a version that lived shorter than one channel advance (~a day) may be missed.
+
+Retired commands: `nxv backfill` and `nxv reset` are gone — snapshots carry complete metadata (source_path, homepage, known_vulnerabilities), and there is no checkout to reset.
 
 Most users never need these — they consume a pre-built published index via `nxv update`. Only run these when self-hosting an index.
 

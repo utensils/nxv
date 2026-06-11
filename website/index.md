@@ -26,8 +26,8 @@ features:
   - icon: "\uD83D\uDCE6"
     title: Complete
     details:
-      Every nixpkgs package version since 2017, with store paths and flake
-      references
+      Every channel-released nixpkgs package version since 2016 \u2014 including
+      nested sets like python3Packages \u2014 at Hydra-built, cache-backed commits
   - icon: "\uD83D\uDD12"
     title: Offline-first
     details: Download the index once, search locally without network requests

@@ -410,7 +410,7 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         eprintln!("Checking for updates...");
     }
 
-    let status = perform_update(
+    let status = match perform_update(
         manifest_url,
         &cli.db_path,
         args.force,
@@ -418,7 +418,40 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         args.skip_verify,
         args.public_key.as_deref(),
         Some(cli.api_timeout),
-    )?;
+    ) {
+        Ok(status) => status,
+        // An incompatible published index means this binary is too old. The
+        // self-update check is exactly what fixes that — run it before
+        // propagating, so old local installs can upgrade in one step
+        // instead of being told "please upgrade" with no way to do it.
+        Err(e @ crate::error::NxvError::IncompatibleIndex(_)) => {
+            eprintln!("{e}");
+            if !args.no_self_update {
+                eprintln!();
+                match self_update::run(self_update::SelfUpdateOptions {
+                    check: false,
+                    force: false,
+                    version: None,
+                    connect_timeout_secs: cli.api_timeout,
+                    show_progress,
+                    quiet: cli.quiet,
+                }) {
+                    Ok(()) => {
+                        eprintln!();
+                        eprintln!(
+                            "If the binary was updated, re-run `nxv update` to fetch the index."
+                        );
+                    }
+                    Err(update_err) => {
+                        eprintln!("Self-update failed: {update_err}");
+                        eprintln!("Upgrade nxv manually, then re-run `nxv update`.");
+                    }
+                }
+            }
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     match status {
         UpdateStatus::UpToDate { commit } => {
@@ -825,6 +858,32 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
         println!("Latest package change: {}", newest.format("%Y-%m-%d"));
     }
 
+    if !stats.channels.is_empty() {
+        println!();
+        println!("Release coverage");
+        println!("----------------");
+        for ch in &stats.channels {
+            print!("{}: {} ingested", ch.channel, ch.releases_ingested);
+            if ch.releases_pending > 0 {
+                print!(", {} pending", ch.releases_pending);
+            }
+            if ch.releases_failed > 0 {
+                print!(", {} failed", ch.releases_failed);
+            }
+            if ch.releases_skipped > 0 {
+                print!(", {} skipped", ch.releases_skipped);
+            }
+            if let Some(newest) = &ch.newest_release {
+                print!(" (newest: {newest}");
+                if let Some(date) = ch.newest_release_date {
+                    print!(", {}", date.format("%Y-%m-%d"));
+                }
+                print!(")");
+            }
+            println!();
+        }
+    }
+
     // Local-only info: file sizes
     if !is_remote {
         if cli.db_path.exists()
@@ -1163,251 +1222,46 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Run the indexer against a nixpkgs repository and update the local index database.
+/// Build the index by ingesting channel-release snapshots.
 ///
-/// This performs either a full rebuild or an incremental index (depending on `args.full`),
-/// registers a Ctrl+C handler for graceful shutdown, prints progress and a summary of results,
-/// and always (even after interruption) builds and saves a bloom filter from the resulting
-/// database state.
-///
-/// On success the function prints indexing metrics and returns normally; on failure it returns
-/// an error describing what went wrong.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// # use crate::cli::{Cli, IndexArgs};
-/// # use crate::cmd_index;
-/// // Build or parse CLI structures (example placeholders)
-/// let cli: Cli = unimplemented!();
-/// let args: IndexArgs = unimplemented!();
-///
-/// // Run the index command (no_run prevents execution in doctests)
-/// let _ = cmd_index(&cli, &args);
-/// ```
+/// Plans the release work list from the releases.nixos.org listing, ingests
+/// pending releases (parallel download/parse, gated by data-quality monitors
+/// BEFORE any write), then rebuilds the bloom filter and prints a coverage
+/// report. Interruption is safe at any point: unfinished releases stay
+/// `pending` and the next run picks them up.
 #[cfg(feature = "indexer")]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
-    use crate::db::Database;
-    use crate::index::{Indexer, IndexerConfig, save_bloom_filter};
-    use std::sync::atomic::Ordering;
+    if args.nixpkgs_path.is_some() {
+        eprintln!(
+            "warning: --nixpkgs-path is deprecated and ignored — the indexer now ingests \
+             channel snapshots from releases.nixos.org and does not read a local checkout."
+        );
+    }
 
     // Ensure data directory exists before opening database
     paths::ensure_data_dir()?;
 
-    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
-    eprintln!("Indexing nixpkgs from {:?}", nixpkgs_path);
-    eprintln!("Checkpoint interval: {} commits", args.checkpoint_interval);
-
-    let config = IndexerConfig {
-        checkpoint_interval: args.checkpoint_interval,
-        show_progress: !cli.quiet,
-        systems: args
-            .systems
-            .clone()
-            .unwrap_or_else(|| IndexerConfig::default().systems),
-        since: args.since.clone(),
-        until: args.until.clone(),
-        max_commits: args.max_commits,
-    };
-
-    let indexer = Indexer::new(config);
-
-    // Set up Ctrl+C handler
-    let shutdown_flag = indexer.shutdown_flag();
-    ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
-        shutdown_flag.store(true, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl+C handler");
-
-    let result = if args.full {
-        eprintln!("Performing full rebuild...");
-        indexer.index_full(&nixpkgs_path, &cli.db_path)?
-    } else {
-        eprintln!("Performing incremental index...");
-        indexer.index_incremental(&nixpkgs_path, &cli.db_path)?
-    };
-
-    // Print results
-    eprintln!();
-    eprintln!("Indexing complete!");
-    eprintln!("  Commits processed: {}", result.commits_processed);
-    eprintln!("  Total packages found: {}", result.packages_found);
-    eprintln!("  Range rows written:     {}", result.ranges_written);
-    eprintln!("  Unique package names: {}", result.unique_names);
-
-    // Build and save bloom filter from current database state
-    // We do this even after interruption since the DB is consistent via checkpoints
-    {
-        eprintln!();
-        eprintln!("Building bloom filter...");
-        let db = Database::open_readonly(&cli.db_path)?;
-        let bloom_path = paths::get_bloom_path_for_db(&cli.db_path);
-        save_bloom_filter(&db, &bloom_path)?;
-        eprintln!("Bloom filter saved to {:?}", bloom_path);
-    }
-
-    if result.was_interrupted {
-        eprintln!();
-        eprintln!("Note: Indexing was interrupted. Run again to continue from checkpoint.");
-    }
-
-    Ok(())
+    Ok(crate::index::run_index(cli, args)?)
 }
 
-/// Runs a backfill process to populate or repair package metadata in the local index.
-///
-/// This command executes a backfill over the repository at `args.nixpkgs_path`, updating fields
-/// in the database at `cli.db_path` according to `args` (fields, limit, dry-run, and whether to
-/// operate in historical mode). It prints progress and a summary of metrics to stderr, and installs
-/// a Ctrl+C handler to request a graceful shutdown; if interrupted, the run stops cleanly and the
-/// summary indicates that it was interrupted.
-///
-/// The command reports:
-/// - whether it ran in historical or HEAD mode,
-/// - packages checked,
-/// - commits processed (only in historical mode),
-/// - records updated,
-/// - number of source_path fields filled,
-/// - number of homepage fields filled.
-///
-/// Also prints a note advising to re-run if it was interrupted.
-///
-/// # Examples
-///
-/// ```no_run
-/// // Typical invocation from main command dispatch:
-/// // cmd_backfill(&cli, &cli.backfill_args)?;
-/// ```
+/// Deprecation stub: `nxv backfill` was retired by the snapshot indexer.
 #[cfg(feature = "indexer")]
-fn cmd_backfill(cli: &Cli, args: &cli::BackfillArgs) -> Result<()> {
-    use crate::index::backfill::{BackfillConfig, create_shutdown_flag, run_backfill};
-    use std::sync::atomic::Ordering;
-
-    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
-
-    if args.history {
-        eprintln!(
-            "Backfilling metadata from {:?} (historical mode)",
-            nixpkgs_path
-        );
-        eprintln!("  This will check out each package's original commit to extract metadata.");
-        eprintln!("  Slower but can update old/removed packages.");
-    } else {
-        eprintln!("Backfilling metadata from {:?} (HEAD mode)", nixpkgs_path);
-        eprintln!("  This extracts metadata from the current nixpkgs checkout only.");
-        eprintln!("  Fast, but packages not in this checkout won't be updated.");
-    }
-    eprintln!();
-
-    let config = BackfillConfig {
-        fields: args
-            .fields
-            .as_ref()
-            .map(|f| f.iter().map(|field| field.as_str().to_string()).collect())
-            .unwrap_or_default(),
-        limit: args.limit,
-        dry_run: args.dry_run,
-        use_history: args.history,
-    };
-
-    // Set up Ctrl+C handler
-    let shutdown_flag = create_shutdown_flag();
-    let flag_clone = shutdown_flag.clone();
-    ctrlc::set_handler(move || {
-        eprintln!("\nReceived Ctrl+C, requesting graceful shutdown...");
-        flag_clone.store(true, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl+C handler");
-
-    let result = run_backfill(&nixpkgs_path, &cli.db_path, config, shutdown_flag)?;
-
-    eprintln!();
-    if result.was_interrupted {
-        eprintln!("Backfill interrupted!");
-    } else {
-        eprintln!("Backfill complete!");
-    }
-    eprintln!("  Packages checked: {}", result.packages_checked);
-    if args.history {
-        eprintln!("  Commits processed: {}", result.commits_processed);
-    }
-    eprintln!("  Records updated: {}", result.records_updated);
-    eprintln!(
-        "  source_path fields filled: {}",
-        result.source_paths_filled
-    );
-    eprintln!("  homepage fields filled: {}", result.homepages_filled);
-    eprintln!(
-        "  known_vulnerabilities fields filled: {}",
-        result.vulnerabilities_filled
-    );
-
-    // Show helpful tips based on results
-    if result.was_interrupted {
-        eprintln!();
-        eprintln!("Note: Backfill was interrupted. Run again to continue.");
-    } else if !args.history && result.records_updated == 0 && result.packages_checked > 0 {
-        eprintln!();
-        eprintln!("Tip: No records were updated. This can happen if:");
-        eprintln!("  - All packages already have the requested metadata, or");
-        eprintln!("  - The packages no longer exist in your nixpkgs checkout.");
-        eprintln!();
-        eprintln!("To update old/removed packages, use historical mode:");
-        eprintln!(
-            "  nxv backfill --nixpkgs-path {:?} --history",
-            args.nixpkgs_path
-        );
-    }
-
-    Ok(())
+fn cmd_backfill(_cli: &Cli, _args: &cli::RetiredArgs) -> Result<()> {
+    anyhow::bail!(
+        "`nxv backfill` was retired: the snapshot indexer ingests metadata \
+         (source_path, homepage, known_vulnerabilities, ...) directly from \
+         channel snapshots, so there is nothing left to backfill. \
+         Run `nxv index` instead."
+    )
 }
 
-/// Resets the local nixpkgs git repository to a given reference, optionally fetching from origin first.
-///
-/// If `args.fetch` is true, the repository will be fetched from origin before performing a hard reset.
-/// The repository is reset to `args.to` when provided, otherwise to `origin/master`. Progress and the
-/// resulting HEAD short hash are printed to stderr. Errors from repository operations are propagated.
-///
-/// # Examples
-///
-/// ```no_run
-/// # use crate::cli::{ResetArgs, Cli};
-/// // Construct `args` with the desired path and options.
-/// let cli = Cli::parse(); // placeholder for context where Cli is available
-/// let args = ResetArgs { nixpkgs_path: "/path/to/nixpkgs".into(), fetch: true, to: None };
-/// cmd_reset(&cli, &args).unwrap();
-/// ```
+/// Deprecation stub: `nxv reset` was retired by the snapshot indexer.
 #[cfg(feature = "indexer")]
-fn cmd_reset(_cli: &Cli, args: &cli::ResetArgs) -> Result<()> {
-    use crate::index::git::NixpkgsRepo;
-
-    let nixpkgs_path = paths::expand_tilde(&args.nixpkgs_path);
-    eprintln!("Resetting nixpkgs repository at {:?}", nixpkgs_path);
-
-    let repo = NixpkgsRepo::open(&nixpkgs_path)?;
-
-    if args.fetch {
-        eprintln!("Fetching from origin...");
-        repo.fetch_origin()?;
-        eprintln!("Fetch complete.");
-    }
-
-    let target = args.to.as_deref();
-    let target_display = target.unwrap_or("origin/master");
-    eprintln!("Resetting to {}...", target_display);
-
-    repo.reset_hard(target)?;
-
-    eprintln!("Reset complete.");
-    eprintln!("  Repository is now at: {}", target_display);
-
-    // Show current HEAD
-    if let Ok(head) = repo.head_commit() {
-        eprintln!("  HEAD: {}", &head[..12.min(head.len())]);
-    }
-
-    Ok(())
+fn cmd_reset(_cli: &Cli, _args: &cli::RetiredArgs) -> Result<()> {
+    anyhow::bail!(
+        "`nxv reset` was retired: the snapshot indexer does not use a local \
+         nixpkgs checkout, so there is no repository state to reset."
+    )
 }
 
 /// Collapse duplicate (attribute_path, version) rows in the index.

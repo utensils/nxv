@@ -1,1298 +1,643 @@
-//! Indexer module for building the package index from nixpkgs.
+//! Index building from nixpkgs channel-release snapshots.
 //!
-//! This module is only available when the `indexer` feature is enabled.
+//! The indexer ingests *observations*: "(attribute, version) was present in
+//! channel release R at commit C". Sources, in order of preference:
+//!
+//! - `packages.json.br` per release from releases.nixos.org (2020-03-27 →
+//!   today; no Nix evaluation at all),
+//! - `nix-env -qaP --json --meta` over each release's `nixexprs.tar.xz`
+//!   (2016-09-28 → 2020-03-27, behind `--backfill-evals`),
+//! - an optional `--head-eval` pass over the GitHub tarball of master HEAD
+//!   for channel-stuck periods.
+//!
+//! Pipeline (DESIGN.md §4): plan → parallel fetch/parse → in-order gate
+//! (BEFORE any write) → aggregated widen-only upserts (atomic with the
+//! release ledger) → finish (FTS/bloom rebuild, watermarks, report).
+//!
+//! See docs/indexer-rewrite/DESIGN.md for the full specification and
+//! docs/indexer-rewrite/ANALYSIS.md for why the previous git-walking,
+//! file-change-driven indexer was replaced.
 
-pub mod backfill;
-pub mod extractor;
-pub mod git;
+pub mod eval;
+pub mod monitor;
 pub mod publisher;
+pub mod releases;
+pub mod snapshot;
 
 use crate::bloom::PackageBloomFilter;
+use crate::cli::{Cli, IndexArgs};
 use crate::db::Database;
 use crate::db::queries::PackageVersion;
+use crate::db::releases::{ReleaseRecord, ReleaseSource};
 use crate::error::{NxvError, Result};
-use chrono::{DateTime, Utc};
-use git::NixpkgsRepo;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
-use std::sync::Arc;
+use chrono::{DateTime, NaiveDate, Utc};
+use monitor::RunReport;
+use releases::S3Client;
+use snapshot::SnapshotEntry;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, mpsc};
 
-/// Configuration for the indexer.
-#[derive(Debug, Clone)]
-pub struct IndexerConfig {
-    /// Number of commits between checkpoints.
-    pub checkpoint_interval: usize,
-    /// Whether to show progress bars.
-    pub show_progress: bool,
-    /// Systems to evaluate for arch coverage.
-    pub systems: Vec<String>,
-    /// Optional git --since filter.
-    pub since: Option<String>,
-    /// Optional git --until filter.
-    pub until: Option<String>,
-    /// Optional limit on number of commits.
-    pub max_commits: Option<usize>,
-}
+/// Flush the aggregator after this many gated releases (full/catch-up runs).
+const FLUSH_GROUP_RELEASES: usize = 64;
 
-impl Default for IndexerConfig {
-    fn default() -> Self {
-        Self {
-            checkpoint_interval: 100,
-            show_progress: true,
-            systems: vec![
-                "x86_64-linux".to_string(),
-                "aarch64-linux".to_string(),
-                "x86_64-darwin".to_string(),
-                "aarch64-darwin".to_string(),
-            ],
-            since: None,
-            until: None,
-            max_commits: None,
-        }
-    }
-}
+/// ... or when it holds this many distinct (attr, version) pairs.
+const FLUSH_GROUP_MAX_PAIRS: usize = 400_000;
 
-/// Tracks an open version range for a package.
-#[derive(Debug, Clone)]
-struct OpenRange {
-    name: String,
-    version: String,
-    first_commit_hash: String,
-    first_commit_date: DateTime<Utc>,
-    attribute_path: String,
-    description: Option<String>,
-    license: Option<String>,
-    homepage: Option<String>,
-    maintainers: Option<String>,
-    platforms: Option<String>,
-    source_path: Option<String>,
-    known_vulnerabilities: Option<String>,
-}
+/// Drop FTS triggers (and rebuild at the end) when ingesting at least this
+/// many releases in one run.
+const FTS_BULK_THRESHOLD: usize = 50;
 
-impl OpenRange {
-    /// Convert this OpenRange into a PackageVersion using the provided last commit metadata.
-    ///
-    /// The returned PackageVersion contains all metadata carried by the OpenRange plus the
-    /// supplied `last_commit_hash` and `last_commit_date`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// // Construct an OpenRange and finalize it into a PackageVersion:
-    /// let open = OpenRange { /* populate fields */ };
-    /// let pv = open.to_package_version("deadbeef", chrono::Utc::now());
-    /// assert_eq!(pv.last_commit_hash, "deadbeef");
-    /// ```
-    fn to_package_version(
-        &self,
-        last_commit_hash: &str,
-        last_commit_date: DateTime<Utc>,
-    ) -> PackageVersion {
-        PackageVersion {
-            id: 0,
-            name: self.name.clone(),
-            version: self.version.clone(),
-            first_commit_hash: self.first_commit_hash.clone(),
-            first_commit_date: self.first_commit_date,
-            last_commit_hash: last_commit_hash.to_string(),
-            last_commit_date,
-            attribute_path: self.attribute_path.clone(),
-            description: self.description.clone(),
-            license: self.license.clone(),
-            homepage: self.homepage.clone(),
-            maintainers: self.maintainers.clone(),
-            platforms: self.platforms.clone(),
-            source_path: self.source_path.clone(),
-            known_vulnerabilities: self.known_vulnerabilities.clone(),
-        }
-    }
+/// `--head-eval` only fires when the newest channel observation is older
+/// than this many hours.
+const HEAD_EVAL_LAG_HOURS: i64 = 24;
 
-    /// Conditionally updates the stored metadata fields with the provided values.
-    ///
-    /// Each optional field replaces the corresponding stored value if it differs.
-    /// The `source_path` is set only if the existing `source_path` is `None` and
-    /// a new `Some` value is provided; it is never overwritten once set.
-    ///
-    /// # Returns
-    ///
-    /// `true` if any field was changed, `false` otherwise.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut r = OpenRange {
-    ///     name: "pkg".into(),
-    ///     version: "1.0".into(),
-    ///     first_commit_hash: "abc".into(),
-    ///     first_commit_date: "2020-01-01".into(),
-    ///     attribute_path: "pkgs.pkg".into(),
-    ///     description: None,
-    ///     license: None,
-    ///     homepage: None,
-    ///     maintainers: None,
-    ///     platforms: None,
-    ///     source_path: None,
-    /// };
-    ///
-    /// let changed = r.update_metadata(
-    ///     Some("desc".into()),
-    ///     Some("MIT".into()),
-    ///     None,
-    ///     None,
-    ///     None,
-    ///     Some("path/to/source".into()),
-    /// );
-    ///
-    /// assert!(changed);
-    /// assert_eq!(r.description, Some("desc".into()));
-    /// assert_eq!(r.source_path, Some("path/to/source".into()));
-    /// ```
-    #[allow(clippy::too_many_arguments)]
-    fn update_metadata(
-        &mut self,
-        description: Option<String>,
-        license: Option<String>,
-        homepage: Option<String>,
-        maintainers: Option<String>,
-        platforms: Option<String>,
-        source_path: Option<String>,
-        known_vulnerabilities: Option<String>,
-    ) -> bool {
-        let mut updated = false;
+/// Environment override for the release bucket URL (tests, mirrors).
+const RELEASES_URL_ENV: &str = "NXV_RELEASES_URL";
 
-        if self.description != description {
-            self.description = description;
-            updated = true;
-        }
-        if self.license != license {
-            self.license = license;
-            updated = true;
-        }
-        if self.homepage != homepage {
-            self.homepage = homepage;
-            updated = true;
-        }
-        if self.maintainers != maintainers {
-            self.maintainers = maintainers;
-            updated = true;
-        }
-        if self.platforms != platforms {
-            self.platforms = platforms;
-            updated = true;
-        }
-        if self.source_path.is_none() && source_path.is_some() {
-            self.source_path = source_path;
-            updated = true;
-        }
-        if self.known_vulnerabilities != known_vulnerabilities {
-            self.known_vulnerabilities = known_vulnerabilities;
-            updated = true;
-        }
+/// Entry point for `nxv index`.
+pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
+    let mut db = Database::open(&cli.db_path)?;
 
-        updated
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PackageAggregate {
-    name: String,
-    version: String,
-    attribute_path: String,
-    description: Option<String>,
-    homepage: Option<String>,
-    license: HashSet<String>,
-    maintainers: HashSet<String>,
-    platforms: HashSet<String>,
-    source_path: Option<String>,
-    known_vulnerabilities: Option<Vec<String>>,
-}
-
-impl PackageAggregate {
-    /// Creates a PackageAggregate from an extracted PackageInfo.
-    ///
-    /// Initializes the license, maintainers, and platforms as sets populated from the
-    /// corresponding optional lists in `pkg`, and copies scalar metadata fields
-    /// (name, version, attribute_path, description, homepage, source_path).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// // Construct a minimal PackageInfo for illustration.
-    /// let pkg = extractor::PackageInfo {
-    ///     name: "foo".to_string(),
-    ///     version: "1.0".to_string(),
-    ///     attribute_path: "pkgs.foo".to_string(),
-    ///     description: Some("Example".to_string()),
-    ///     homepage: Some("https://example.org".to_string()),
-    ///     license: Some(vec!["MIT".to_string()]),
-    ///     maintainers: Some(vec!["alice".to_string()]),
-    ///     platforms: Some(vec!["x86_64-linux".to_string()]),
-    ///     source_path: Some("pkgs/foo/default.nix".to_string()),
-    /// };
-    /// let agg = PackageAggregate::new(pkg);
-    /// assert_eq!(agg.name, "foo");
-    /// assert!(agg.license.contains("MIT"));
-    /// ```
-    fn new(pkg: extractor::PackageInfo) -> Self {
-        let mut license = HashSet::new();
-        let mut maintainers = HashSet::new();
-        let mut platforms = HashSet::new();
-
-        if let Some(licenses) = pkg.license {
-            license.extend(licenses);
-        }
-        if let Some(maintainers_list) = pkg.maintainers {
-            maintainers.extend(maintainers_list);
-        }
-        if let Some(platforms_list) = pkg.platforms {
-            platforms.extend(platforms_list);
-        }
-
-        Self {
-            name: pkg.name,
-            version: pkg.version,
-            attribute_path: pkg.attribute_path,
-            description: pkg.description,
-            homepage: pkg.homepage,
-            license,
-            maintainers,
-            platforms,
-            source_path: pkg.source_path,
-            known_vulnerabilities: pkg.known_vulnerabilities,
-        }
-    }
-
-    /// Merge metadata from an extracted `PackageInfo` into this aggregate.
-    ///
-    /// This will set `description`, `homepage`, and `source_path` only if they are
-    /// currently `None`, and will extend the `license`, `maintainers`, and
-    /// `platforms` sets with any values present on `pkg`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::collections::HashSet;
-    ///
-    /// // Construct an example aggregate (fields omitted for brevity)
-    /// let mut agg = PackageAggregate {
-    ///     name: "foo".into(),
-    ///     version: "1.0".into(),
-    ///     attribute_path: "pkgs.foo".into(),
-    ///     description: None,
-    ///     homepage: None,
-    ///     license: HashSet::new(),
-    ///     maintainers: HashSet::new(),
-    ///     platforms: HashSet::new(),
-    ///     source_path: None,
-    /// };
-    ///
-    /// // Simulated extracted package info with some metadata
-    /// let pkg = extractor::PackageInfo {
-    ///     name: "foo".into(),
-    ///     version: "1.0".into(),
-    ///     attribute_path: "pkgs.foo".into(),
-    ///     description: Some("A package".into()),
-    ///     homepage: Some("https://example/".into()),
-    ///     license: Some(HashSet::from(["MIT".into()])),
-    ///     maintainers: Some(HashSet::from(["alice".into()])),
-    ///     platforms: Some(HashSet::from(["x86_64-linux".into()])),
-    ///     source_path: Some("pkgs/foo/default.nix".into()),
-    /// };
-    ///
-    /// agg.merge(pkg);
-    ///
-    /// assert_eq!(agg.description.as_deref(), Some("A package"));
-    /// assert!(agg.license.contains("MIT"));
-    /// assert_eq!(agg.source_path.as_deref(), Some("pkgs/foo/default.nix"));
-    /// ```
-    fn merge(&mut self, pkg: extractor::PackageInfo) {
-        if self.description.is_none() {
-            self.description = pkg.description;
-        }
-        if self.homepage.is_none() {
-            self.homepage = pkg.homepage;
-        }
-        if self.source_path.is_none() {
-            self.source_path = pkg.source_path;
-        }
-        if let Some(licenses) = pkg.license {
-            self.license.extend(licenses);
-        }
-        if let Some(maintainers) = pkg.maintainers {
-            self.maintainers.extend(maintainers);
-        }
-        if let Some(platforms) = pkg.platforms {
-            self.platforms.extend(platforms);
-        }
-        // Merge known_vulnerabilities - keep existing or use new
-        if self.known_vulnerabilities.is_none() {
-            self.known_vulnerabilities = pkg.known_vulnerabilities;
-        }
-    }
-
-    fn key(&self) -> String {
-        format!("{}::{}", self.attribute_path, self.version)
-    }
-
-    fn license_json(&self) -> Option<String> {
-        set_to_json(&self.license)
-    }
-
-    fn maintainers_json(&self) -> Option<String> {
-        set_to_json(&self.maintainers)
-    }
-
-    fn platforms_json(&self) -> Option<String> {
-        set_to_json(&self.platforms)
-    }
-
-    fn known_vulnerabilities_json(&self) -> Option<String> {
-        self.known_vulnerabilities
-            .as_ref()
-            .filter(|v| !v.is_empty())
-            .map(|v| serde_json::to_string(v).unwrap_or_default())
-    }
-}
-
-/// Converts a set of strings into a sorted JSON array string.
-///
-/// Returns `Some` containing the JSON array (with elements sorted lexicographically) if `values` is non-empty, `None` if `values` is empty.
-///
-/// # Examples
-///
-/// ```
-/// use std::collections::HashSet;
-/// let mut s = HashSet::new();
-/// s.insert("b".to_string());
-/// s.insert("a".to_string());
-/// assert_eq!(set_to_json(&s), Some("[\"a\",\"b\"]".to_string()));
-/// ```
-fn set_to_json(values: &HashSet<String>) -> Option<String> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut list: Vec<String> = values.iter().cloned().collect();
-    list.sort();
-    serde_json::to_string(&list).ok()
-}
-
-/// Tracks timing data for smoothed ETA calculations.
-///
-/// Uses a sliding window of recent commit processing times to calculate
-/// a stable ETA that doesn't jump wildly when individual commits vary
-/// in processing time.
-struct EtaTracker {
-    /// Recent processing times (sliding window)
-    times: VecDeque<Duration>,
-    /// Maximum window size
-    window_size: usize,
-    /// When the current commit started processing
-    commit_start: Option<Instant>,
-    /// Total remaining commits
-    total_remaining: u64,
-}
-
-impl EtaTracker {
-    /// Creates an EtaTracker that smooths ETA estimates over a sliding window.
-    ///
-    /// `window_size` is the maximum number of recent commit durations retained for averaging; larger
-    /// values produce a smoother but less responsive ETA.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(5);
-    /// assert_eq!(tracker.window_size, 5);
-    /// assert!(tracker.avg_time_per_commit().is_none());
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
-    fn new(window_size: usize) -> Self {
-        Self {
-            times: VecDeque::with_capacity(window_size),
-            window_size,
-            commit_start: None,
-            total_remaining: 0,
-        }
-    }
-
-    /// Begin timing for the current commit.
-    ///
-    /// Records the current instant so that a subsequent call to `finish_commit` can
-    /// measure and record the commit's elapsed time.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit(); // begin timing for one commit
-    /// ```
-    fn start_commit(&mut self) {
-        self.commit_start = Some(Instant::now());
-    }
-
-    /// Stops the current commit timer and records its elapsed duration into the sliding window.
-    ///
-    /// This appends the duration measured since the last `start_commit` to the internal times
-    /// buffer and drops the oldest entry if the buffer exceeds `window_size`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.start_commit();
-    /// std::thread::sleep(std::time::Duration::from_millis(10));
-    /// tracker.finish_commit();
-    /// assert!(tracker.avg_time_per_commit().is_some());
-    /// ```
-    fn finish_commit(&mut self) {
-        if let Some(start) = self.commit_start.take() {
-            let elapsed = start.elapsed();
-            self.times.push_back(elapsed);
-            if self.times.len() > self.window_size {
-                self.times.pop_front();
-            }
-        }
-    }
-
-    /// Sets the number of remaining commits used to compute the ETA.
-    ///
-    /// This updates the internal remaining-count which eta() and eta_string() use
-    /// to calculate the estimated time left.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut tracker = EtaTracker::new(3);
-    /// tracker.set_remaining(42);
-    /// assert_eq!(tracker.eta().is_none(), true);
-    /// ```
-    fn set_remaining(&mut self, remaining: u64) {
-        self.total_remaining = remaining;
-    }
-
-    /// Compute the average duration per commit from the tracked sliding window.
-    ///
-    /// Returns `Some(duration)` equal to the arithmetic mean of the recorded commit durations when at least one sample exists, or `None` if no durations have been recorded.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::time::Duration;
-    /// let mut tracker = super::EtaTracker::new(5);
-    /// // simulate recorded commit durations
-    /// tracker.times.push_back(Duration::from_millis(100));
-    /// tracker.times.push_back(Duration::from_millis(200));
-    /// let avg = tracker.avg_time_per_commit().unwrap();
-    /// assert_eq!(avg, Duration::from_millis(150));
-    /// ```
-    fn avg_time_per_commit(&self) -> Option<Duration> {
-        if self.times.is_empty() {
-            return None;
-        }
-        let total: Duration = self.times.iter().sum();
-        Some(total / self.times.len() as u32)
-    }
-
-    /// Compute a smoothed estimated remaining duration using the sliding-window average of recent commit timings.
-    ///
-    /// Uses the average time per commit from the tracker multiplied by the configured remaining commit count.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Duration)` equal to the average duration per commit multiplied by `total_remaining`, `None` if there is no timing data.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut t = EtaTracker::new(3);
-    /// t.start_commit();
-    /// t.finish_commit();
-    /// t.set_remaining(5);
-    /// let e = t.eta();
-    /// assert!(e.is_some());
-    /// ```
-    fn eta(&self) -> Option<Duration> {
-        let avg = self.avg_time_per_commit()?;
-        // Use checked multiplication to avoid overflow, cap at u32::MAX commits
-        let remaining = self.total_remaining.min(u32::MAX as u64) as u32;
-        avg.checked_mul(remaining).or(Some(Duration::MAX))
-    }
-
-    /// Returns a human-readable ETA string for the remaining work.
-    ///
-    /// The duration is formatted as:
-    /// - `"<secs>s"` for durations less than 60 seconds,
-    /// - `"<mins>m <secs>s"` for durations less than an hour,
-    /// - `"<hours>h <mins>m"` for one hour or more.
-    ///
-    /// If no ETA can be computed, returns `"calculating..."`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let tracker = EtaTracker::new(3);
-    /// assert_eq!(tracker.eta_string(), "calculating...");
-    /// ```
-    fn eta_string(&self) -> String {
-        match self.eta() {
-            Some(eta) => {
-                let secs = eta.as_secs();
-                if secs < 60 {
-                    format!("{}s", secs)
-                } else if secs < 3600 {
-                    format!("{}m {}s", secs / 60, secs % 60)
-                } else {
-                    let hours = secs / 3600;
-                    let mins = (secs % 3600) / 60;
-                    format!("{}h {}m", hours, mins)
-                }
-            }
-            None => "calculating...".to_string(),
-        }
-    }
-}
-
-/// The main indexer that coordinates git traversal, extraction, and database insertion.
-pub struct Indexer {
-    config: IndexerConfig,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl Indexer {
-    /// Create a new indexer with the given configuration.
-    pub fn new(config: IndexerConfig) -> Self {
-        Self {
-            config,
-            shutdown: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Get a clone of the shutdown flag for signal handling.
-    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.shutdown)
-    }
-
-    /// Request a graceful shutdown.
-    #[allow(dead_code)]
-    pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// Check if shutdown was requested.
-    fn is_shutdown_requested(&self) -> bool {
-        self.shutdown.load(Ordering::SeqCst)
-    }
-
-    /// Run a full index from scratch.
-    ///
-    /// This processes all indexable commits (2017+) in the repository and builds a complete index.
-    /// Commits before 2017 have a different structure that doesn't work with modern Nix.
-    pub fn index_full<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        nixpkgs_path: P,
-        db_path: Q,
-    ) -> Result<IndexResult> {
-        let repo = NixpkgsRepo::open(&nixpkgs_path)?;
-        let mut db = Database::open(&db_path)?;
-
-        // Get indexable commits touching package paths
-        let mut commits = repo.get_indexable_commits_touching_paths(
-            &["pkgs"],
-            self.config.since.as_deref(),
-            self.config.until.as_deref(),
-        )?;
-        if let Some(limit) = self.config.max_commits {
-            commits.truncate(limit);
-        }
-        let total_commits = commits.len();
-
+    // Self-heal a dropped-triggers state: bulk runs drop the FTS sync
+    // triggers and rebuild at the end — if a previous run died in between
+    // (kill, OOM, power loss), description search would silently miss every
+    // row written since. Detection is one sqlite_master query.
+    if db.fts_triggers_missing()? {
         eprintln!(
-            "Found {} indexable commits with package changes (starting from {})",
-            total_commits,
-            git::MIN_INDEXABLE_DATE
+            "warning: FTS triggers missing (a previous bulk run was interrupted); rebuilding FTS index..."
         );
-
-        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, None)
+        db.rebuild_fts()?;
     }
 
-    /// Run an incremental index, processing only commits that have not yet been indexed.
-    ///
-    /// If a last indexed commit is recorded in the database this attempts to index commits
-    /// since that commit that touch the `pkgs` tree. If the last indexed commit is missing
-    /// from the repository or no previous index exists, this falls back to performing a full index.
-    /// The function verifies repository ancestry and will error if the repository HEAD is older
-    /// than the last indexed commit; ancestry check failures are warned and indexing proceeds when possible.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(IndexResult)` containing counts and status for the indexing run; returns `Err` on failure.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use std::path::Path;
-    /// # use crate::index::{Indexer, IndexerConfig};
-    /// // Create an indexer and run incremental indexing against paths (example only).
-    /// let indexer = Indexer::new(IndexerConfig::default());
-    /// let result = indexer.index_incremental("path/to/nixpkgs", "path/to/db");
-    /// assert!(result.is_ok());
-    /// ```
-    pub fn index_incremental<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        nixpkgs_path: P,
-        db_path: Q,
-    ) -> Result<IndexResult> {
-        let repo = NixpkgsRepo::open(&nixpkgs_path)?;
-        let mut db = Database::open(&db_path)?;
+    let base_url =
+        std::env::var(RELEASES_URL_ENV).unwrap_or_else(|_| releases::DEFAULT_BASE_URL.to_string());
+    let s3 = S3Client::new(&base_url)?;
 
-        // Check for last indexed commit
-        let last_commit = db.get_meta("last_indexed_commit")?;
+    let channel_names = args.channels.clone().unwrap_or_else(|| {
+        releases::builtin_channels()
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
+    });
+    let channels = releases::resolve_channels(&channel_names)?;
 
-        match last_commit {
-            Some(hash) => {
-                // Get current HEAD
-                let head_hash = repo.head_commit()?;
+    let since = parse_date_arg(args.since.as_deref(), "since")?;
+    let until = parse_date_arg(args.until.as_deref(), "until")?;
 
-                // Check if HEAD is an ancestor of last_indexed_commit
-                // This means the repo has been reset to an older state
-                if head_hash != hash {
-                    match repo.is_ancestor(&head_hash, &hash) {
-                        Ok(true) => {
-                            eprintln!(
-                                "Error: Repository HEAD ({}) is older than last indexed commit ({}).",
-                                &head_hash[..7],
-                                &hash[..7]
-                            );
-                            eprintln!(
-                                "This can happen if the repository was reset or the submodule is out of date."
-                            );
-                            eprintln!();
-                            eprintln!("To fix this, either:");
-                            eprintln!("  1. Update your nixpkgs repository to a newer commit:");
-                            eprintln!(
-                                "     git -C <nixpkgs-path> fetch origin && git -C <nixpkgs-path> checkout origin/master"
-                            );
-                            eprintln!();
-                            eprintln!(
-                                "  2. Or use --full to rebuild the index from the current state:"
-                            );
-                            eprintln!("     nxv index --nixpkgs-path <path> --full");
-                            return Err(NxvError::Git(git2::Error::from_str(
-                                "Repository HEAD is behind last indexed commit. See above for solutions.",
-                            )));
-                        }
-                        Ok(false) => {
-                            // HEAD is not an ancestor, so it's either ahead or diverged - continue normally
-                        }
-                        Err(e) => {
-                            // If we can't check ancestry, warn but continue
-                            eprintln!("Warning: Could not verify commit ancestry: {}", e);
-                        }
-                    }
-                }
+    // Graceful Ctrl+C: finish the in-flight release group, then stop. An
+    // interrupted run leaves pending rows that the next run picks up.
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        let _ = ctrlc::set_handler(move || {
+            eprintln!("\nReceived Ctrl+C, finishing in-flight work...");
+            flag.store(true, Ordering::SeqCst);
+        });
+    }
 
-                // Try to get commits since that hash
-                match repo.get_commits_since_touching_paths(
-                    &hash,
-                    &["pkgs"],
-                    self.config.since.as_deref(),
-                    self.config.until.as_deref(),
-                ) {
-                    Ok(mut commits) => {
-                        if let Some(limit) = self.config.max_commits {
-                            commits.truncate(limit);
-                        }
-                        if commits.is_empty() {
-                            eprintln!("Index is already up to date.");
-                            // Still update the indexed date to record when we last checked
-                            db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                            return Ok(IndexResult {
-                                commits_processed: 0,
-                                packages_found: 0,
-                                ranges_written: 0,
-                                unique_names: 0,
-                                was_interrupted: false,
-                            });
-                        }
-                        eprintln!("Found {} new commits to process", commits.len());
-                        self.process_commits(&mut db, &nixpkgs_path, &repo, commits, Some(&hash))
-                    }
-                    Err(_) => {
-                        eprintln!(
-                            "Warning: Last indexed commit {} not found in repository.",
-                            &hash[..7]
-                        );
-                        eprintln!("This may indicate a rebase. Consider running with --full.");
-                        Err(NxvError::Git(git2::Error::from_str(
-                            "Last indexed commit not found. Run with --full to rebuild.",
-                        )))
-                    }
-                }
-            }
-            None => {
-                eprintln!("No previous index found, performing full index.");
-                self.index_full(nixpkgs_path, db_path)
-            }
+    let quiet = cli.quiet;
+    let progress = |msg: &str| {
+        if !quiet {
+            eprintln!("{msg}");
+        }
+    };
+
+    // ── Plan ────────────────────────────────────────────────────────────
+    if args.full {
+        let reset = db.connection().execute(
+            "UPDATE releases SET status = 'pending', attempts = 0, error = NULL \
+             WHERE status IN ('ingested', 'failed', 'skipped')",
+            [],
+        )?;
+        if reset > 0 {
+            progress(&format!("--full: re-queued {reset} known releases"));
         }
     }
 
-    /// Processes a sequence of commits: extracts package metadata for configured systems,
-    /// tracks open version ranges across commits, finalizes and inserts package versions
-    /// into the database, and updates indexing checkpoint metadata.
-    ///
-    /// This method iterates the provided commits in order, checking out each commit,
-    /// extracting packages for the indexer's configured target systems, merging per-system
-    /// metadata, and maintaining "open" version ranges for packages that persist across
-    /// commits. When a range ends (the package disappears or a checkpoint is reached),
-    /// the range is converted to a PackageVersion and written to the database in batches.
-    /// The method also supports graceful shutdown (saving a checkpoint and flushing pending
-    /// inserts), periodic checkpoints controlled by the indexer's configuration, and optional
-    /// progress reporting with a smoothed ETA. It updates database meta keys such as
-    /// "last_indexed_commit" and "checkpoint_open_ranges" and attempts to restore the
-    /// repository's original HEAD upon completion.
-    ///
-    /// # Returns
-    ///
-    /// An `IndexResult` summarizing the indexing operation: number of commits processed,
-    /// packages found, ranges created, unique package names observed, and whether the run
-    /// was interrupted.
-    ///
-    /// # Errors
-    ///
-    /// Propagates errors from git operations, extraction, and database interactions.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # // pseudocode; adapt with real repo/db objects in tests
-    /// # use crate::index::{Indexer, IndexerConfig};
-    /// # use crate::db::Database;
-    /// let indexer = Indexer::new(IndexerConfig::default());
-    /// let mut db = Database::open("/tmp/index.db").unwrap();
-    /// let repo = open_nixpkgs_repo("/path/to/nixpkgs").unwrap();
-    /// let commits = repo.list_commits_touching_pkgs().unwrap();
-    /// let result = indexer.process_commits(&mut db, "/path/to/nixpkgs", &repo, commits, None).unwrap();
-    /// println!("Indexed {} commits", result.commits_processed);
-    /// ```
-    fn process_commits<P: AsRef<Path>>(
-        &self,
-        db: &mut Database,
-        nixpkgs_path: P,
-        repo: &NixpkgsRepo,
-        commits: Vec<git::CommitInfo>,
-        resume_from: Option<&str>,
-    ) -> Result<IndexResult> {
-        let total_commits = commits.len();
-        let systems = &self.config.systems;
-        let nixpkgs_path = nixpkgs_path.as_ref();
+    let plan = releases::plan_releases(&db, &s3, &channels, since, until, &progress)?;
+    progress(&format!(
+        "plan: {} release dirs seen, {} new, {} unparseable (skipped)",
+        plan.dirs_seen, plan.new_releases, plan.skipped_unparseable
+    ));
 
-        // Set up progress bar if enabled
-        let multi_progress = if self.config.show_progress {
-            Some(MultiProgress::new())
-        } else {
-            None
-        };
+    // ── Work list ───────────────────────────────────────────────────────
+    let channel_prefixes: HashMap<String, String> = channels
+        .iter()
+        .map(|c| (c.name.clone(), c.s3_prefix.clone()))
+        .collect();
 
-        let progress_bar = multi_progress.as_ref().map(|mp| {
-            let pb = mp.add(ProgressBar::new(total_commits as u64));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-                    .unwrap()
-                    .progress_chars("█▓▒░  "),
-            );
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
-            pb
+    let mut worklist: Vec<ReleaseRecord> = db
+        .release_worklist(args.retry_failed)?
+        .into_iter()
+        .filter(|r| channel_prefixes.contains_key(&r.channel))
+        .filter(|r| match (since, until) {
+            (Some(s), _) if r.release_date < s => false,
+            (_, Some(u)) if r.release_date > u => false,
+            _ => true,
+        })
+        .filter(|r| args.backfill_evals || r.source != ReleaseSource::NixEnv)
+        .collect();
+    if let Some(max) = args.max_releases {
+        worklist.truncate(max);
+    }
+
+    let mut report = RunReport {
+        planned: worklist.len(),
+        ..Default::default()
+    };
+
+    if worklist.is_empty() {
+        progress("nothing to ingest: all known releases are settled");
+    } else {
+        progress(&format!("ingesting {} releases...", worklist.len()));
+        let jobs = args.jobs.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(2)
         });
 
-        // ETA tracker with 20-commit sliding window for stable estimates
-        let mut eta_tracker = EtaTracker::new(20);
-
-        // Track open ranges: attribute_path+version -> OpenRange
-        let mut open_ranges: HashMap<String, OpenRange> = HashMap::new();
-
-        // Track unique package names for bloom filter
-        let mut unique_names: HashSet<String> = HashSet::new();
-
-        // Pre-populate open_ranges from the last checkpoint. Without this, incremental
-        // runs create a new row per (attribute_path, version, new first_commit_hash)
-        // tuple — the UNIQUE constraint doesn't fire because first_commit_hash differs,
-        // and each run adds a duplicate for every package that's still present.
-        if let Some(resume_hash) = resume_from {
-            for pv in db.load_open_ranges_at_commit(resume_hash)? {
-                let key = format!("{}::{}", pv.attribute_path, pv.version);
-                unique_names.insert(pv.name.clone());
-                open_ranges.insert(
-                    key,
-                    OpenRange {
-                        name: pv.name,
-                        version: pv.version,
-                        first_commit_hash: pv.first_commit_hash,
-                        first_commit_date: pv.first_commit_date,
-                        attribute_path: pv.attribute_path,
-                        description: pv.description,
-                        license: pv.license,
-                        homepage: pv.homepage,
-                        maintainers: pv.maintainers,
-                        platforms: pv.platforms,
-                        source_path: pv.source_path,
-                        known_vulnerabilities: pv.known_vulnerabilities,
-                    },
-                );
-            }
+        let bulk = worklist.len() >= FTS_BULK_THRESHOLD;
+        if bulk {
+            db.drop_fts_triggers()?;
         }
 
-        let mut result = IndexResult {
-            commits_processed: 0,
-            packages_found: 0,
-            ranges_written: 0,
-            unique_names: 0,
-            was_interrupted: false,
-        };
+        let outcome = ingest_worklist(
+            &mut db,
+            &s3,
+            &channel_prefixes,
+            worklist,
+            jobs,
+            &shutdown,
+            &mut report,
+            &progress,
+        );
 
-        let mut prev_commit_hash: Option<String> = resume_from.map(String::from);
-        let mut prev_commit_date: Option<DateTime<Utc>> = None;
-        let mut pending_inserts: Vec<PackageVersion> = Vec::new();
+        if bulk {
+            progress("rebuilding FTS index...");
+            db.rebuild_fts()?;
+        }
+        outcome?;
+    }
 
-        // Build the initial file-to-attribute map
-        let first_commit = commits
-            .first()
-            .ok_or_else(|| NxvError::Git(git2::Error::from_str("No commits to process")))?;
+    // ── --head-eval: cover channel-stuck periods ────────────────────────
+    // Failures here (network, GitHub API, eval) must not abort the finish
+    // steps: the channel ingest above already succeeded and its bloom/
+    // watermark/report work must still land.
+    if args.head_eval
+        && !shutdown.load(Ordering::SeqCst)
+        && let Err(e) = run_head_eval(&mut db, &s3, args, &mut report, &progress)
+    {
+        progress(&format!("head-eval failed: {e} (continuing to finish)"));
+        report.failed += 1;
+    }
 
-        // Save original HEAD ref so we can restore it after indexing
-        let original_ref = repo.head_ref()?;
+    // ── Finish ──────────────────────────────────────────────────────────
+    progress("rebuilding bloom filter...");
+    let bloom_path = crate::paths::get_bloom_path_for_db(&cli.db_path);
+    save_bloom_filter(&db, &bloom_path)?;
 
-        repo.checkout_commit(&first_commit.hash)?;
-        let mut file_attr_map = build_file_attr_map(nixpkgs_path, systems)?;
-        let mut mapping_commit = first_commit.hash.clone();
+    // Watermarks: load-bearing for manifest.latest_commit, `nxv update`'s
+    // UpToDate check, /health, /api/v1/stats and the frontend stats panel.
+    if let Some(newest) = db.newest_ingested_release(None)? {
+        db.set_meta("last_indexed_commit", &newest.commit_hash)?;
+        db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
+    }
 
-        // Helper to print warnings without disrupting progress bar
-        let warn = |pb: &Option<ProgressBar>, msg: String| {
-            if let Some(bar) = pb {
-                bar.println(format!("⚠ {}", msg));
-            } else {
-                eprintln!("Warning: {}", msg);
-            }
-        };
+    report.finalize(&db, args.strict)?;
+    if !quiet {
+        report.print();
+    }
+    if let Some(path) = &args.report {
+        report.write_json(path)?;
+        progress(&format!("report written to {}", path.display()));
+    }
 
-        // Process commits sequentially
-        for (commit_idx, commit) in commits.iter().enumerate() {
-            // Start timing this commit
-            eta_tracker.start_commit();
-            eta_tracker.set_remaining((total_commits - commit_idx) as u64);
+    if shutdown.load(Ordering::SeqCst) {
+        progress("interrupted: unfinished releases stay pending; run again to continue");
+    }
 
-            // Check for shutdown
-            if self.is_shutdown_requested() {
-                if let Some(ref pb) = progress_bar {
-                    pb.println("Shutdown requested, saving checkpoint...");
-                }
-                result.was_interrupted = true;
+    if args.strict && !report.healthy {
+        return Err(NxvError::Config(
+            "index run is unhealthy under --strict (see report above)".to_string(),
+        ));
+    }
 
-                // Close all open ranges at the previous commit
-                if let (Some(prev_hash), Some(prev_date)) = (&prev_commit_hash, prev_commit_date) {
-                    for range in open_ranges.values() {
-                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+    Ok(())
+}
+
+/// Parse a `--since`/`--until` argument (YYYY-MM-DD or RFC 3339).
+fn parse_date_arg(value: Option<&str>, flag: &str) -> Result<Option<DateTime<Utc>>> {
+    let Some(value) = value else { return Ok(None) };
+    if let Ok(dt) = value.parse::<DateTime<Utc>>() {
+        return Ok(Some(dt));
+    }
+    if let Ok(date) = value.parse::<NaiveDate>()
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(dt.and_utc()));
+    }
+    Err(NxvError::Config(format!(
+        "invalid --{flag} value {value:?}: expected YYYY-MM-DD or RFC 3339"
+    )))
+}
+
+/// What a fetch worker hands back to the coordinator: the parsed entries
+/// plus the mechanism that actually produced them (a release guessed as
+/// nix-env era may turn out to have packages.json — see [`fetch_release`]).
+type FetchResult = (usize, Result<(Vec<SnapshotEntry>, ReleaseSource)>);
+
+/// Multi-release aggregator: merges K consecutive gated snapshots so row
+/// writes are O(distinct pairs), not O(alive attrs × releases) — measured
+/// churn is ~63 new pairs per advance vs ~144k alive rows.
+#[derive(Default)]
+struct Aggregator {
+    pairs: HashMap<(String, String), PackageVersion>,
+    releases: Vec<(i64, i64)>,
+}
+
+impl Aggregator {
+    fn add_release(&mut self, release: &ReleaseRecord, entries: Vec<SnapshotEntry>) {
+        let attr_count = entries.len() as i64;
+        for entry in entries {
+            let key = (entry.attribute_path.clone(), entry.version.clone());
+            match self.pairs.get_mut(&key) {
+                Some(existing) => {
+                    // Widen bounds; metadata follows the newest observation.
+                    if release.release_date < existing.first_commit_date {
+                        existing.first_commit_hash = release.commit_hash.clone();
+                        existing.first_commit_date = release.release_date;
                     }
-                }
-
-                // Insert pending ranges
-                if !pending_inserts.is_empty() {
-                    result.ranges_written +=
-                        db.insert_package_ranges_batch(&pending_inserts)? as u64;
-                }
-
-                // Save checkpoint
-                if let Some(ref prev_hash) = prev_commit_hash {
-                    db.set_meta("last_indexed_commit", prev_hash)?;
-                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                }
-
-                break;
-            }
-
-            // Update progress bar with smoothed ETA
-            if let Some(ref pb) = progress_bar {
-                pb.set_position(commit_idx as u64);
-                pb.set_message(format!(
-                    "({}) {} ({}) | {} pkgs | {} ranges",
-                    eta_tracker.eta_string(),
-                    commit.short_hash,
-                    commit.date.format("%Y-%m-%d"),
-                    result.packages_found,
-                    result.ranges_written
-                ));
-            }
-
-            // Checkout the commit
-            if let Err(e) = repo.checkout_commit(&commit.hash) {
-                warn(
-                    &progress_bar,
-                    format!("Failed to checkout {}: {}", commit.short_hash, e),
-                );
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
-                continue;
-            }
-
-            // Get changed paths
-            let changed_paths = match repo.get_commit_changed_paths(&commit.hash) {
-                Ok(paths) => paths,
-                Err(e) => {
-                    warn(
-                        &progress_bar,
-                        format!("Failed to list changes for {}: {}", commit.short_hash, e),
-                    );
-                    prev_commit_hash = Some(commit.hash.clone());
-                    prev_commit_date = Some(commit.date);
-                    eta_tracker.finish_commit();
-                    continue;
-                }
-            };
-
-            // Check if we need to refresh the file map
-            if should_refresh_file_map(&changed_paths)
-                && mapping_commit != commit.hash
-                && let Ok(map) = build_file_attr_map(nixpkgs_path, systems)
-            {
-                file_attr_map = map;
-                mapping_commit = commit.hash.clone();
-            }
-
-            // Determine target attributes
-            let mut target_attr_paths: HashSet<String> = HashSet::new();
-            let all_attrs: Option<&Vec<String>> =
-                file_attr_map.get("pkgs/top-level/all-packages.nix");
-
-            for path in &changed_paths {
-                if let Some(attr_paths) = file_attr_map.get(path) {
-                    for attr in attr_paths {
-                        target_attr_paths.insert(attr.clone());
-                    }
-                } else if path.starts_with("pkgs/") && path.ends_with(".nix") {
-                    let parts: Vec<&str> = path.split('/').collect();
-                    if parts.len() >= 2 {
-                        // pkgs/by-name/XX/pkgname/package.nix -> pkgname
-                        // These are auto-discovered and don't need all_attrs validation
-                        if path.starts_with("pkgs/by-name/") && parts.len() >= 4 {
-                            let pkg_name = parts[3];
-                            if !pkg_name.is_empty() {
-                                target_attr_paths.insert(pkg_name.to_string());
-                            }
-                        } else {
-                            // Traditional paths: extract name and validate against all_attrs
-                            let potential_name =
-                                // pkgs/.../something/default.nix -> something
-                                if parts.last() == Some(&"default.nix") && parts.len() >= 2 {
-                                    parts[parts.len() - 2]
-                                }
-                                // pkgs/.../something.nix -> something
-                                else {
-                                    parts
-                                        .last()
-                                        .map(|f| f.trim_end_matches(".nix"))
-                                        .unwrap_or("")
-                                };
-
-                            if let Some(all_attrs_list) = all_attrs
-                                && all_attrs_list.contains(&potential_name.to_string())
-                            {
-                                target_attr_paths.insert(potential_name.to_string());
-                            }
+                    if release.release_date >= existing.last_commit_date {
+                        existing.last_commit_hash = release.commit_hash.clone();
+                        existing.last_commit_date = release.release_date;
+                        existing.description = entry.description;
+                        existing.license = entry.license;
+                        existing.homepage = entry.homepage;
+                        existing.maintainers = entry.maintainers;
+                        existing.platforms = entry.platforms;
+                        if entry.source_path.is_some() {
+                            existing.source_path = entry.source_path;
                         }
+                        existing.known_vulnerabilities = entry.known_vulnerabilities;
+                        existing.name = entry.name;
                     }
                 }
-            }
-
-            if target_attr_paths.is_empty() {
-                result.commits_processed += 1;
-                prev_commit_hash = Some(commit.hash.clone());
-                prev_commit_date = Some(commit.date);
-                eta_tracker.finish_commit();
-                continue;
-            }
-
-            let mut target_list: Vec<String> = target_attr_paths.into_iter().collect();
-            target_list.sort();
-
-            // Extract packages for all systems
-            let mut aggregates: HashMap<String, PackageAggregate> = HashMap::new();
-
-            for system in systems {
-                let packages =
-                    match extractor::extract_packages_for_attrs(nixpkgs_path, system, &target_list)
-                    {
-                        Ok(pkgs) => pkgs,
-                        Err(e) => {
-                            warn(
-                                &progress_bar,
-                                format!(
-                                    "Extraction failed at {} ({}): {}",
-                                    commit.short_hash, system, e
-                                ),
-                            );
-                            continue;
-                        }
-                    };
-
-                for pkg in packages {
-                    let key = format!("{}::{}", pkg.attribute_path, pkg.version);
-                    if let Some(existing) = aggregates.get_mut(&key) {
-                        existing.merge(pkg);
-                    } else {
-                        aggregates.insert(key, PackageAggregate::new(pkg));
-                    }
-                }
-            }
-
-            result.packages_found += aggregates.len() as u64;
-
-            // Track which packages we saw in this commit
-            let mut seen_keys: HashSet<String> = HashSet::new();
-            let target_set: HashSet<String> = target_list.iter().cloned().collect();
-
-            for aggregate in aggregates.values() {
-                let key = aggregate.key();
-                seen_keys.insert(key.clone());
-
-                // Track unique package names for bloom filter
-                unique_names.insert(aggregate.name.clone());
-
-                let license_json = aggregate.license_json();
-                let maintainers_json = aggregate.maintainers_json();
-                let platforms_json = aggregate.platforms_json();
-
-                if let Some(existing) = open_ranges.get_mut(&key) {
-                    existing.update_metadata(
-                        aggregate.description.clone(),
-                        license_json,
-                        aggregate.homepage.clone(),
-                        maintainers_json,
-                        platforms_json,
-                        aggregate.source_path.clone(),
-                        aggregate.known_vulnerabilities_json(),
-                    );
-                } else {
-                    open_ranges.insert(
-                        key.clone(),
-                        OpenRange {
-                            name: aggregate.name.clone(),
-                            version: aggregate.version.clone(),
-                            first_commit_hash: commit.hash.clone(),
-                            first_commit_date: commit.date,
-                            attribute_path: aggregate.attribute_path.clone(),
-                            description: aggregate.description.clone(),
-                            license: license_json,
-                            homepage: aggregate.homepage.clone(),
-                            maintainers: maintainers_json,
-                            platforms: platforms_json,
-                            source_path: aggregate.source_path.clone(),
-                            known_vulnerabilities: aggregate.known_vulnerabilities_json(),
+                None => {
+                    self.pairs.insert(
+                        key,
+                        PackageVersion {
+                            id: 0,
+                            name: entry.name,
+                            version: entry.version,
+                            first_commit_hash: release.commit_hash.clone(),
+                            first_commit_date: release.release_date,
+                            last_commit_hash: release.commit_hash.clone(),
+                            last_commit_date: release.release_date,
+                            attribute_path: entry.attribute_path,
+                            description: entry.description,
+                            license: entry.license,
+                            homepage: entry.homepage,
+                            maintainers: entry.maintainers,
+                            platforms: entry.platforms,
+                            source_path: entry.source_path,
+                            known_vulnerabilities: entry.known_vulnerabilities,
                         },
                     );
                 }
             }
+        }
+        self.releases.push((release.id, attr_count));
+    }
 
-            // Close ranges for packages that disappeared
-            let disappeared: Vec<String> = open_ranges
-                .iter()
-                .filter(|(key, range)| {
-                    target_set.contains(&range.attribute_path) && !seen_keys.contains(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
+    fn should_flush(&self) -> bool {
+        self.releases.len() >= FLUSH_GROUP_RELEASES || self.pairs.len() >= FLUSH_GROUP_MAX_PAIRS
+    }
 
-            for key in disappeared {
-                if let Some(range) = open_ranges.remove(&key)
-                    && let (Some(prev_hash), Some(prev_date)) =
-                        (&prev_commit_hash, prev_commit_date)
-                {
-                    pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+    fn is_empty(&self) -> bool {
+        self.releases.is_empty()
+    }
+
+    /// Write everything in one transaction: rows + `ingested` marks commit
+    /// atomically (a release can never be `ingested` without its rows).
+    fn flush(&mut self, db: &mut Database) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<PackageVersion> = std::mem::take(&mut self.pairs).into_values().collect();
+        let marks = std::mem::take(&mut self.releases);
+        db.commit_flush_group(&rows, &marks)?;
+        Ok(())
+    }
+}
+
+/// Fetch + parse one release (worker side; no DB access).
+///
+/// The plan-time source is a guess from the release date; the truth is
+/// per-release (DESIGN §2: probe, never date-classify). So nix-env-era
+/// releases first probe packages.json.br — the ~60 releases between the
+/// first artifact (2020-03-27) and the safe-after line get the zero-eval
+/// path, and the probe is one cheap 404 for genuinely pre-artifact releases.
+fn fetch_release(
+    s3: &S3Client,
+    prefix: &str,
+    release: &ReleaseRecord,
+) -> Result<(Vec<SnapshotEntry>, ReleaseSource)> {
+    match release.source {
+        ReleaseSource::PackagesJson => s3
+            .fetch_packages_json(prefix, &release.release_name)
+            .map(|entries| (entries, ReleaseSource::PackagesJson)),
+        ReleaseSource::NixEnv => match s3.fetch_packages_json(prefix, &release.release_name) {
+            Ok(entries) => Ok((entries, ReleaseSource::PackagesJson)),
+            Err(NxvError::NetworkMessage(msg)) if msg.contains("HTTP 404") => {
+                eval::ingest_nix_env_release(s3, prefix, &release.release_name)
+                    .map(|entries| (entries, ReleaseSource::NixEnv))
+            }
+            Err(e) => Err(e),
+        },
+        ReleaseSource::HeadEval => Err(NxvError::Config(
+            "head_eval releases are ingested by the head-eval pass, not the worklist".to_string(),
+        )),
+    }
+}
+
+/// The parallel ingest pipeline over a planned work list.
+#[allow(clippy::too_many_arguments)]
+fn ingest_worklist(
+    db: &mut Database,
+    s3: &S3Client,
+    channel_prefixes: &HashMap<String, String>,
+    worklist: Vec<ReleaseRecord>,
+    jobs: usize,
+    shutdown: &Arc<AtomicBool>,
+    report: &mut RunReport,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let total = worklist.len();
+    let sentinels = monitor::builtin_sentinels(&[]);
+
+    // Shared queue of work items; workers pull, fetch+parse, and send
+    // (seq, result) back. Memory is bounded by THREE mechanisms together:
+    // the sync_channel capacity (results awaiting the coordinator), the
+    // reorder window below (workers refuse to run ahead of the coordinator,
+    // so the seq-reorder buffer can't grow past WINDOW while one slow fetch
+    // stalls next_seq), and per-release maps being dropped after write.
+    let queue: Arc<Mutex<VecDeque<(usize, ReleaseRecord)>>> =
+        Arc::new(Mutex::new(worklist.iter().cloned().enumerate().collect()));
+    let (tx, rx) = mpsc::sync_channel::<FetchResult>(jobs.max(1));
+
+    // Published by the coordinator after each processed seq; workers park
+    // instead of claiming work more than WINDOW releases ahead of it.
+    let coordinator_seq = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let window = (2 * jobs.max(1)).max(4);
+
+    let mut handles = Vec::new();
+    for _ in 0..jobs.max(1) {
+        let queue = Arc::clone(&queue);
+        let tx = tx.clone();
+        let s3 = s3.clone();
+        let prefixes = channel_prefixes.clone();
+        let shutdown = Arc::clone(shutdown);
+        let coordinator_seq = Arc::clone(&coordinator_seq);
+        handles.push(std::thread::spawn(move || {
+            loop {
+                if shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                let claimed = {
+                    let mut q = queue.lock().expect("queue lock");
+                    match q.front() {
+                        None => break, // queue drained
+                        Some((seq, _))
+                            if *seq > coordinator_seq.load(Ordering::Acquire) + window =>
+                        {
+                            None // too far ahead — park
+                        }
+                        Some(_) => q.pop_front(),
+                    }
+                };
+                let Some((seq, release)) = claimed else {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                };
+                let prefix = prefixes.get(&release.channel).cloned().unwrap_or_default();
+                let result = fetch_release(&s3, &prefix, &release);
+                if tx.send((seq, result)).is_err() {
+                    break;
                 }
             }
+        }));
+    }
+    drop(tx);
 
-            result.commits_processed += 1;
-            prev_commit_hash = Some(commit.hash.clone());
-            prev_commit_date = Some(commit.date);
+    // Coordinator: re-order results by seq so gating sees releases in
+    // chronological order (births/deaths need consecutive snapshots).
+    let mut buffer: BTreeMap<
+        usize,
+        std::result::Result<(Vec<SnapshotEntry>, ReleaseSource), NxvError>,
+    > = BTreeMap::new();
+    let mut next_seq = 0usize;
+    let mut prev_attrs: HashMap<String, (HashSet<String>, ReleaseSource)> = HashMap::new();
+    let mut aggregator = Aggregator::default();
+    let mut hard_error: Option<NxvError> = None;
 
-            // Record commit processing time for ETA calculation
-            eta_tracker.finish_commit();
+    'outer: for incoming in rx.iter() {
+        buffer.insert(incoming.0, incoming.1);
 
-            // Checkpoint if needed.
-            // At each checkpoint we must flush the *current* state of every open range
-            // (not only ranges that have disappeared) so that a hard kill between
-            // periodic checkpoints and the final loop exit can still resume correctly:
-            // after the kill, load_open_ranges_at_commit(last_indexed_commit) will find
-            // these rows and re-seed them. Re-flushing the same range on the next
-            // checkpoint is safe because insert_package_ranges_batch is an upsert.
-            if (commit_idx + 1).is_multiple_of(self.config.checkpoint_interval)
-                || commit_idx + 1 == commits.len()
-            {
-                if let (Some(prev_hash), Some(prev_date)) = (&prev_commit_hash, prev_commit_date) {
-                    for range in open_ranges.values() {
-                        pending_inserts.push(range.to_package_version(prev_hash, prev_date));
+        while let Some(result) = buffer.remove(&next_seq) {
+            let mut release = worklist[next_seq].clone();
+            next_seq += 1;
+            coordinator_seq.store(next_seq, Ordering::Release);
+
+            db.mark_release_attempt(release.id)?;
+
+            match result {
+                Ok((entries, actual_source)) => {
+                    // A nix-env-era guess that turned out to have
+                    // packages.json: record the real mechanism so the
+                    // monitor's per-era baselines stay clean.
+                    if release.source != actual_source {
+                        db.connection().execute(
+                            "UPDATE releases SET source = ? WHERE id = ?",
+                            rusqlite::params![actual_source.as_str(), release.id],
+                        )?;
+                        release.source = actual_source;
+                    }
+                    let gate = monitor::evaluate_release_gate(
+                        db,
+                        &release,
+                        &entries,
+                        prev_attrs
+                            .get(&release.channel)
+                            .map(|(attrs, source)| (attrs, *source)),
+                        &sentinels,
+                    )?;
+
+                    if !gate.passed() {
+                        for failure in &gate.failures {
+                            progress(&format!(
+                                "  GATE FAILED {}: {failure}",
+                                release.release_name
+                            ));
+                        }
+                        db.mark_release_failed(release.id, &gate.failures.join("; "))?;
+                        report.failed += 1;
+                        report.anomalies.push(gate);
+                        continue;
+                    }
+                    if !gate.warnings.is_empty() {
+                        for warning in &gate.warnings {
+                            progress(&format!("  warn {}: {warning}", release.release_name));
+                        }
+                        report.anomalies.push(gate.clone());
+                    }
+
+                    prev_attrs.insert(
+                        release.channel.clone(),
+                        (
+                            entries.iter().map(|e| e.attribute_path.clone()).collect(),
+                            release.source,
+                        ),
+                    );
+
+                    aggregator.add_release(&release, entries);
+                    report.ingested += 1;
+                    if report.ingested.is_multiple_of(25) || total <= 25 {
+                        progress(&format!(
+                            "  [{}/{}] {} ({} attrs)",
+                            next_seq, total, release.release_name, gate.attr_count
+                        ));
+                    }
+
+                    if aggregator.should_flush() {
+                        aggregator.flush(db)?;
                     }
                 }
+                Err(e) => {
+                    progress(&format!("  FAILED {}: {e}", release.release_name));
+                    db.mark_release_failed(release.id, &e.to_string())?;
+                    report.failed += 1;
 
-                if !pending_inserts.is_empty() {
-                    result.ranges_written +=
-                        db.insert_package_ranges_batch(&pending_inserts)? as u64;
-                    pending_inserts.clear();
+                    // Hard-fail fast on configuration errors (e.g. nix
+                    // missing for --backfill-evals) instead of failing every
+                    // release in the list.
+                    if matches!(&e, NxvError::NixEval(msg) if msg.contains("is nix installed")) {
+                        hard_error = Some(e);
+                        shutdown.store(true, Ordering::SeqCst);
+                        break 'outer;
+                    }
                 }
+            }
 
-                if let Some(ref prev_hash) = prev_commit_hash {
-                    db.set_meta("last_indexed_commit", prev_hash)?;
-                    db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-                    db.set_meta("checkpoint_open_ranges", &open_ranges.len().to_string())?;
-                    db.checkpoint()?;
-                }
+            if shutdown.load(Ordering::SeqCst) {
+                break 'outer;
             }
         }
+    }
 
-        // Final: close all remaining open ranges at the last commit
-        if !result.was_interrupted
-            && let (Some(last_hash), Some(last_date)) =
-                (prev_commit_hash.as_ref(), prev_commit_date)
-        {
-            for range in open_ranges.values() {
-                pending_inserts.push(range.to_package_version(last_hash, last_date));
+    // Unblock workers parked in tx.send BEFORE joining them: a worker
+    // blocked inside send() never re-checks the shutdown flag and only wakes
+    // when the receiver drops — break-then-join without this deadlocks on
+    // Ctrl+C and on the hard-error path.
+    drop(rx);
+
+    // Final flush of whatever the group holds (also on interrupt — the
+    // gated releases in the aggregator are complete observations).
+    aggregator.flush(db)?;
+
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    if let Some(e) = hard_error {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `--head-eval`: when every channel observation is stale, evaluate master
+/// HEAD directly so the index keeps tracking nixpkgs during channel stalls.
+fn run_head_eval(
+    db: &mut Database,
+    s3: &S3Client,
+    _args: &IndexArgs,
+    report: &mut RunReport,
+    progress: &dyn Fn(&str),
+) -> Result<()> {
+    let newest = db.newest_ingested_release(None)?;
+    let lag_hours = newest
+        .as_ref()
+        .map(|r| (Utc::now() - r.release_date).num_hours())
+        .unwrap_or(i64::MAX);
+    if lag_hours < HEAD_EVAL_LAG_HOURS {
+        progress(&format!(
+            "head-eval skipped: newest channel observation is {lag_hours}h old (< {HEAD_EVAL_LAG_HOURS}h)"
+        ));
+        return Ok(());
+    }
+
+    progress("head-eval: channel observations are stale; evaluating master HEAD...");
+    let head = eval::resolve_master_head(s3)?;
+    let release_name = format!("master-{}", &head.sha[..12]);
+
+    if !db.insert_release_pending(
+        "master",
+        &release_name,
+        &head.sha,
+        None,
+        head.committed_at,
+        ReleaseSource::HeadEval,
+    )? {
+        progress(&format!("head-eval: {release_name} already ingested"));
+        return Ok(());
+    }
+
+    let release = db
+        .release_worklist(false)?
+        .into_iter()
+        .find(|r| r.release_name == release_name)
+        .ok_or_else(|| NxvError::Config("head-eval release vanished from ledger".to_string()))?;
+
+    db.mark_release_attempt(release.id)?;
+    match eval::ingest_master_head(s3, &head) {
+        Ok(entries) => {
+            let sentinels = monitor::builtin_sentinels(&[]);
+            let gate = monitor::evaluate_release_gate(db, &release, &entries, None, &sentinels)?;
+            if !gate.passed() {
+                db.mark_release_failed(release.id, &gate.failures.join("; "))?;
+                report.failed += 1;
+                report.anomalies.push(gate);
+                return Ok(());
             }
-
-            if !pending_inserts.is_empty() {
-                result.ranges_written += db.insert_package_ranges_batch(&pending_inserts)? as u64;
-            }
-
-            if let Some(ref last_hash) = prev_commit_hash {
-                db.set_meta("last_indexed_commit", last_hash)?;
-                db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
-            }
-        }
-
-        // Set final unique names count
-        result.unique_names = unique_names.len() as u64;
-
-        // Finish progress bar
-        if let Some(ref pb) = progress_bar {
-            pb.finish_with_message(format!(
-                "done | {} commits | {} pkgs | {} ranges",
-                result.commits_processed, result.packages_found, result.ranges_written
+            let mut aggregator = Aggregator::default();
+            aggregator.add_release(&release, entries);
+            aggregator.flush(db)?;
+            report.ingested += 1;
+            progress(&format!(
+                "head-eval: ingested {} ({} attrs)",
+                release_name, gate.attr_count
             ));
         }
-
-        // Restore original HEAD ref
-        if let Err(e) = repo.restore_ref(&original_ref) {
-            eprintln!(
-                "Warning: Failed to restore original git state ({}): {}",
-                original_ref, e
-            );
-        }
-
-        Ok(result)
-    }
-}
-
-fn build_file_attr_map(
-    repo_path: &Path,
-    systems: &[String],
-) -> Result<HashMap<String, Vec<String>>> {
-    let system = systems
-        .first()
-        .ok_or_else(|| NxvError::NixEval("No systems configured".to_string()))?;
-    let positions = extractor::extract_attr_positions(repo_path, system)?;
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
-
-    for position in positions {
-        if let Some(file) = position.file
-            && let Some(relative) = normalize_position_file(repo_path, &file)
-        {
-            map.entry(relative).or_default().push(position.attr_path);
+        Err(e) => {
+            progress(&format!("head-eval failed: {e}"));
+            db.mark_release_failed(release.id, &e.to_string())?;
+            report.failed += 1;
         }
     }
-
-    for attrs in map.values_mut() {
-        attrs.sort();
-        attrs.dedup();
-    }
-
-    Ok(map)
+    Ok(())
 }
 
-fn normalize_position_file(repo_path: &Path, file: &str) -> Option<String> {
-    let trimmed = file.split(':').next().unwrap_or(file);
-    let repo_str = repo_path.display().to_string();
-    if trimmed.starts_with(&repo_str) {
-        let rel = trimmed
-            .trim_start_matches(&repo_str)
-            .trim_start_matches('/');
-        return Some(rel.to_string());
-    }
-
-    if let Some(pos) = trimmed.find("/pkgs/") {
-        return Some(trimmed[pos + 1..].to_string());
-    }
-
-    None
-}
-
-fn should_refresh_file_map(changed_paths: &[String]) -> bool {
-    const TOP_LEVEL_FILES: [&str; 4] = [
-        "pkgs/top-level/all-packages.nix",
-        "pkgs/top-level/default.nix",
-        "pkgs/top-level/aliases.nix",
-        "pkgs/top-level/impure.nix",
-    ];
-
-    changed_paths
-        .iter()
-        .any(|path| TOP_LEVEL_FILES.iter().any(|entry| path == entry))
-}
-
-/// Result of an indexing operation.
-#[derive(Debug)]
-pub struct IndexResult {
-    /// Number of commits successfully processed.
-    pub commits_processed: u64,
-    /// Total number of package extractions (may count same package multiple times).
-    pub packages_found: u64,
-    /// Number of rows written to the database (inserts + upsert updates).
-    pub ranges_written: u64,
-    /// Number of unique package names found.
-    pub unique_names: u64,
-    /// Whether the indexing was interrupted (e.g., by Ctrl+C).
-    pub was_interrupted: bool,
-}
-
-/// Constructs a Bloom filter containing all unique package attribute paths from the database.
+/// Build a bloom filter over every distinct attribute path in the database.
 ///
-/// The filter is created with a target false-positive rate of 1% and an initial capacity
-/// derived from the number of attributes (minimum of 1000). Iterate over all unique
-/// attribute paths stored in the database and insert each into the filter.
-///
-/// # Examples
-///
-/// ```
-/// # // Hidden setup: obtain a `Database` instance appropriate for your environment.
-/// # use crate::db::Database;
-/// # use crate::index::build_bloom_filter;
-/// # fn try_build(db: &Database) -> anyhow::Result<()> {
-/// let filter = build_bloom_filter(db)?;
-/// // `filter` can now be queried for probable membership of attribute paths.
-/// // (Bloom filter may yield false positives but not false negatives.)
-/// # Ok(())
-/// # }
-/// ```
+/// Dotted (nested) attribute paths are inserted verbatim — the query layer
+/// checks exact attribute paths against the filter.
 pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
     use crate::db::queries;
 
-    // Get all unique attribute paths from the database
     let attrs = queries::get_all_unique_attrs(db.connection())?;
 
-    // Create bloom filter with 1% false positive rate
+    // 1% false-positive rate
     let mut filter = PackageBloomFilter::new(attrs.len().max(1000), 0.01);
-
     for attr in &attrs {
         filter.insert(attr);
     }
@@ -1301,15 +646,10 @@ pub fn build_bloom_filter(db: &Database) -> Result<PackageBloomFilter> {
 }
 
 /// Build and save a bloom filter for the index.
-///
-/// # Arguments
-/// * `db` - The database to build the bloom filter from
-/// * `bloom_path` - Path where the bloom filter should be saved
 pub fn save_bloom_filter<P: AsRef<std::path::Path>>(db: &Database, bloom_path: P) -> Result<()> {
     let filter = build_bloom_filter(db)?;
     let bloom_path = bloom_path.as_ref();
 
-    // Ensure parent directory exists
     if let Some(parent) = bloom_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1321,463 +661,172 @@ pub fn save_bloom_filter<P: AsRef<std::path::Path>>(db: &Database, bloom_path: P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::queries;
     use chrono::TimeZone;
-    use std::process::Command;
-    use std::thread;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_eta_tracker_empty() {
-        let tracker = EtaTracker::new(10);
-        assert!(tracker.avg_time_per_commit().is_none());
-        assert!(tracker.eta().is_none());
-        assert_eq!(tracker.eta_string(), "calculating...");
-    }
-
-    #[test]
-    fn test_eta_tracker_single_commit() {
-        let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(5);
-
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(50));
-        tracker.finish_commit();
-
-        let avg = tracker.avg_time_per_commit().unwrap();
-        assert!(avg >= Duration::from_millis(50));
-
-        let eta = tracker.eta().unwrap();
-        // 5 remaining * ~50ms = ~250ms
-        assert!(eta >= Duration::from_millis(200));
-    }
-
-    #[test]
-    fn test_eta_tracker_sliding_window() {
-        let mut tracker = EtaTracker::new(3);
-        tracker.set_remaining(10);
-
-        // Add 5 commits - only last 3 should be kept
-        for _ in 0..5 {
-            tracker.start_commit();
-            thread::sleep(Duration::from_millis(10));
-            tracker.finish_commit();
-        }
-
-        assert_eq!(tracker.times.len(), 3);
-    }
-
-    #[test]
-    fn test_eta_tracker_formatting() {
-        let mut tracker = EtaTracker::new(10);
-        tracker.set_remaining(1);
-
-        // Add a commit that takes ~100ms
-        tracker.start_commit();
-        thread::sleep(Duration::from_millis(100));
-        tracker.finish_commit();
-
-        // Should format as seconds
-        let eta_str = tracker.eta_string();
-        assert!(eta_str.contains("s") || eta_str.contains("calculating"));
-    }
-
-    /// Creates a temporary git repository resembling a minimal nixpkgs checkout.
-    ///
-    /// The repository contains a pkgs/ directory, a minimal default.nix defining
-    /// a single package, and an initial commit. Returns the temporary directory
-    /// (kept alive by the caller) and the repository path.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let (_tmpdir, repo_path) = create_test_nixpkgs_repo();
-    /// assert!(repo_path.join("pkgs").exists());
-    /// assert!(repo_path.join("default.nix").exists());
-    /// assert!(repo_path.join(".git").exists());
-    /// ```
-    fn create_test_nixpkgs_repo() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempdir().unwrap();
-        let path = dir.path().to_path_buf();
-
-        // Initialize git repo
-        Command::new("git")
-            .args(["init"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to init git repo");
-
-        // Configure git user
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to configure git email");
-
-        Command::new("git")
-            .args(["config", "user.name", "Test User"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to configure git name");
-
-        // Create pkgs directory to make it look like nixpkgs
-        std::fs::create_dir(path.join("pkgs")).unwrap();
-
-        // Create a minimal default.nix that will work with nix eval
-        let default_nix = r#"
-{
-  hello = {
-    pname = "hello";
-    version = "1.0.0";
-    type = "derivation";
-    meta = {
-      description = "A test package";
-    };
-  };
-}
-"#;
-        std::fs::write(path.join("default.nix"), default_nix).unwrap();
-
-        // Create initial commit
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to add files");
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to create commit");
-
-        (dir, path)
-    }
-
-    #[test]
-    fn test_indexer_config_default() {
-        let config = IndexerConfig::default();
-        assert_eq!(config.checkpoint_interval, 100);
-        assert!(config.show_progress);
-        assert!(config.systems.contains(&"x86_64-linux".to_string()));
-    }
-
-    #[test]
-    fn test_indexer_shutdown_flag() {
-        let config = IndexerConfig::default();
-        let indexer = Indexer::new(config);
-
-        assert!(!indexer.is_shutdown_requested());
-
-        indexer.request_shutdown();
-
-        assert!(indexer.is_shutdown_requested());
-    }
-
-    #[test]
-    fn test_open_range_to_package_version() {
-        let range = OpenRange {
-            name: "hello".to_string(),
-            version: "1.0.0".to_string(),
-            first_commit_hash: "abc123".to_string(),
-            first_commit_date: Utc::now(),
-            attribute_path: "hello".to_string(),
-            description: Some("A test package".to_string()),
+    fn test_package(attr: &str, version: &str) -> PackageVersion {
+        PackageVersion {
+            id: 0,
+            name: attr.rsplit('.').next().unwrap_or(attr).to_string(),
+            version: version.to_string(),
+            first_commit_hash: "a".repeat(40),
+            first_commit_date: Utc.timestamp_opt(1_600_000_000, 0).unwrap(),
+            last_commit_hash: "b".repeat(40),
+            last_commit_date: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            attribute_path: attr.to_string(),
+            description: None,
             license: None,
             homepage: None,
             maintainers: None,
             platforms: None,
-            source_path: Some("pkgs/hello/default.nix".to_string()),
+            source_path: None,
             known_vulnerabilities: None,
-        };
-
-        let last_date = Utc::now();
-        let pkg = range.to_package_version("def456", last_date);
-
-        assert_eq!(pkg.name, "hello");
-        assert_eq!(pkg.version, "1.0.0");
-        assert_eq!(pkg.first_commit_hash, "abc123");
-        assert_eq!(pkg.last_commit_hash, "def456");
-        assert_eq!(pkg.attribute_path, "hello");
-    }
-
-    #[test]
-    fn test_index_result_default_state() {
-        let result = IndexResult {
-            commits_processed: 0,
-            packages_found: 0,
-            ranges_written: 0,
-            unique_names: 0,
-            was_interrupted: false,
-        };
-
-        assert_eq!(result.commits_processed, 0);
-        assert!(!result.was_interrupted);
-    }
-
-    #[test]
-    fn test_normalize_position_file_strips_repo_prefix() {
-        let repo = std::path::Path::new("/repo");
-        let file = "/repo/pkgs/applications/foo/default.nix";
-        let normalized = normalize_position_file(repo, file).unwrap();
-        assert_eq!(normalized, "pkgs/applications/foo/default.nix");
-    }
-
-    #[test]
-    fn test_normalize_position_file_finds_pkgs_segment() {
-        let repo = std::path::Path::new("/repo");
-        let file = "/nix/store/hash/pkgs/tools/bar.nix";
-        let normalized = normalize_position_file(repo, file).unwrap();
-        assert_eq!(normalized, "pkgs/tools/bar.nix");
-    }
-
-    #[test]
-    fn test_should_refresh_file_map_detects_top_level() {
-        let changed = vec![
-            "pkgs/top-level/all-packages.nix".to_string(),
-            "pkgs/other/file.nix".to_string(),
-        ];
-        assert!(should_refresh_file_map(&changed));
-    }
-
-    #[test]
-    fn test_indexer_can_open_test_repo() {
-        let (_dir, path) = create_test_nixpkgs_repo();
-
-        let repo = NixpkgsRepo::open(&path);
-        assert!(repo.is_ok());
-
-        let commits = repo.unwrap().get_all_commits().unwrap();
-        assert_eq!(commits.len(), 1);
-    }
-
-    #[test]
-    fn test_incremental_index_no_previous() {
-        let (_dir, _path) = create_test_nixpkgs_repo();
-        let db_dir = tempdir().unwrap();
-        let db_path = db_dir.path().join("test.db");
-
-        let config = IndexerConfig {
-            checkpoint_interval: 10,
-            show_progress: false,
-            systems: vec!["x86_64-linux".to_string()],
-            since: None,
-            until: None,
-            max_commits: None,
-        };
-        let _indexer = Indexer::new(config);
-
-        // With no previous index, should fall back to full index
-        // This test just verifies the logic path, actual extraction would need nix
-        let db = Database::open(&db_path).unwrap();
-        let last_commit = db.get_meta("last_indexed_commit").unwrap();
-        assert!(last_commit.is_none());
-    }
-
-    #[test]
-    #[ignore] // Requires nix to be installed
-    fn test_full_index_real_nixpkgs() {
-        let nixpkgs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("nixpkgs");
-
-        if !nixpkgs_path.exists() {
-            eprintln!("Skipping: nixpkgs not present");
-            return;
         }
-
-        let db_dir = tempdir().unwrap();
-        let _db_path = db_dir.path().join("test.db");
-
-        let config = IndexerConfig {
-            checkpoint_interval: 5,
-            show_progress: false,
-            systems: vec!["x86_64-linux".to_string()],
-            since: None,
-            until: None,
-            max_commits: None,
-        };
-        let _indexer = Indexer::new(config);
-
-        // Just test that we can start indexing
-        // A real test would need a small test repo with working nix expressions
-        let repo = NixpkgsRepo::open(&nixpkgs_path).unwrap();
-        let commits = repo.get_all_commits().unwrap();
-
-        // Just verify we can get commits
-        assert!(!commits.is_empty());
     }
 
-    #[test]
-    fn test_checkpoint_recovery_logic() {
-        // Test that checkpoint recovery logic works correctly
-        // This tests the database state management without requiring nix
-        let db_dir = tempdir().unwrap();
-        let db_path = db_dir.path().join("test.db");
-
-        // Create initial database state simulating a checkpoint
-        {
-            let db = Database::open(&db_path).unwrap();
-            db.set_meta("last_indexed_commit", "abc123def456").unwrap();
-            db.set_meta("checkpoint_open_ranges", "5").unwrap();
+    fn entry(attr: &str, version: &str) -> SnapshotEntry {
+        SnapshotEntry {
+            attribute_path: attr.to_string(),
+            name: attr.rsplit('.').next().unwrap_or(attr).to_string(),
+            version: version.to_string(),
+            description: Some(format!("{attr} description")),
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
         }
+    }
 
-        // Verify checkpoint state is recoverable
-        {
-            let db = Database::open(&db_path).unwrap();
-            let last_commit = db.get_meta("last_indexed_commit").unwrap();
-            assert_eq!(last_commit, Some("abc123def456".to_string()));
-
-            let open_ranges = db.get_meta("checkpoint_open_ranges").unwrap();
-            assert_eq!(open_ranges, Some("5".to_string()));
+    fn release_at(id: i64, secs: i64, hash_char: char) -> ReleaseRecord {
+        ReleaseRecord {
+            id,
+            channel: "nixpkgs-unstable".to_string(),
+            release_name: format!("nixpkgs-test-{id}"),
+            commit_hash: hash_char.to_string().repeat(40),
+            commit_count: Some(id),
+            release_date: Utc.timestamp_opt(secs, 0).unwrap(),
+            source: ReleaseSource::PackagesJson,
+            status: crate::db::releases::ReleaseStatus::Pending,
+            attempts: 0,
+            last_attempt_at: None,
+            attr_count: None,
+            error: None,
+            ingested_at: None,
         }
     }
 
     #[test]
-    fn test_incremental_vs_full_consistency() {
-        // Test that the database operations are consistent whether
-        // inserting incrementally or in bulk
-        let db_dir = tempdir().unwrap();
-        let db_path = db_dir.path().join("test.db");
+    fn test_aggregator_merges_consecutive_releases() {
+        let r1 = release_at(1, 1_000, 'a');
+        let r2 = release_at(2, 2_000, 'b');
+        let r3 = release_at(3, 3_000, 'c');
 
-        let packages = vec![
-            PackageVersion {
-                id: 0,
-                name: "python".to_string(),
-                version: "3.11.0".to_string(),
-                first_commit_hash: "aaa111".to_string(),
-                first_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
-                last_commit_hash: "bbb222".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700100000, 0).unwrap(),
-                attribute_path: "python311".to_string(),
-                description: Some("Python".to_string()),
-                license: Some(r#"["MIT"]"#.to_string()),
-                homepage: Some("https://python.org".to_string()),
-                maintainers: None,
-                platforms: None,
-                source_path: None,
-                known_vulnerabilities: None,
-            },
-            PackageVersion {
-                id: 0,
-                name: "nodejs".to_string(),
-                version: "20.0.0".to_string(),
-                first_commit_hash: "ccc333".to_string(),
-                first_commit_date: Utc.timestamp_opt(1700200000, 0).unwrap(),
-                last_commit_hash: "ddd444".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700300000, 0).unwrap(),
-                attribute_path: "nodejs_20".to_string(),
-                description: Some("Node.js".to_string()),
-                license: Some(r#"["MIT"]"#.to_string()),
-                homepage: Some("https://nodejs.org".to_string()),
-                maintainers: None,
-                platforms: None,
-                source_path: None,
-                known_vulnerabilities: None,
-            },
-        ];
+        let mut agg = Aggregator::default();
+        agg.add_release(&r1, vec![entry("firefox", "100.0"), entry("hello", "2.12")]);
+        agg.add_release(&r2, vec![entry("firefox", "100.0"), entry("hello", "2.12")]);
+        agg.add_release(&r3, vec![entry("firefox", "101.0"), entry("hello", "2.12")]);
 
-        // Insert as batch
-        {
-            let mut db = Database::open(&db_path).unwrap();
-            let inserted = db.insert_package_ranges_batch(&packages).unwrap();
-            assert_eq!(inserted, 2);
-        }
+        assert_eq!(agg.pairs.len(), 3, "two firefox versions + one hello");
+        assert_eq!(agg.releases.len(), 3);
 
-        // Verify all packages are searchable
-        {
-            let db = Database::open(&db_path).unwrap();
+        let ff100 = agg
+            .pairs
+            .get(&("firefox".to_string(), "100.0".to_string()))
+            .unwrap();
+        assert_eq!(ff100.first_commit_hash, "a".repeat(40));
+        assert_eq!(
+            ff100.last_commit_hash,
+            "b".repeat(40),
+            "100.0 last seen at r2"
+        );
 
-            let python_results = queries::search_by_name(db.connection(), "python", true).unwrap();
-            assert_eq!(python_results.len(), 1);
-            assert_eq!(python_results[0].version, "3.11.0");
-
-            let nodejs_results = queries::search_by_name(db.connection(), "nodejs", true).unwrap();
-            assert_eq!(nodejs_results.len(), 1);
-            assert_eq!(nodejs_results[0].version, "20.0.0");
-        }
+        let hello = agg
+            .pairs
+            .get(&("hello".to_string(), "2.12".to_string()))
+            .unwrap();
+        assert_eq!(hello.first_commit_hash, "a".repeat(40));
+        assert_eq!(
+            hello.last_commit_hash,
+            "c".repeat(40),
+            "hello spans all three"
+        );
     }
 
     #[test]
-    fn test_index_resumable_state() {
-        // Test that indexing can be resumed by checking database state
-        let db_dir = tempdir().unwrap();
-        let db_path = db_dir.path().join("test.db");
+    fn test_aggregator_flush_marks_releases_ingested() {
+        let dir = tempdir().unwrap();
+        let mut db = Database::open(dir.path().join("t.db")).unwrap();
+        db.insert_release_pending(
+            "nixpkgs-unstable",
+            "release-1",
+            &"a".repeat(40),
+            Some(1),
+            Utc.timestamp_opt(1_000, 0).unwrap(),
+            ReleaseSource::PackagesJson,
+        )
+        .unwrap();
+        let ledger = db.release_worklist(false).unwrap().remove(0);
 
-        // Simulate first indexing run that was interrupted
-        {
-            let mut db = Database::open(&db_path).unwrap();
+        let mut agg = Aggregator::default();
+        agg.add_release(&ledger, vec![entry("firefox", "100.0")]);
+        agg.flush(&mut db).unwrap();
+        assert!(agg.is_empty());
 
-            // Insert some packages
-            let pkg = PackageVersion {
-                id: 0,
-                name: "firefox".to_string(),
-                version: "120.0".to_string(),
-                first_commit_hash: "first123".to_string(),
-                first_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
-                last_commit_hash: "first123".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700000000, 0).unwrap(),
-                attribute_path: "firefox".to_string(),
-                description: Some("Firefox browser".to_string()),
-                license: None,
-                homepage: None,
-                maintainers: None,
-                platforms: None,
-                source_path: None,
-                known_vulnerabilities: None,
-            };
-            db.insert_package_ranges_batch(&[pkg]).unwrap();
+        let newest = db.newest_ingested_release(None).unwrap().unwrap();
+        assert_eq!(newest.attr_count, Some(1));
 
-            // Save checkpoint (simulating interrupted state)
-            db.set_meta("last_indexed_commit", "checkpoint123").unwrap();
-        }
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 
-        // Simulate resume - verify we can read the checkpoint and continue
-        {
-            let mut db = Database::open(&db_path).unwrap();
+    #[test]
+    fn test_parse_date_arg() {
+        assert_eq!(parse_date_arg(None, "since").unwrap(), None);
+        let d = parse_date_arg(Some("2024-01-15"), "since")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.to_rfc3339(), "2024-01-15T00:00:00+00:00");
+        let d = parse_date_arg(Some("2024-01-15T12:30:00Z"), "until")
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.to_rfc3339(), "2024-01-15T12:30:00+00:00");
+        assert!(parse_date_arg(Some("yesterday"), "since").is_err());
+    }
 
-            // Should be able to read last checkpoint
-            let checkpoint = db.get_meta("last_indexed_commit").unwrap();
-            assert_eq!(checkpoint, Some("checkpoint123".to_string()));
+    #[test]
+    fn test_build_bloom_filter_includes_dotted_attrs() {
+        let dir = tempdir().unwrap();
+        let mut db = Database::open(dir.path().join("test.db")).unwrap();
+        db.upsert_observations(&[
+            test_package("firefox", "100.0"),
+            test_package("python313Packages.requests", "2.32.3"),
+        ])
+        .unwrap();
 
-            // Existing data should still be there
-            let results = queries::search_by_name(db.connection(), "firefox", true).unwrap();
-            assert_eq!(results.len(), 1);
+        let filter = build_bloom_filter(&db).unwrap();
+        assert!(filter.contains("firefox"));
+        assert!(filter.contains("python313Packages.requests"));
+        assert!(!filter.contains("definitely-not-a-package-xyz"));
+    }
 
-            // Simulate continuing from checkpoint by adding more packages
-            let pkg = PackageVersion {
-                id: 0,
-                name: "chromium".to_string(),
-                version: "120.0".to_string(),
-                first_commit_hash: "second456".to_string(),
-                first_commit_date: Utc.timestamp_opt(1700100000, 0).unwrap(),
-                last_commit_hash: "second456".to_string(),
-                last_commit_date: Utc.timestamp_opt(1700100000, 0).unwrap(),
-                attribute_path: "chromium".to_string(),
-                description: Some("Chromium browser".to_string()),
-                license: None,
-                homepage: None,
-                maintainers: None,
-                platforms: None,
-                source_path: None,
-                known_vulnerabilities: None,
-            };
-            db.insert_package_ranges_batch(&[pkg]).unwrap();
+    #[test]
+    fn test_save_bloom_filter_roundtrip() {
+        let dir = tempdir().unwrap();
+        let mut db = Database::open(dir.path().join("test.db")).unwrap();
+        db.upsert_observations(&[test_package("hello", "2.12")])
+            .unwrap();
 
-            // Update checkpoint
-            db.set_meta("last_indexed_commit", "final789").unwrap();
-        }
+        let bloom_path = dir.path().join("sub").join("bloom.bin");
+        save_bloom_filter(&db, &bloom_path).unwrap();
 
-        // Verify final state
-        {
-            let db = Database::open(&db_path).unwrap();
-
-            let checkpoint = db.get_meta("last_indexed_commit").unwrap();
-            assert_eq!(checkpoint, Some("final789".to_string()));
-
-            // Both packages should exist
-            let firefox = queries::search_by_name(db.connection(), "firefox", true).unwrap();
-            assert_eq!(firefox.len(), 1);
-
-            let chromium = queries::search_by_name(db.connection(), "chromium", true).unwrap();
-            assert_eq!(chromium.len(), 1);
-        }
+        let loaded = PackageBloomFilter::load(&bloom_path).unwrap();
+        assert!(loaded.contains("hello"));
     }
 }

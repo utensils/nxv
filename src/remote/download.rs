@@ -305,7 +305,7 @@ pub fn file_sha256<P: AsRef<Path>>(path: P) -> Result<String> {
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(base16ct::lower::encode_string(&hasher.finalize()))
 }
 
 #[cfg(test)]
