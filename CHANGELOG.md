@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/utensils/nxv/compare/v0.2.1...v0.3.0) - 2026-06-11
+
+### Added
+
+- *(stats)* per-channel release coverage in nxv stats and /api/v1/stats
+- *(publish)* default min_version to the schema version; fix update UX for incompatible indexes
+- *(indexer)* wire the snapshot ingestion coordinator
+- *(indexer)* add eval-based ingestion (eval.rs)
+- *(indexer)* add data-quality gates and run report (monitor.rs)
+- *(indexer)* add streaming snapshot parser (snapshot.rs)
+- *(indexer)* add S3 channel-release discovery (releases.rs)
+- *(db)* [**breaking**] schema v4 — observation model, releases ledger, retire git indexer core
+
+### Fixed
+
+- expand tilde in --db-path / NXV_DB_PATH once at startup
+- *(indexer)* create the db path's parent dir, not the default data dir
+- address CI clippy failures and Copilot review findings
+- *(indexer)* parse stable/beta release names; declare rust-version 1.95
+- *(monitor)* two-threshold baseline — warn on moderate drops, fail only catastrophic
+- *(monitor)* date-bound the rolling baseline so backfills aren't held to newer data
+- *(indexer)* drop stale pooled connections; retry mid-body download failures
+- *(indexer)* harden the pipeline per adversarial review
+- *(output)* flake-epoch padding, Nix attr quoting, and search scaling for v4
+- *(indexer)* accept string envelope version; prune planning with --since
+- *(output)* use full commit hashes in generated nix commands
+- *(ci)* remove nightly clippy formatting borrows ([#35](https://github.com/utensils/nxv/pull/35))
+
+### Other
+
+- *(flake)* add nxv-indexer to flake checks
+- rewrite /release skill and AGENTS.md for the release-plz flow
+- adopt release-plz for release automation
+- snapshot indexer documentation and gated publish workflow
+- *(indexer)* end-to-end tests against a mock release bucket
+- *(indexer)* validate the nix-env era against a real 2018 release
+- *(deps)* update Rust and Nix dependencies
+- make AGENTS.md the single source of truth
+- *(direnv)* bootstrap nix-direnv 3.1.1 for cached devshell entry
+
 ## [0.2.1] - 2026-04-24
 
 _Ships an agent-facing Claude Code skill so Claude / openclaw can drive
