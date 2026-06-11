@@ -1238,8 +1238,16 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         );
     }
 
-    // Ensure data directory exists before opening database
-    paths::ensure_data_dir()?;
+    // Ensure the database's parent directory exists before opening it. Use
+    // the resolved --db-path, NOT the default platform data dir: with an
+    // overridden path the default dir is never touched, which matters when
+    // HOME is read-only (Nix build sandbox, locked-down service accounts).
+    if let Some(parent) = cli.db_path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
 
     Ok(crate::index::run_index(cli, args)?)
 }

@@ -77,26 +77,6 @@ pub fn expand_tilde<P: AsRef<Path>>(path: P) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Ensures the nxv data directory exists, creating it and any missing parents if necessary.
-///
-/// This creates the directory returned by `get_data_dir()` when it does not already exist.
-/// I/O errors from creating directories are returned to the caller.
-///
-/// # Examples
-///
-/// ```
-/// // Create the data directory if needed; propagate or assert success in tests.
-/// assert!(nxv::paths::ensure_data_dir().is_ok());
-/// ```
-#[cfg_attr(not(feature = "indexer"), allow(dead_code))]
-pub fn ensure_data_dir() -> std::io::Result<()> {
-    let data_dir = get_data_dir();
-    if !data_dir.exists() {
-        std::fs::create_dir_all(&data_dir)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
