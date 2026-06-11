@@ -1,16 +1,34 @@
 # Building Indexes
 
-This guide covers building your own nxv index from a local nixpkgs checkout.
-This is an advanced topic for users who want to:
+This guide covers building your own nxv index from nixpkgs channel-release
+snapshots. This is an advanced topic for users who want to:
 
-- Create indexes for custom nixpkgs forks
-- Build indexes with different date ranges
+- Build indexes with different date ranges or channels
 - Self-host their own nxv infrastructure
 - Contribute to the official index
 
-::: tip Most Users If you just want to use nxv, run `nxv update` to download the
-pre-built index. Building your own index takes 24+ hours and significant
-resources. :::
+::: tip Most Users
+
+If you just want to use nxv, run `nxv update` to download the pre-built index. A
+full rebuild from scratch streams ~15 GB of snapshots and takes a few hours.
+
+:::
+
+## How It Works
+
+The indexer does **not** walk nixpkgs git history and does **not** need a
+nixpkgs checkout. It ingests channel-release snapshots from releases.nixos.org:
+
+- **2020-06 onward**: every channel release ships a `packages.json.br` (~380 MB
+  decompressed) that enumerates all ~144k attributes — including nested package
+  sets (`python3Packages.*`, `haskellPackages.*`, `nodePackages.*`, ...) — with
+  versions and metadata. No Nix evaluation is needed for this era.
+- **2016-09 → 2020-06**: releases predate `packages.json`. Opt in with
+  `--backfill-evals` to evaluate each release's `nixexprs.tar.xz` with `nix-env`
+  (the only path that requires `nix`).
+
+Every stored commit is a real Hydra-built channel commit: the
+`(attribute, version)` pair was verifiably present at both ends of its range.
 
 ## Prerequisites
 
@@ -18,17 +36,23 @@ resources. :::
 
 - **nxv with indexer feature** - The indexer is feature-gated to keep the main
   binary small
-- **Nix** - With flakes enabled (for evaluation)
-- **Git** - For cloning and traversing nixpkgs history
+- **Nix** - Only for `--backfill-evals` (pre-2020 era) and `--head-eval`; the
+  packages.json era needs no Nix at all
+- **Network access** to releases.nixos.org
+
+No git, no nixpkgs clone.
 
 ### Hardware Requirements
 
-| Resource | Minimum    | Recommended         |
-| -------- | ---------- | ------------------- |
-| RAM      | 8 GB       | 32 GB               |
-| Disk     | 50 GB free | 100 GB free         |
-| CPU      | 4 cores    | 8+ cores            |
-| Time     | 24 hours   | 12 hours (parallel) |
+| Resource | Full rebuild                                                     |
+| -------- | ---------------------------------------------------------------- |
+| RAM      | ~2 GB (default 4 parallel workers)                               |
+| Disk     | ~5 GB free (the raw database is ~2 GB)                           |
+| Network  | ~15 GB streamed (snapshots are parsed in flight, never hit disk) |
+| Time     | A few hours for 2020→present; +1.5-3 h with `--backfill-evals`   |
+
+Incremental runs (the normal case) take seconds to minutes — a typical 6-hour
+window sees 0-2 new releases.
 
 ### Getting the Indexer
 
@@ -41,89 +65,75 @@ cargo build --release --features indexer
 ./target/release/nxv index --help
 ```
 
-### Cloning nixpkgs
-
-```bash
-# Full clone (~3 GB)
-git clone https://github.com/NixOS/nixpkgs.git
-
-# Or shallow clone for faster download (limits --since range)
-git clone --depth 10000 https://github.com/NixOS/nixpkgs.git
-```
-
 ## Indexing Workflow
 
 ### Full Index (First Time)
 
-A full index processes all nixpkgs commits since 2017-01-01:
-
 ```bash
-nxv index --nixpkgs-path ./nixpkgs
+nxv index
 ```
 
-This takes 24-48 hours depending on hardware. Progress is checkpointed every 100
-commits, so you can safely interrupt with Ctrl+C and resume later.
+This ingests every release of the default channels: `nixpkgs-unstable` (the
+historical spine, back to 2016) and `nixos-unstable-small` (the currency
+channel, typically hours behind master).
 
-### Resuming Interrupted Indexing
-
-Just run the same command again:
+To also cover the pre-2020 era (requires `nix`):
 
 ```bash
-# Picks up from the last checkpoint automatically
-nxv index --nixpkgs-path ./nixpkgs
+nxv index --backfill-evals
 ```
 
-To force a fresh start (ignoring checkpoints):
+Interrupting with Ctrl+C is safe: each release commits atomically together with
+its row in the `releases` ledger, so unfinished releases simply stay `pending`.
+
+### Resuming and Incremental Updates
+
+Just run the same command again — the `releases` ledger tracks what has already
+been ingested, and only new (or still-pending) releases are processed:
 
 ```bash
-nxv index --nixpkgs-path ./nixpkgs --full
+nxv index
+```
+
+To re-queue every known release:
+
+```bash
+nxv index --full
+```
+
+To retry releases that previously failed:
+
+```bash
+nxv index --retry-failed
 ```
 
 ### Indexing a Specific Date Range
 
-To index only recent commits:
+To ingest only releases in a date window:
 
 ```bash
 # Only 2024 onwards
-nxv index --nixpkgs-path ./nixpkgs --since 2024-01-01
+nxv index --since 2024-01-01
 
 # Specific range
-nxv index --nixpkgs-path ./nixpkgs --since 2023-01-01 --until 2024-01-01
+nxv index --since 2023-01-01 --until 2024-01-01
 ```
 
-## Backfilling Metadata
+### Data-Quality Gates
 
-After indexing, some metadata may be missing (source paths, homepages,
-vulnerability info). Use `backfill` to update:
+Monitors check each snapshot **before** anything is written: attribute count
+floors, rolling baselines, sentinel packages (firefox, thunderbird, nh,
+python3Packages.requests), birth/death anomalies, and head lag. With `--strict`,
+warnings become fatal (this is what CI uses). `--report report.json` writes the
+end-of-run coverage report.
 
-### HEAD Mode (Default)
+### Staying Current During Channel Stalls
 
-Extracts from the current nixpkgs checkout. Fast but may miss renamed/removed
-packages:
-
-```bash
-nxv backfill --nixpkgs-path ./nixpkgs
-```
-
-### Historical Mode
-
-Traverses git history to find each package's original commit. Slower but
-complete:
+When the channels lag behind nixpkgs master, `--head-eval` evaluates master HEAD
+directly from a GitHub tarball (requires `nix`):
 
 ```bash
-nxv backfill --nixpkgs-path ./nixpkgs --history
-```
-
-### Selective Backfill
-
-Update only specific fields:
-
-```bash
-# Only source paths
-nxv backfill --nixpkgs-path ./nixpkgs --fields source-path
-
-# Multiple fields
-nxv backfill --nixpkgs-path ./nixpkgs --fields source-path,homepage
+nxv index --strict --head-eval --report report.json
 ```
 
 ## Publishing
@@ -141,11 +151,12 @@ nxv publish --output ./publish --sign --secret-key ./nxv.key
 
 ### Generated Artifacts
 
-| File            | Size   | Description                           |
-| --------------- | ------ | ------------------------------------- |
-| `index.db.zst`  | ~28 MB | Zstd-compressed SQLite database       |
-| `bloom.bin`     | ~96 KB | Bloom filter for fast lookups         |
-| `manifest.json` | ~1 KB  | Metadata with checksums and signature |
+| File                    | Size    | Description                        |
+| ----------------------- | ------- | ---------------------------------- |
+| `index.db.zst`          | ~190 MB | Zstd-compressed SQLite database    |
+| `bloom.bin`             | ~330 KB | Bloom filter for fast lookups      |
+| `manifest.json`         | ~1 KB   | Metadata with checksums            |
+| `manifest.json.minisig` | ~1 KB   | minisign signature (when `--sign`) |
 
 ### Hosting
 
@@ -167,54 +178,51 @@ nxv update
 
 ## Architecture Deep Dive
 
-### Version Extraction Fallback Chain
+### Pipeline
 
-Not all packages expose versions the same way. The indexer tries multiple
-sources:
+Each run is: plan → parallel fetch/parse → in-order gating → aggregated upserts
+→ finish.
 
-| Priority | Source                           | Example                   |
-| -------- | -------------------------------- | ------------------------- |
-| 1        | `pkg.version`                    | Most packages             |
-| 2        | `pkg.unwrapped.version`          | Wrapper packages (neovim) |
-| 3        | `pkg.passthru.unwrapped.version` | Passthru metadata         |
-| 4        | Parse from `pkg.name`            | `"hello-2.12"` → `"2.12"` |
+1. **Plan**: list the channel's release directories on the releases.nixos.org S3
+   bucket and diff against the `releases` ledger; new directories become
+   `pending` rows.
+2. **Fetch/parse**: workers stream each `packages.json.br`, decompressing brotli
+   and parsing JSON in flight — the ~380 MB document is never materialized in
+   memory or on disk.
+3. **Gate**: monitors validate each snapshot in release order before any write.
+4. **Upsert**: widen-only — an existing `(attribute_path, version)` row only
+   ever has its `first_commit_*` moved earlier or its `last_commit_*` moved
+   later. Each release commits atomically with its ledger row.
+5. **Finish**: rebuild the bloom filter, rebuild FTS (bulk runs drop the
+   triggers and rebuild from scratch), and update watermarks.
 
-### all-packages.nix Optimization
+### Range Semantics
 
-The file `pkgs/top-level/all-packages.nix` changes frequently but usually
-affects only a few packages. Instead of extracting all ~18,000 packages on every
-commit:
+A row means "this `(attribute, version)` pair was **observed** at `first_commit`
+and at `last_commit`" — both real Hydra-built channel commits. Interior presence
+is interpolated, not guaranteed: a version that lives shorter than one channel
+advance can be missed entirely.
 
-1. Parse the git diff for changed lines
-2. Extract affected attribute names (assignment patterns, inherit statements)
-3. Evaluate only those specific packages
-4. Average: ~7 packages per commit vs 18,000
+### Interruption Safety
 
-This optimization provides 100x+ speedup for incremental indexing.
-
-### Checkpointing and Ctrl+C Safety
-
-Progress is saved every 100 commits (configurable via `--checkpoint-interval`):
-
-- **Checkpoint data**: Last indexed commit hash, date, statistics
-- **Atomic writes**: Database commits are transactional
-- **Signal handling**: Ctrl+C triggers graceful shutdown with checkpoint save
-- **Resume**: Next run reads checkpoint and continues from last position
+There is no checkpoint file. Ctrl+C triggers a graceful shutdown; releases that
+didn't finish stay `pending` in the ledger and the next run picks them up.
+Failed releases are parked with retry backoff instead of aborting the run.
 
 ## Database Schema
 
-The index uses SQLite with this schema (version 3):
+The index uses SQLite with this schema (version 4):
 
 ```sql
 CREATE TABLE package_versions (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,            -- Short package name, e.g. "python3"
     version TEXT NOT NULL,         -- e.g., "3.11.4"
-    first_commit_hash TEXT NOT NULL,  -- Earliest commit with this version
+    first_commit_hash TEXT NOT NULL,  -- Earliest channel commit observed with this version
     first_commit_date INTEGER NOT NULL,  -- Unix timestamp (seconds)
-    last_commit_hash TEXT NOT NULL,      -- Latest commit with this version
+    last_commit_hash TEXT NOT NULL,      -- Latest channel commit observed with this version
     last_commit_date INTEGER NOT NULL,   -- Unix timestamp (seconds)
-    attribute_path TEXT NOT NULL,  -- e.g., "python311"
+    attribute_path TEXT NOT NULL,  -- e.g., "python3Packages.requests"
     description TEXT,
     license TEXT,                  -- JSON array
     homepage TEXT,
@@ -222,31 +230,46 @@ CREATE TABLE package_versions (
     platforms TEXT,                -- JSON array
     source_path TEXT,              -- e.g., "pkgs/tools/foo/default.nix"
     known_vulnerabilities TEXT,    -- JSON array of CVEs
-    UNIQUE(attribute_path, version, first_commit_hash)
+    UNIQUE(attribute_path, version),
+    CHECK(first_commit_date <= last_commit_date)
+);
+
+-- Channel-release ingestion ledger: which snapshots have been ingested,
+-- which are pending/failed, and their retry/backoff state
+CREATE TABLE releases (
+    id INTEGER PRIMARY KEY,
+    channel TEXT NOT NULL,
+    release_name TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,
+    commit_count INTEGER,
+    release_date INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending/ingested/failed/skipped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at INTEGER,
+    attr_count INTEGER,
+    error TEXT,
+    ingested_at INTEGER,
+    UNIQUE(channel, release_name)
 );
 
 -- Full-text search index (auto-synced via triggers)
-CREATE VIRTUAL TABLE package_versions_fts USING fts5(description);
+CREATE VIRTUAL TABLE package_versions_fts
+USING fts5(name, description, content=package_versions, content_rowid=id);
 
 -- Metadata
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
-    value TEXT
+    value TEXT NOT NULL
 );
 ```
 
-### Key Design: Merged Version Ranges
+### Key Design: One Row Per Version Range
 
-Rows are merged so that a given `(attribute_path, version)` pair collapses into
-a single range per indexing run. When the same version appears in multiple
-commits:
-
-- `first_commit_*` tracks the earliest appearance
-- `last_commit_*` tracks the latest appearance
-
-The `UNIQUE(attribute_path, version, first_commit_hash)` constraint tolerates
-re-runs that discover an earlier `first_commit_hash`; `nxv dedupe` can collapse
-any residual duplicates left behind by older indexer versions (pre-0.1.5).
+A given `(attribute_path, version)` pair is exactly one row, enforced by the
+`UNIQUE(attribute_path, version)` constraint. Re-observing a pair only widens
+its range. `nxv dedupe` exists to repair databases built by pre-0.1.5 indexer
+versions that left duplicate rows behind.
 
 ### Insecure Packages
 
@@ -256,19 +279,18 @@ insecure). The HTTP API's version-history endpoint surfaces this as a boolean.
 
 ## Troubleshooting
 
-### Stuck on a Commit
+### A Release Fails to Ingest
 
-Some commits may have evaluation issues. Use `--max-commits` to limit processing
-and isolate the problematic commit, or use `--since`/`--until` to skip a date
-range:
+Failed releases don't abort the run — they're parked in the `releases` ledger
+with retry backoff. Retry them explicitly:
 
 ```bash
-# Limit to next 100 commits to isolate the issue
-nxv index --nixpkgs-path ./nixpkgs --max-commits 100
-
-# Skip problematic date range
-nxv index --nixpkgs-path ./nixpkgs --since 2023-06-01
+nxv index --retry-failed
 ```
+
+A handful of historical releases are genuinely defective upstream (broken 2018
+evaluations, corrupt 16.09/17.03 re-uploads) and will stay parked as skipped —
+that's expected.
 
 ### Database Corruption
 
@@ -279,18 +301,22 @@ If the database becomes corrupted after a crash:
 rm ~/.local/share/nxv/index.db  # Linux
 rm ~/Library/Application\ Support/nxv/index.db  # macOS
 
-# Re-run indexing
-nxv index --nixpkgs-path ./nixpkgs
+# Re-run indexing (or `nxv update` to re-download the pre-built index)
+nxv index
 ```
 
-### nixpkgs Repository Issues
+### Pre-2020 Versions Missing
 
-If the nixpkgs clone is in an inconsistent state:
+The pre-2020 era is opt-in because it requires `nix` and takes 1.5-3 hours:
 
 ```bash
-# Reset to known good state
-nxv reset --nixpkgs-path ./nixpkgs --fetch
+nxv index --backfill-evals
 ```
+
+### Using a Mirror
+
+Set `NXV_RELEASES_URL` to point the indexer at an alternate releases.nixos.org
+S3 endpoint (tests, mirrors).
 
 ## CLI Reference
 

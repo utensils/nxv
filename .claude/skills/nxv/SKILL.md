@@ -37,7 +37,7 @@ Parse `$ARGUMENTS` to determine the action:
 - If arguments look like a **question** ("when was X added", "which commit has Y"), pick `search` or `history` accordingly.
 - If no arguments, run `nxv stats` to give the user a quick health check of their index.
 
-**For agents**: always pass `--format json` (CLI) or hit the HTTP API and pipe to `jq`. The table format is human-only; column widths are terminal-dependent.
+**For agents**: always pass `--format json` (CLI) or hit the HTTP API and pipe to `jq`. The table format is human-only; column widths are terminal-dependent. Exception: `nxv stats` has no `--format` flag — use `GET /api/v1/stats` when you need stats as JSON.
 
 ## Global Options
 
@@ -270,6 +270,7 @@ Most users never need these — they consume a pre-built published index via `nx
 | `NXV_SECRET_KEY`     | Secret key for `nxv publish --sign` (path or raw content)              |
 | `NXV_SKIP_VERIFY`    | Skip minisign signature check (INSECURE — dev/testing only)            |
 | `NXV_NO_SELF_UPDATE` | Skip the binary self-update check during `nxv update`                  |
+| `NXV_VERSION`        | Pin the version installed by `install.sh` (self-update targets latest) |
 | `NXV_HOST`           | `nxv serve` bind host                                                  |
 | `NXV_PORT`           | `nxv serve` listen port                                                |
 | `NXV_RATE_LIMIT`     | `nxv serve` per-IP rate limit (req/sec)                                |
@@ -320,7 +321,7 @@ curl -s "https://nxv.urandom.io/api/v1/packages/ruby/history" | \
   jq '.data[] | select(.version | startswith("2.6"))'
 ```
 
-**Get the index freshness (when was nixpkgs last walked):**
+**Get the index freshness (newest ingested channel commit):**
 
 ```bash
 curl -s "https://nxv.urandom.io/api/v1/stats" | \
@@ -332,18 +333,18 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Search is dedup-by-default**: by default, only the most recent record per `(attribute_path, version)` pair is returned. Pass `--full` (CLI) or use the `/packages/{attr}` HTTP endpoint to see every commit.
 - **Version filters are prefix matches**: `nxv search python 3.11` matches `3.11.0`, `3.11.4`, `3.11.10`, etc. Use `--exact` for whole-attribute matches, not for whole-version matches.
 - **Bloom filter gives instant negatives**: a search for a nonsense package name returns in <1 ms because the bloom filter rejects it before SQLite is touched. False positives are possible but rare.
-- **Coverage starts in 2017**: nixpkgs commits before 2017 are not indexed. Anything older needs raw git spelunking.
+- **Coverage starts in September 2016**: nixpkgs commits before then are not indexed. Anything older needs raw git spelunking.
 - **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv update` rejects the signature.
 - **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump.
-- **`/api/v1` responses always wrap in `{data, meta}` (or `{data}` for single items)**: do `jq '.data'` first.
+- **`/api/v1` data responses always wrap in `{data, meta}` (or `{data}` for single items)**: do `jq '.data'` first. Exceptions: the operational `/health` and `/metrics` endpoints are unwrapped.
 
 ## Practical Tips
 
 - **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python27`.
 - **Use `--exact`** when the package name is unambiguous; otherwise `python` returns dozens of variants (`python27`, `python311`, `python311Packages.numpy`, etc.).
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
-- **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~100MB index download entirely if you only need occasional lookups.
-- **Update weekly**: the public index is republished on a weekly schedule (`publish-index.yml`).
+- **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~190MB index download entirely if you only need occasional lookups.
+- **Update regularly**: the public index is republished every 6 hours (`publish-index.yml`); `nxv update` pulls the latest.
 - **For CI**: pin to `NXV_NO_SELF_UPDATE=1 nxv update` so the runner refreshes the index but never tries to swap its own binary.
 
 ## Updating This Skill

@@ -109,8 +109,8 @@ nxv history python311
 
 ### update
 
-Refresh the package index, then check for a newer nxv binary and update
-it (or print a hint for managed installs).
+Refresh the package index, then check for a newer nxv binary and update it (or
+print a hint for managed installs).
 
 ```bash
 nxv update [options]
@@ -118,30 +118,29 @@ nxv update [options]
 
 **Options:**
 
-| Flag                 | Description                                                        |
-| -------------------- | ------------------------------------------------------------------ |
-| `-f, --force`        | Force full re-download of the index                                |
-| `--skip-verify`      | Skip manifest signature verification                               |
-| `--public-key <KEY>` | Custom public key for verification                                 |
-| `--no-self-update`   | Skip the binary self-update check; only refresh the index          |
+| Flag                 | Description                                               |
+| -------------------- | --------------------------------------------------------- |
+| `-f, --force`        | Force full re-download of the index                       |
+| `--skip-verify`      | Skip manifest signature verification                      |
+| `--public-key <KEY>` | Custom public key for verification                        |
+| `--no-self-update`   | Skip the binary self-update check; only refresh the index |
 
-`--no-self-update` also honours the `NXV_NO_SELF_UPDATE` environment
-variable, which is useful for CI or systemd timer units that should
-only refresh the index.
+`--no-self-update` also honours the `NXV_NO_SELF_UPDATE` environment variable,
+which is useful for CI or systemd timer units that should only refresh the
+index.
 
 **Binary-update behaviour by install method:**
 
-| Install method | Action                                                         |
-| -------------- | -------------------------------------------------------------- |
-| Local          | Downloads, verifies SHA-256, atomically swaps the binary       |
-| Nix            | Leaves binary alone; prints `nix profile upgrade nxv` / flake hint |
-| `cargo install`| Leaves binary alone; prints `cargo install --locked nxv`       |
-| Homebrew       | Leaves binary alone; prints `brew upgrade nxv` (or reinstall)  |
+| Install method  | Action                                                             |
+| --------------- | ------------------------------------------------------------------ |
+| Local           | Downloads, verifies SHA-256, atomically swaps the binary           |
+| Nix             | Leaves binary alone; prints `nix profile upgrade nxv` / flake hint |
+| `cargo install` | Leaves binary alone; prints `cargo install --locked nxv`           |
+| Homebrew        | Leaves binary alone; prints `brew upgrade nxv` (or reinstall)      |
 
-Set `GITHUB_TOKEN` to avoid unauthenticated rate limits when calling the
-GitHub API. If the binary check fails (e.g., network or rate limit),
-`nxv update` prints a warning but still reports the index update as
-successful.
+Set `GITHUB_TOKEN` to avoid unauthenticated rate limits when calling the GitHub
+API. If the binary check fails (e.g., network or rate limit), `nxv update`
+prints a warning but still reports the index update as successful.
 
 **Examples:**
 
@@ -193,6 +192,36 @@ Show index statistics and metadata.
 nxv stats
 ```
 
+### index
+
+Build the index from nixpkgs channel-release snapshots on releases.nixos.org.
+Downloads and streams `packages.json.br` for each release — no nixpkgs checkout
+and no Nix evaluation needed, except for the two flags noted below that require
+`nix`.
+
+Requires the `indexer` feature (`nxv-indexer` or
+`cargo build --features indexer`).
+
+```bash
+nxv index [options]
+```
+
+**Options:**
+
+| Flag                   | Description                                                                                          |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| `--channel <CHANNELS>` | Channels to ingest (repeatable or comma-separated; default: nixpkgs-unstable + nixos-unstable-small) |
+| `--since <DATE>`       | Only ingest releases dated on/after this date (YYYY-MM-DD)                                           |
+| `--until <DATE>`       | Only ingest releases dated on/before this date (YYYY-MM-DD)                                          |
+| `--jobs <N>`           | Parallel snapshot download/parse workers                                                             |
+| `--strict`             | Treat monitor warnings (count floors, sentinels, head lag) as fatal                                  |
+| `--report <PATH>`      | Write the end-of-run coverage report as JSON to this path                                            |
+| `--retry-failed`       | Retry releases that were parked as failed/skipped                                                    |
+| `--backfill-evals`     | Also ingest the pre-2020 era by evaluating `nixexprs.tar.xz` with nix-env (requires `nix`)           |
+| `--head-eval`          | Evaluate nixpkgs master HEAD when channel observations lag behind (requires `nix`)                   |
+| `--full`               | Re-plan every known release instead of only new ones                                                 |
+| `--max-releases <N>`   | Limit the number of releases ingested this run (for testing)                                         |
+
 ### dedupe
 
 Collapse duplicate `(attribute_path, version)` rows in the local index. Repairs
@@ -213,6 +242,46 @@ nxv dedupe [options]
 | ------------- | --------------------------------------------------------- |
 | `--dry-run`   | Report what would change without modifying the database   |
 | `--no-vacuum` | Skip the trailing `VACUUM` (faster, DB file won't shrink) |
+
+### publish
+
+Generate publishable index artifacts (compressed database, bloom filter, and
+manifest) for distribution.
+
+Requires the `indexer` feature.
+
+```bash
+nxv publish [options]
+```
+
+**Options:**
+
+| Flag                 | Description                                                                      |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `-o, --output <DIR>` | Output directory for generated artifacts (default: ./publish)                    |
+| `--url-prefix <URL>` | Base URL prefix for manifest URLs                                                |
+| `--sign`             | Sign the manifest with a minisign secret key                                     |
+| `--secret-key <KEY>` | Secret key for signing (file path or raw key; also `NXV_SECRET_KEY` env)         |
+| `--min-version <N>`  | Minimum schema version required to read this index (default: the schema version) |
+
+### keygen
+
+Generate a new minisign keypair for signing manifests.
+
+Requires the `indexer` feature.
+
+```bash
+nxv keygen [options]
+```
+
+**Options:**
+
+| Flag                      | Description                                                  |
+| ------------------------- | ------------------------------------------------------------ |
+| `-s, --secret-key <PATH>` | Output path for the secret key file (default: ./nxv.key)     |
+| `-p, --public-key <PATH>` | Output path for the public key file (default: ./nxv.pub)     |
+| `-c, --comment <COMMENT>` | Comment to embed in the key files (default: nxv signing key) |
+| `-f, --force`             | Overwrite existing key files if they exist                   |
 
 ### completions
 
@@ -244,9 +313,9 @@ nxv completions fish > ~/.config/fish/completions/nxv.fish
 Human-readable table with colors:
 
 ```
-Package          Version   Date         Commit
-python311        3.11.4    2023-06-15   abc1234
-python311        3.11.3    2023-04-05   def5678
+Package          Version   Commit    Date         Description
+python311        3.11.4    abc1234   2023-06-15   High-level dynamically-typed programming language
+python311        3.11.3    def5678   2023-04-05   High-level dynamically-typed programming language
 ```
 
 ### json
@@ -266,9 +335,10 @@ Machine-readable JSON:
 
 ### plain
 
-Tab-separated values for scripts:
+Tab-separated values for scripts (with a header row):
 
 ```
-python311	3.11.4	2023-06-15	abc1234
-python311	3.11.3	2023-04-05	def5678
+PACKAGE	VERSION	COMMIT	DATE	DESCRIPTION
+python311	3.11.4	abc1234	2023-06-15	High-level dynamically-typed programming language
+python311	3.11.3	def5678	2023-04-05	High-level dynamically-typed programming language
 ```

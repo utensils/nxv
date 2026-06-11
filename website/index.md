@@ -27,7 +27,8 @@ features:
     title: Complete
     details:
       Every channel-released nixpkgs package version since 2016 \u2014 including
-      nested sets like python3Packages \u2014 at Hydra-built, cache-backed commits
+      nested sets like python3Packages \u2014 at Hydra-built, cache-backed
+      commits
   - icon: "\uD83D\uDD12"
     title: Offline-first
     details: Download the index once, search locally without network requests

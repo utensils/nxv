@@ -39,8 +39,8 @@ The devshell provides shortcuts for all of these (`build`, `clippy`, `fmt-check`
 ```bash
 nix build                        # Build nxv (user binary)
 nix build .#nxv-indexer          # Build with indexer feature
-nix build .#nxv-static           # Static musl build (x86_64 Linux only)
-nix build .#nxv-static-aarch64   # Static musl build (aarch64 Linux)
+nix build .#nxv-static           # Static musl build (Linux only; native arch)
+nix build .#nxv-static-aarch64   # Static musl build (aarch64, cross-compiled on x86_64 Linux)
 nix build .#nxv-docker           # Docker image (Linux only, use --system x86_64-linux on macOS)
 nix run                          # Run nxv directly
 nix run .#nxv-indexer            # Run with indexer feature
@@ -60,7 +60,7 @@ The CLI transparently runs against either a local index or a remote `nxv serve` 
 
 ### Self-Update (`self_update.rs`)
 
-There is no standalone `self-update` subcommand — `nxv update` refreshes the index first, then checks GitHub for a newer nxv release. On local installs (install.sh, manual download) the binary is replaced atomically after SHA-256 verification against the release's SHA256SUMS.txt; on managed installs (Nix, cargo, Homebrew — detected from the executable path) it only prints the matching upgrade command. Skip with `--no-self-update`; pin a specific release tag with `NXV_VERSION`.
+There is no standalone `self-update` subcommand — `nxv update` refreshes the index first, then checks GitHub for a newer nxv release. On local installs (install.sh, manual download) the binary is replaced atomically after SHA-256 verification against the release's SHA256SUMS.txt; on managed installs (Nix, cargo, Homebrew — detected from the executable path) it only prints the matching upgrade command. If the index refresh fails with an incompatible-index (schema too new) error, the self-update check still runs before exiting so users can recover. Skip with `--no-self-update` or `NXV_NO_SELF_UPDATE`. Note: `NXV_VERSION` is read only by `install.sh` to pin the installer download — the binary's self-update always targets the latest release.
 
 ### API Server (`server/`)
 
@@ -70,7 +70,7 @@ The `nxv serve` command runs an HTTP API server with:
 - Web frontend at `/` served from `frontend/` (static HTML/CSS/JS, embedded at build time)
 - OpenAPI documentation at `/docs` (generated in `server/openapi.rs`)
 - Configurable CORS support
-- In-memory runtime metrics (`server/metrics.rs`): rolling latency window, 30-minute activity buckets, uptime — all lost on restart by design
+- In-memory runtime metrics (`server/metrics.rs`): rolling latency window, per-minute activity buckets over the last 30 minutes, uptime — all lost on restart by design
 
 ### Shell Completions (`completions.rs`)
 
@@ -98,7 +98,7 @@ Note the directory is `src/index/` even though the Cargo feature is named `index
 
 - **Observations, not inference**: every stored commit is one at which the version verifiably existed; no file→attr change mapping, no "no evaluation = unchanged" (the root causes of issues #21/#23)
 - **Nested package sets included**: packages.json already enumerates all ~144k attrs (python3xxPackages.*, haskellPackages.*, ...) — issue #5 is covered with zero evaluation cost
-- **Currency**: nixos-unstable-small ingestion keeps the index hours behind master; `--head-eval` covers channel stalls; `--strict` fails CI when head lag exceeds 72h
+- **Currency**: nixos-unstable-small ingestion keeps the index hours behind master; `--head-eval` covers channel stalls; head lag over 72h marks the run unhealthy (a fatal error under `--strict`; the publish workflow instead publishes first and alerts after)
 - **Bloom filter**: Serialized to separate file, loaded at search time for instant "not found" responses; contains full dotted attribute paths
 - **Feature gates**: Indexer code (ctrlc, brotli, quick-xml) only compiled with `--features indexer` to keep user binary small
 
@@ -121,7 +121,7 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
 - `NXV_PUBLIC_KEY` — override the embedded minisign public key
 - `NXV_NO_SELF_UPDATE` — make `nxv update` only refresh the index, skipping the binary check
-- `NXV_VERSION` — pin the self-update to a specific release tag instead of latest
+- `NXV_VERSION` — pin the version `install.sh` downloads (not read by the binary itself)
 - `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT`, `NXV_RATE_LIMIT_BURST` — `nxv serve` bind/host/rate-limit
 - `NXV_MAX_DB_CONNECTIONS`, `NXV_DB_TIMEOUT_SECS` — `nxv serve` DB concurrency cap (default 32) and per-operation timeout (default 30s)
 - `NXV_LOG_FORMAT` — set to `json` for structured `nxv serve` logs (combine with `RUST_LOG`)
@@ -223,7 +223,7 @@ confirmation; never merge it without explicit user approval.
 - `ci.yml`: Runs on PRs and main - tests (cargo + nix), clippy, fmt, builds Docker latest on main
 - `release-plz.yml`: On pushes to main - maintains the release PR; tags `vX.Y.Z` when it merges (see Releasing)
 - `release.yml`: Triggered by `v*` tags - builds static binaries, publishes to crates.io, pushes versioned Docker images
-- `publish-index.yml`: Every 6 hours or manual - ingests new channel-release snapshots into the index and republishes to `index-latest` only when something was ingested and monitors are green (`--strict --head-eval --report`)
+- `publish-index.yml`: Every 6 hours or manual - ingests new channel-release snapshots into the index (`--head-eval --report`, deliberately not `--strict`) and republishes to `index-latest` only when something was ingested (or `force_publish`); monitor anomalies turn the run red AFTER publishing instead of blocking it
 - `pages.yml`: Deploys the VitePress docs site (`website/`) to GitHub Pages on pushes to main
 - `flakehub-publish-tagged.yml`: Publishes tagged releases to FlakeHub
 

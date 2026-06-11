@@ -3,7 +3,7 @@
 [![CI](https://github.com/utensils/nxv/actions/workflows/ci.yml/badge.svg)](https://github.com/utensils/nxv/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/nxv.svg)](https://crates.io/crates/nxv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org/)
 [![Nix Flake](https://img.shields.io/badge/nix-flake-blue?logo=nixos)](https://nixos.wiki/wiki/Flakes)
 [![FlakeHub](https://img.shields.io/endpoint?url=https://flakehub.com/f/utensils/nxv/badge)](https://flakehub.com/flake/utensils/nxv)
 [![Built with Claude](https://img.shields.io/badge/Built%20with-Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
@@ -11,12 +11,12 @@
 
 **Find any version of any Nix package, instantly.**
 
-nxv indexes the entire nixpkgs git history to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
+nxv indexes nearly a decade of nixpkgs channel releases to help you discover when packages were added, which versions existed, and the exact commit to use with `nix shell nixpkgs/<commit>#package`.
 
 ## Why nxv?
 
 Because sometimes you need Python 2.7 for that legacy project nobody wants to touch. Or Ruby 2.6 because the Gemfile hasn't been updated since the Obama administration.
-Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 8+ years of nixpkgs history so you don't have to.
+Instead of spending your afternoon spelunking through GitHub commits and praying to the Nix gods, just ask nxv. It's indexed 9+ years of nixpkgs history so you don't have to.
 
 <p align="center">
   <img src="./docs/where-is-it.gif" alt="nxv in action" />
@@ -42,15 +42,15 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 - **Version history** — See when each version was introduced and when it was superseded
 - **Multiple interfaces** — CLI tool, HTTP API server with web UI, or query via remote API
 - **NixOS module** — Run as a systemd service with automatic index updates
-- **Lightweight** — ~7MB static binary, ~100MB compressed index
+- **Lightweight** — ~10MB static binary, ~190MB compressed index
 
 ## How It Works
 
 ```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│    nixpkgs      │────▶│     Indexer     │────▶│  SQLite Index   │
-│   git history   │     │  (nix eval per  │     │  + Bloom Filter │
-│                 │     │    commit)      │     │                 │
+│ channel-release │────▶│     Indexer     │────▶│  SQLite Index   │
+│ snapshots from  │     │ (packages.json  │     │  + Bloom Filter │
+│ nixos.org (S3)  │     │  per release)   │     │                 │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                                                         │
                                                         ▼
@@ -60,8 +60,8 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-The indexer walks nixpkgs commits (from 2017+), runs `nix eval` to extract package metadata, and stores version ranges in SQLite.
-Users download a pre-built compressed index (~100MB) and query it locally or via the API server.
+The indexer ingests Hydra-built channel-release snapshots from releases.nixos.org (back to 2016): `packages.json.br` for releases from 2020 onward, and `nix-env` evaluation of `nixexprs.tar.xz` for the earlier era. Every recorded commit is one where the package version verifiably existed — including nested package sets like `python3Packages.*` and `haskellPackages.*`.
+Users download a pre-built compressed index (~190MB) and query it locally or via the API server.
 
 ## Installation
 
@@ -196,6 +196,7 @@ nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
 | `GET /api/v1/packages/{attr}/versions/{version}/last` | Last occurrence commit |
 | `GET /api/v1/stats` | Index statistics |
 | `GET /api/v1/health` | Health check |
+| `GET /api/v1/metrics` | Runtime metrics (latency, activity, uptime) |
 
 ### Remote API Mode
 
@@ -241,6 +242,7 @@ Run the API server as a systemd service with automatic updates:
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `enable` | `false` | Enable the nxv API service |
+| `package` | `pkgs.nxv` | The nxv package to use |
 | `host` | `127.0.0.1` | Address to bind to |
 | `port` | `8080` | Port to listen on |
 | `dataDir` | `/var/lib/nxv` | Directory for `index.db` |
@@ -250,8 +252,17 @@ Run the API server as a systemd service with automatic updates:
 | `cors.enable` | `false` | Enable CORS for all origins |
 | `cors.origins` | `null` | Specific allowed origins |
 | `openFirewall` | `false` | Open firewall port |
+| `user` | `nxv` | User account the service runs as |
+| `group` | `nxv` | Group the service runs as |
 | `autoUpdate.enable` | `false` | Enable automatic index updates |
 | `autoUpdate.interval` | `daily` | Update frequency (systemd calendar syntax) |
+| `logging.level` | `nxv=info,tower_http=info,warn` | Log level (RUST_LOG syntax) |
+| `logging.format` | `text` | Log output format (`text` or `json`) |
+| `database.maxConnections` | `32` | Max concurrent database operations |
+| `database.timeoutSeconds` | `30` | Database operation timeout |
+| `rateLimit.enable` | `false` | Enable IP-based rate limiting |
+| `rateLimit.requestsPerSecond` | `10` | Max requests per second per IP |
+| `rateLimit.burst` | `null` | Burst size (defaults to 2x rate) |
 
 </details>
 
@@ -270,15 +281,15 @@ docker run -p 8080:8080 -v nxv-data:/root/.local/share/nxv ghcr.io/utensils/nxv:
 docker run ghcr.io/utensils/nxv:latest search python
 docker run ghcr.io/utensils/nxv:latest --help
 
-# Build an index (requires nixpkgs mount)
-docker run -v ./nixpkgs:/nixpkgs -v nxv-data:/root/.local/share/nxv \
-  ghcr.io/utensils/nxv:latest index --nixpkgs-path /nixpkgs
+# Build an index (downloads channel snapshots from releases.nixos.org)
+docker run -v nxv-data:/root/.local/share/nxv \
+  ghcr.io/utensils/nxv:latest index
 ```
 
 **Tags:**
 
 - `latest` — Latest build from main branch
-- `x.y.z` — Specific version (e.g., `0.1.0`)
+- `x.y.z` — Specific version (e.g., `0.3.0`)
 
 The image includes the indexer feature, git, and CA certificates. By default it runs `nxv serve` on port 8080.
 
@@ -296,40 +307,28 @@ docker load < result
 
 The self-hosting workflow is:
 
-1. **Build** — Run `nxv index` against a nixpkgs clone to create the SQLite database
+1. **Build** — Run `nxv index` to ingest channel-release snapshots into the SQLite database
 2. **Publish** — Run `nxv publish` to generate compressed artifacts with a manifest
 3. **Host** — Upload artifacts to any static file host (S3, GitHub Releases, etc.)
 4. **Configure** — Point clients at your manifest via `NXV_MANIFEST_URL`
 
 ### Indexing
 
-Requires the `indexer` feature and a local nixpkgs clone:
+Requires the `indexer` feature. The indexer downloads channel-release snapshots from releases.nixos.org — no nixpkgs checkout is needed:
 
 ```bash
 # Build with indexer support
 nix build .#nxv-indexer
 # or: cargo build --release --features indexer
 
-# Clone nixpkgs (full history needed for complete index)
-git clone https://github.com/NixOS/nixpkgs.git
+# Build the index from channel-release snapshots (2020+ era, no nix required)
+nxv index
 
-# Build the index (takes hours for full history)
-nxv index --nixpkgs-path ./nixpkgs --full
+# Also ingest the pre-2020 era via nix-env evaluation (one-time, requires nix)
+nxv index --backfill-evals
 
-# Incremental update (much faster)
-nxv index --nixpkgs-path ./nixpkgs
-```
-
-### Backfilling Metadata
-
-Update missing fields without full rebuild:
-
-```bash
-# Fast: extract from current nixpkgs HEAD
-nxv backfill --nixpkgs-path ./nixpkgs
-
-# Accurate: traverse git history to original commits
-nxv backfill --nixpkgs-path ./nixpkgs --history
+# Subsequent runs are incremental — only new releases are ingested
+nxv index
 ```
 
 ### Publishing Your Index
@@ -341,8 +340,8 @@ Generate distribution-ready artifacts with the `publish` command:
 nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 
 # Files created:
-#   publish/index.db.zst   - Compressed SQLite database (~100MB)
-#   publish/bloom.bin      - Bloom filter for fast lookups (~26KB)
+#   publish/index.db.zst   - Compressed SQLite database (~190MB)
+#   publish/bloom.bin      - Bloom filter for fast lookups (~330KB)
 #   publish/manifest.json  - Manifest with URLs and checksums
 ```
 
@@ -509,6 +508,7 @@ The `manifest.json` format:
 ```json
 {
   "version": 1,
+  "min_version": 4,
   "latest_commit": "abc123def456789...",
   "latest_commit_date": "2024-01-15T12:00:00Z",
   "full_index": {
@@ -538,6 +538,7 @@ The `manifest.json` format:
 | `NXV_SECRET_KEY` | Secret key for manifest signing (path or raw key content) |
 | `NXV_SKIP_VERIFY` | Skip manifest signature verification (set to any value) |
 | `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
+| `NXV_NO_SELF_UPDATE` | Skip the binary self-update check in `nxv update` |
 | `NO_COLOR` | Disable colored output |
 | `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `~/.local/bin`) |
 | `NXV_VERSION` | Specific version for curl installer (default: latest) |
@@ -568,13 +569,15 @@ src/
 ├── output/          # Table/JSON/plain formatters
 ├── bloom.rs         # Bloom filter
 ├── search.rs        # Search/filter/sort logic
+├── self_update.rs   # Binary self-update (part of nxv update)
 ├── paths.rs         # Platform-specific paths
 ├── error.rs         # Error types
 └── index/           # Indexer (feature-gated)
     ├── mod.rs       # Indexer orchestration
-    ├── git.rs       # Git history traversal
-    ├── extractor.rs # Nix evaluation
-    ├── backfill.rs  # Metadata backfill
+    ├── releases.rs  # releases.nixos.org listing + planning
+    ├── snapshot.rs  # Streaming packages.json.br parsing
+    ├── eval.rs      # nix-env backfill + head eval
+    ├── monitor.rs   # Data-quality gates + coverage report
     └── publisher.rs # Index publishing
 ```
 
@@ -609,7 +612,7 @@ There are several other great tools in this space:
 | [vic/nix-versions](https://github.com/vic/nix-versions) | CLI that aggregates lazamar, nixhub, and history APIs | [github.com/vic/nix-versions](https://github.com/vic/nix-versions) |
 | [history.nix-packages.com](https://history.nix-packages.com/) | Web-based package history browser | [history.nix-packages.com](https://history.nix-packages.com/) |
 
-nxv takes a different approach: it indexes every commit locally, giving you a complete offline-capable database with no gaps. Choose what works best for your use case!
+nxv takes a different approach: it ingests every Hydra-built channel release into a local index, giving you a complete offline-capable database covering nested package sets back to 2016. Choose what works best for your use case!
 
 ## License
 

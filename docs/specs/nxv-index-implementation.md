@@ -1,5 +1,11 @@
 # nxv Index Implementation Specification
 
+> **Status: superseded.** This spec describes the original git-walking
+> indexer, which was replaced by the snapshot-based indexer
+> ([docs/indexer-rewrite/](../indexer-rewrite/DESIGN.md)) shipped in nxv
+> 0.3.0 (index schema v4, released 2026-06-11). Kept as a historical
+> design artifact, not current reference.
+
 ## Overview
 
 nxv is a CLI tool for discovering specific versions of Nix packages across nixpkgs history. Users download a pre-built index from a remote source; local nixpkgs clone is only needed for development/index generation.

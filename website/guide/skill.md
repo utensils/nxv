@@ -75,9 +75,10 @@ hosted instance transparently.
 ## For agents (openclaw and others)
 
 The skill is designed so autonomous agents can extract structured data reliably.
-Every CLI subcommand that produces output supports `--format json`, and every
-HTTP API response is wrapped in a stable `{ "data": ..., "meta": {...} }`
-envelope. Agents should:
+The `search`, `info`, and `history` subcommands support `--format json`, and
+every data-returning HTTP API response is wrapped in a stable `{ "data": ... }`
+envelope (plus `meta` for paginated lists; only the operational `/health` and
+`/metrics` endpoints are unwrapped). Agents should:
 
 1. Run `nxv <subcommand> --format json` (CLI) or hit `/api/v1/...` (HTTP) for
    machine-readable output.

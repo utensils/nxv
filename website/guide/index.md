@@ -4,8 +4,12 @@ nxv helps you find specific versions of Nix packages across nixpkgs history.
 Whether you need to pin a dependency to an older version or find when a package
 was introduced, nxv makes it fast and easy.
 
-::: tip Try Without Installing Use the public web interface at
-[nxv.urandom.io](https://nxv.urandom.io/) - no installation required. :::
+::: tip Try Without Installing
+
+Use the public web interface at [nxv.urandom.io](https://nxv.urandom.io/) - no
+installation required.
+
+:::
 
 ## Quick Start
 
@@ -22,7 +26,7 @@ nix run github:utensils/nxv -- search python
 # One-liner install (downloads static binary)
 curl -fsSL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 
-# Update the package index (downloads ~28MB)
+# Update the package index (downloads ~190MB)
 nxv update
 
 # Search for a package
@@ -46,7 +50,7 @@ For each package version, nxv provides:
 
 nxv uses a pre-built SQLite index containing:
 
-- ~2.8 million package version records
+- ~1.75 million version records across ~282,000 package attributes
 - Package metadata (description, license, homepage)
 - Bloom filter for instant "not found" responses
 

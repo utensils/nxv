@@ -6,11 +6,11 @@ Common issues and solutions when using nxv.
 
 ### No results found
 
-1. **Check spelling**: Package names are case-sensitive
+1. **Check spelling**: Exact matches (`--exact`) are case-sensitive
 
    ```bash
-   nxv search Python  # Wrong
-   nxv search python  # Correct
+   nxv search Python --exact  # Wrong
+   nxv search python --exact  # Correct
    ```
 
 2. **Try partial match**: Use prefix search
@@ -32,12 +32,11 @@ Common issues and solutions when using nxv.
 
 ### Search is slow
 
-The first search loads the database and bloom filter into memory. Subsequent
+The first search loads the bloom filter and warms the database cache. Subsequent
 searches are fast. If searches remain slow:
 
 1. Check disk I/O (SSD recommended)
-2. Ensure sufficient RAM (~500MB for index)
-3. Check `NXV_DB_PATH` isn't on a network drive
+2. Check `NXV_DB_PATH` isn't on a network drive
 
 ## Update Issues
 
@@ -61,9 +60,27 @@ searches are fast. If searches remain slow:
    NXV_SKIP_VERIFY=1 nxv update
    ```
 
+### Incompatible index
+
+```
+Incompatible index: index requires schema version N but this build only supports up to M
+```
+
+This means your nxv binary is too old for the published index. `nxv update`
+handles it automatically: on this error it runs the binary self-update check
+before exiting.
+
+- **Local installs** (install.sh, manual download): the binary is replaced in
+  place after SHA-256 verification — re-run `nxv update` to fetch the index.
+- **Managed installs** (Nix, cargo, Homebrew): the matching upgrade command is
+  printed instead; run it, then re-run `nxv update`.
+
+Pass `--no-self-update` (or set `NXV_NO_SELF_UPDATE`) to skip the binary check
+if updates are managed externally.
+
 ### Disk full
 
-The index requires ~100MB of disk space:
+The compressed index download is ~190MB and unpacks to ~2GB of disk space:
 
 - Linux: `~/.local/share/nxv/`
 - macOS: `~/Library/Application Support/nxv/`
@@ -102,13 +119,17 @@ nxv serve --cors-origins "http://localhost:3000"
 
 ## Indexer Issues
 
-### Disk full during indexing
+The indexer ingests channel-release snapshots from releases.nixos.org — it does
+not need a nixpkgs checkout.
 
-Nix store grows during indexing:
+### Failed releases
+
+A release that fails to download or parse is retried automatically with
+exponential backoff; after repeated failures it is parked as `failed` in the
+ledger. To force a retry of parked releases:
 
 ```bash
-# Manual cleanup
-nix-collect-garbage -d
+nxv index --retry-failed
 ```
 
 ### Indexing stuck
@@ -116,25 +137,27 @@ nix-collect-garbage -d
 1. **Check logs**:
 
    ```bash
-   nxv -v index --nixpkgs-path ./nixpkgs
+   nxv -v index
    ```
 
-2. **Reset and resume**:
+2. **Resume**: Interrupted runs resume automatically — ingestion is tracked per
+   release, so the next run picks up any remaining pending releases.
+
+3. **Narrow the range**: Limit a run to a date window while debugging:
+
    ```bash
-   nxv reset --nixpkgs-path ./nixpkgs
-   nxv index --nixpkgs-path ./nixpkgs
+   nxv index --since 2024-01-01 --until 2024-02-01
    ```
 
-### Worker crashes
+### Disk full during indexing
 
-Workers may crash on certain commits:
+Snapshots are streamed during parsing and never written to disk. Only
+`--backfill-evals` and `--head-eval` evaluate with Nix, which grows the Nix
+store:
 
 ```bash
-# Skip problematic date range
-nxv index --nixpkgs-path ./nixpkgs --since 2023-06-01
-
-# Check worker logs
-nxv -vv index --nixpkgs-path ./nixpkgs
+# Manual cleanup
+nix-collect-garbage -d
 ```
 
 ## Getting Help

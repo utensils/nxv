@@ -24,27 +24,43 @@ the index.
 
 ### Index Updates
 
-| Variable           | Description                                 | Default         |
-| ------------------ | ------------------------------------------- | --------------- |
-| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads     | GitHub releases |
-| `NXV_PUBLIC_KEY`   | Custom public key for manifest verification | Built-in key    |
-| `NXV_SKIP_VERIFY`  | Skip manifest signature verification        | `false`         |
+| Variable             | Description                                       | Default         |
+| -------------------- | ------------------------------------------------- | --------------- |
+| `NXV_MANIFEST_URL`   | Custom manifest URL for index downloads           | GitHub releases |
+| `NXV_PUBLIC_KEY`     | Custom public key for manifest verification       | Built-in key    |
+| `NXV_SKIP_VERIFY`    | Skip manifest signature verification              | `false`         |
+| `NXV_NO_SELF_UPDATE` | Skip the binary self-update check in `nxv update` | Not set         |
+
+By default, `nxv update` checks GitHub for a newer nxv release after refreshing
+the index. Set `NXV_NO_SELF_UPDATE` (or pass `--no-self-update`) to only refresh
+the index.
 
 ### Server
 
-| Variable               | Description                                                    | Default     |
-| ---------------------- | -------------------------------------------------------------- | ----------- |
-| `NXV_HOST`             | Server bind address                                            | `127.0.0.1` |
-| `NXV_PORT`             | Server listen port                                             | `8080`      |
-| `NXV_RATE_LIMIT`       | Rate limit per IP (requests/sec)                               | None        |
-| `NXV_RATE_LIMIT_BURST` | Rate limit burst size                                          | `2x rate`   |
-| `NXV_FRONTEND_DIR`     | Serve frontend assets from this directory (disables 24h cache) | Embedded    |
-| `NXV_SECRET_KEY`       | Secret key for manifest signing                                | None        |
+| Variable                 | Description                                                    | Default     |
+| ------------------------ | -------------------------------------------------------------- | ----------- |
+| `NXV_HOST`               | Server bind address                                            | `127.0.0.1` |
+| `NXV_PORT`               | Server listen port                                             | `8080`      |
+| `NXV_RATE_LIMIT`         | Rate limit per IP (requests/sec)                               | None        |
+| `NXV_RATE_LIMIT_BURST`   | Rate limit burst size                                          | `2x rate`   |
+| `NXV_MAX_DB_CONNECTIONS` | Maximum concurrent database operations                         | `32`        |
+| `NXV_DB_TIMEOUT_SECS`    | Per-operation database timeout in seconds                      | `30`        |
+| `NXV_LOG_FORMAT`         | Set to `json` for structured logs (combine with `RUST_LOG`)    | Plain text  |
+| `NXV_FRONTEND_DIR`       | Serve frontend assets from this directory (disables 24h cache) | Embedded    |
 
 `NXV_FRONTEND_DIR` is intended for development: set it to the checkout's
 `frontend/` directory and edits to `index.html`, `app.js`, or `favicon.svg` are
 picked up on the next request without rebuilding. Leave unset in production to
 serve the embedded copy with a 24h `Cache-Control`.
+
+### Indexing & Publishing
+
+These only apply to builds with the `indexer` feature:
+
+| Variable           | Description                                              | Default              |
+| ------------------ | -------------------------------------------------------- | -------------------- |
+| `NXV_SECRET_KEY`   | Minisign secret key (path or contents) for `nxv publish` | None                 |
+| `NXV_RELEASES_URL` | Override the releases.nixos.org endpoint for `nxv index` | `releases.nixos.org` |
 
 ### Output
 

@@ -1,5 +1,9 @@
 # nxv Indexer v2: Design Specification
 
+> **Status: implemented & shipped** in nxv 0.3.0 (index schema v4, released
+> 2026-06-11). This is a historical design artifact — for current behavior
+> see `src/index/` and the root `AGENTS.md`.
+
 > Driven by [ANALYSIS.md](./ANALYSIS.md). Revision 2 — incorporates the
 > empirical verification sweep (S3 ground truth, pre-2021 eval testing,
 > clone checks, codebase impact scan) and a three-judge design review.

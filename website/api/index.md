@@ -10,8 +10,9 @@ A public instance is available for testing and light usage:
 - **API Docs:** [nxv.urandom.io/docs](https://nxv.urandom.io/docs)
 - **API Base:** `https://nxv.urandom.io/api/v1`
 
-::: tip Try it now You can use the public API directly without setting up your
-own server:
+::: tip Try it now
+
+You can use the public API directly without setting up your own server:
 
 ```bash
 curl "https://nxv.urandom.io/api/v1/search?q=python&limit=5"
@@ -63,19 +64,23 @@ GET /api/v1/search
 
 **Query Parameters:**
 
-| Parameter | Type    | Description                     |
-| --------- | ------- | ------------------------------- |
-| `q`       | string  | Search query (required)         |
-| `version` | string  | Version filter (prefix match)   |
-| `exact`   | boolean | Exact name match                |
-| `license` | string  | License filter                  |
-| `sort`    | string  | Sort order: date, version, name |
-| `reverse` | boolean | Reverse sort                    |
-| `limit`   | integer | Max results (default: 50)       |
-| `offset`  | integer | Results to skip (default: 0)    |
+| Parameter | Type    | Description                              |
+| --------- | ------- | ---------------------------------------- |
+| `q`       | string  | Search query (required)                  |
+| `version` | string  | Version filter (prefix match)            |
+| `exact`   | boolean | Exact name match                         |
+| `license` | string  | License filter                           |
+| `sort`    | string  | Sort order: date, version, name          |
+| `reverse` | boolean | Reverse sort                             |
+| `limit`   | integer | Max results (default: 50, capped at 100) |
+| `offset`  | integer | Results to skip (default: 0)             |
 
-::: tip Description Search Description search uses a separate endpoint:
-`GET /api/v1/search/description?q=<query>&limit=50&offset=0` :::
+::: tip Description Search
+
+Description search uses a separate endpoint:
+`GET /api/v1/search/description?q=<query>&limit=50&offset=0`
+
+:::
 
 **Example:**
 
@@ -186,16 +191,30 @@ GET /api/v1/stats
 ```json
 {
   "data": {
-    "total_ranges": 2800000,
-    "unique_names": 95000,
-    "unique_versions": 450000,
-    "oldest_commit_date": "2017-01-01T00:00:00Z",
-    "newest_commit_date": "2024-01-15T00:00:00Z",
+    "total_ranges": 1751848,
+    "unique_names": 137204,
+    "unique_versions": 291563,
+    "oldest_commit_date": "2016-09-28T00:00:00Z",
+    "newest_commit_date": "2026-06-11T00:00:00Z",
     "last_indexed_commit": "abc123...",
-    "last_indexed_date": "2024-01-15T00:00:00Z"
+    "last_indexed_date": "2026-06-11T00:00:00Z",
+    "channels": [
+      {
+        "channel": "nixpkgs-unstable",
+        "releases_ingested": 4127,
+        "releases_pending": 0,
+        "releases_failed": 23,
+        "releases_skipped": 0,
+        "newest_release": "nixpkgs-26.11pre1014844.b503dde36150",
+        "newest_release_date": "2026-06-11T00:00:00Z"
+      }
+    ]
   }
 }
 ```
+
+The `channels` array reports per-channel snapshot ingestion coverage (schema v4
+indexes); it is omitted for older indexes.
 
 ### Health Check
 
@@ -208,7 +227,7 @@ GET /api/v1/health
 ```json
 {
   "status": "ok",
-  "version": "0.1.6",
+  "version": "0.3.0",
   "index_commit": "abc123..."
 }
 ```
@@ -256,6 +275,8 @@ Interactive API documentation is available at:
 ```
 http://localhost:8080/docs
 ```
+
+The raw OpenAPI specification is served at `/openapi.json`.
 
 ## CORS
 

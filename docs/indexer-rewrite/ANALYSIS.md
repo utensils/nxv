@@ -1,5 +1,10 @@
 # nxv Indexer: Root-Cause Analysis & Rewrite Strategy
 
+> **Status: complete** — the rewrite this analysis drove shipped in nxv 0.3.0
+> (index schema v4, released 2026-06-11); issues #5, #21, and #23 are fixed
+> and closed. Historical artifact; "current" below means the pre-rewrite
+> git-walking indexer.
+
 > Synthesis of six parallel investigations (current architecture, OOM-branch
 > post-mortems, recursive-indexing branch, external landscape research, and
 > production DB forensics), 2026-06-09. This document is the source of truth

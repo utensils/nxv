@@ -3,156 +3,110 @@
 Complete documentation for nxv indexer commands. These commands are only
 available when nxv is built with the `indexer` feature.
 
-::: warning Feature-Gated These commands require `nxv-indexer` or building with
-`--features indexer`. Most users should use `nxv update` to download the
-pre-built index instead. :::
+::: warning Feature-Gated
+
+These commands require `nxv-indexer` or building with `--features indexer`. Most
+users should use `nxv update` to download the pre-built index instead.
+
+:::
 
 ## index
 
-Build the package index from a local nixpkgs repository.
+Build the package index from nixpkgs channel-release snapshots
+(releases.nixos.org). No nixpkgs checkout is needed; `nix` is only required for
+`--backfill-evals` and `--head-eval`.
 
 ```bash
-nxv index --nixpkgs-path <PATH> [OPTIONS]
+nxv index [OPTIONS]
 ```
 
-::: tip Verbose Logging Use global `-v` for debug logging (`nxv -v index ...`).
-The `-v` flag must come before the subcommand. :::
+::: tip Verbose Logging
+
+Use global `-v` for debug logging (`nxv -v index ...`). The `-v` flag must come
+before the subcommand.
+
+:::
 
 ### Options
 
-| Flag                        | Default    | Description                                       |
-| --------------------------- | ---------- | ------------------------------------------------- |
-| `--nixpkgs-path <PATH>`     | (required) | Path to local nixpkgs clone                       |
-| `--full`                    | `false`    | Force full rebuild, ignoring checkpoints          |
-| `--checkpoint-interval <N>` | `100`      | Commits between checkpoint saves                  |
-| `--systems <SYSTEMS>`       | all 4      | Comma-separated systems to evaluate               |
-| `--since <DATE>`            | -          | Only process commits after this date (YYYY-MM-DD) |
-| `--until <DATE>`            | -          | Only process commits before this date             |
-| `--max-commits <N>`         | -          | Limit total commits processed                     |
+| Flag                   | Default     | Description                                                                     |
+| ---------------------- | ----------- | ------------------------------------------------------------------------------- |
+| `--channel <CHANNELS>` | see below   | Channels to ingest (repeatable or comma-separated)                              |
+| `--since <DATE>`       | -           | Only ingest releases dated on/after this date (YYYY-MM-DD)                      |
+| `--until <DATE>`       | -           | Only ingest releases dated on/before this date                                  |
+| `--jobs <N>`           | CPUs, max 4 | Parallel snapshot download/parse workers                                        |
+| `--strict`             | `false`     | Treat monitor warnings (count floors, sentinels, head lag) as fatal             |
+| `--report <PATH>`      | -           | Write the end-of-run coverage report as JSON to this path                       |
+| `--retry-failed`       | `false`     | Retry releases that were parked as failed/skipped                               |
+| `--backfill-evals`     | `false`     | Also ingest the pre-2020 era via `nix-env` over `nixexprs.tar.xz` (needs `nix`) |
+| `--head-eval`          | `false`     | Evaluate nixpkgs master HEAD when channel observations lag (needs `nix`)        |
+| `--full`               | `false`     | Re-queue every known release instead of only new ones                           |
+| `--max-releases <N>`   | -           | Limit the number of releases ingested this run (for testing)                    |
 
-### Default Systems
+### Default Channels
 
-When `--systems` is not specified, these 4 systems are evaluated:
+When `--channel` is not specified, these 2 channels are ingested:
 
-- `x86_64-linux`
-- `aarch64-linux`
-- `x86_64-darwin`
-- `aarch64-darwin`
+- `nixpkgs-unstable` - the historical spine (S3 history back to 2016)
+- `nixos-unstable-small` - the currency channel (typically hours behind master)
+
+Any `nixos-*` channel name is also accepted (e.g. `nixos-24.05`).
 
 ### Examples
 
 ```bash
-# Full index from scratch (24+ hours)
-nxv index --nixpkgs-path ./nixpkgs
+# Full index from scratch (packages.json era; a few hours)
+nxv index
 
-# Resume interrupted indexing (auto-detects checkpoint)
-nxv index --nixpkgs-path ./nixpkgs
+# Also cover the pre-2020 era (requires nix; ~1.5-3 h extra)
+nxv index --backfill-evals
 
-# Index only 2024 commits
-nxv index --nixpkgs-path ./nixpkgs --since 2024-01-01
+# Incremental update (only new releases; the normal case)
+nxv index
 
-# Linux-only indexing
-nxv index --nixpkgs-path ./nixpkgs \
-  --systems x86_64-linux,aarch64-linux
+# CI-style run: gates fatal, head fallback, coverage report
+nxv index --strict --head-eval --report report.json
 
-# Force fresh start
-nxv index --nixpkgs-path ./nixpkgs --full
+# Only one channel, only 2024 releases
+nxv index --channel nixos-unstable-small --since 2024-01-01
+
+# Retry previously failed releases
+nxv index --retry-failed
 ```
+
+### Environment
+
+`NXV_RELEASES_URL` overrides the releases.nixos.org S3 endpoint (tests,
+mirrors).
 
 ---
 
-## backfill
+## backfill and reset (retired)
 
-Update existing database records with missing metadata (source paths, homepages,
-vulnerability info).
-
-```bash
-nxv backfill --nixpkgs-path <PATH> [OPTIONS]
-```
-
-### Options
-
-| Flag                    | Default    | Description                                 |
-| ----------------------- | ---------- | ------------------------------------------- |
-| `--nixpkgs-path <PATH>` | (required) | Path to local nixpkgs clone                 |
-| `--fields <FIELDS>`     | all        | Comma-separated fields to backfill          |
-| `--limit <N>`           | -          | Process only first N packages               |
-| `--dry-run`             | `false`    | Show what would be updated without changes  |
-| `--history`             | `false`    | Use historical mode (slower, comprehensive) |
-
-### Fields
-
-Available fields for `--fields`:
-
-- `source-path` - Path to package source (e.g., `pkgs/tools/foo/default.nix`)
-- `homepage` - Package homepage URL
-- `known-vulnerabilities` - CVE list for vulnerable packages
-
-### Modes
-
-**HEAD mode** (default):
-
-- Extracts from current nixpkgs checkout
-- Fast (~30-60 minutes for full database)
-- May miss renamed/removed packages
-
-**Historical mode** (`--history`):
-
-- Traverses git to each package's original commit
-- Slow (~24+ hours for full database)
-- Complete coverage including removed packages
-
-### Examples
-
-```bash
-# Fast backfill from current checkout
-nxv backfill --nixpkgs-path ./nixpkgs
-
-# Preview what would be updated
-nxv backfill --nixpkgs-path ./nixpkgs --dry-run
-
-# Comprehensive historical backfill
-nxv backfill --nixpkgs-path ./nixpkgs --history
-
-# Only fill source paths
-nxv backfill --nixpkgs-path ./nixpkgs --fields source-path
-
-```
+The git-walking indexer's `nxv backfill` and `nxv reset` subcommands are
+retired: package metadata now comes from channel snapshots (see `nxv index`),
+and the snapshot indexer does not use a local nixpkgs checkout. Both remain as
+hidden stubs that print a deprecation notice.
 
 ---
 
-## reset
+## dedupe
 
-Reset the nixpkgs repository to a known state. Useful after interrupted indexing
-or to prepare for a fresh run.
+Collapse duplicate `(attribute_path, version)` rows in the index. Repairs
+databases bloated by the pre-0.1.5 incremental indexer bug; current-schema
+databases enforce uniqueness and don't need it. Keeps one row per unique pair
+with the earliest `first_commit_*` and the latest `last_commit_*`, then VACUUMs.
 
 ```bash
-nxv reset --nixpkgs-path <PATH> [OPTIONS]
+nxv dedupe [OPTIONS]
 ```
 
 ### Options
 
-| Flag                    | Default         | Description                        |
-| ----------------------- | --------------- | ---------------------------------- |
-| `--nixpkgs-path <PATH>` | (required)      | Path to nixpkgs repository         |
-| `--to <REF>`            | `origin/master` | Git ref to reset to                |
-| `--fetch`               | `false`         | Fetch from origin before resetting |
-
-### Examples
-
-```bash
-# Reset to master (default)
-nxv reset --nixpkgs-path ./nixpkgs
-
-# Fetch latest and reset
-nxv reset --nixpkgs-path ./nixpkgs --fetch
-
-# Reset to specific branch
-nxv reset --nixpkgs-path ./nixpkgs --to origin/nixos-24.05
-
-# Reset to specific commit
-nxv reset --nixpkgs-path ./nixpkgs --to abc123def
-```
+| Flag          | Default | Description                                        |
+| ------------- | ------- | -------------------------------------------------- |
+| `--dry-run`   | `false` | Report what would change without modifying the DB  |
+| `--no-vacuum` | `false` | Skip the trailing VACUUM (faster, DB won't shrink) |
 
 ---
 
@@ -167,21 +121,26 @@ nxv publish [OPTIONS]
 
 ### Options
 
-| Flag                  | Default     | Description                             |
-| --------------------- | ----------- | --------------------------------------- |
-| `--output <DIR>`      | `./publish` | Output directory for artifacts          |
-| `--url-prefix <URL>`  | -           | Base URL for manifest download links    |
-| `--sign`              | `false`     | Sign manifest with minisign             |
-| `--secret-key <PATH>` | -           | Path to minisign secret key             |
-| `--min-version <N>`   | -           | Minimum schema version required to read |
+| Flag                 | Default        | Description                                                           |
+| -------------------- | -------------- | --------------------------------------------------------------------- |
+| `--output <DIR>`     | `./publish`    | Output directory for artifacts                                        |
+| `--url-prefix <URL>` | -              | Base URL for manifest download links                                  |
+| `--sign`             | `false`        | Sign manifest with minisign                                           |
+| `--secret-key <KEY>` | -              | Minisign secret key: file path or raw content (also `NXV_SECRET_KEY`) |
+| `--min-version <N>`  | schema version | Minimum schema version required to read this index                    |
+
+`--min-version` defaults to the database's schema version; set it lower only for
+backward-compatible schema changes. Publishing a schema-4 index with
+`min_version` below 4 is refused.
 
 ### Generated Files
 
-| File            | Size   | Description                                    |
-| --------------- | ------ | ---------------------------------------------- |
-| `index.db.zst`  | ~28 MB | Zstd-compressed SQLite database                |
-| `bloom.bin`     | ~96 KB | Bloom filter for fast negative lookups         |
-| `manifest.json` | ~1 KB  | Metadata with checksums and optional signature |
+| File                    | Size    | Description                            |
+| ----------------------- | ------- | -------------------------------------- |
+| `index.db.zst`          | ~190 MB | Zstd-compressed SQLite database        |
+| `bloom.bin`             | ~330 KB | Bloom filter for fast negative lookups |
+| `manifest.json`         | ~1 KB   | Metadata with checksums                |
+| `manifest.json.minisig` | ~1 KB   | minisign signature (when `--sign`)     |
 
 ### Examples
 
@@ -204,20 +163,25 @@ nxv publish --output ./publish \
 ```json
 {
   "version": 1,
-  "schema_version": 4,
-  "database": {
+  "min_version": 4,
+  "latest_commit": "b503dde361500433ca25a32e8f4d218bf58fb659",
+  "latest_commit_date": "2026-06-11T20:00:47Z",
+  "full_index": {
     "url": "https://example.com/index.db.zst",
-    "sha256": "abc123...",
-    "size": 29000000
+    "size_bytes": 194414052,
+    "sha256": "abc123..."
   },
   "bloom_filter": {
     "url": "https://example.com/bloom.bin",
-    "sha256": "def456...",
-    "size": 98304
+    "size_bytes": 338595,
+    "sha256": "def456..."
   },
-  "signature": "untrusted comment: ...\nRWTxxxxxxxxxx..."
+  "deltas": []
 }
 ```
+
+The signature is not embedded in the manifest — it's written alongside it as
+`manifest.json.minisig`.
 
 ---
 
