@@ -428,16 +428,25 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
             eprintln!("{e}");
             if !args.no_self_update {
                 eprintln!();
-                let _ = self_update::run(self_update::SelfUpdateOptions {
+                match self_update::run(self_update::SelfUpdateOptions {
                     check: false,
                     force: false,
                     version: None,
                     connect_timeout_secs: cli.api_timeout,
                     show_progress,
                     quiet: cli.quiet,
-                });
-                eprintln!();
-                eprintln!("If the binary was updated, re-run `nxv update` to fetch the index.");
+                }) {
+                    Ok(()) => {
+                        eprintln!();
+                        eprintln!(
+                            "If the binary was updated, re-run `nxv update` to fetch the index."
+                        );
+                    }
+                    Err(update_err) => {
+                        eprintln!("Self-update failed: {update_err}");
+                        eprintln!("Upgrade nxv manually, then re-run `nxv update`.");
+                    }
+                }
             }
             return Err(e.into());
         }

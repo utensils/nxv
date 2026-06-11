@@ -58,17 +58,6 @@ pub enum ReleaseStatus {
 }
 
 impl ReleaseStatus {
-    // Symmetric with from_str; consumed by stats display.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ReleaseStatus::Pending => "pending",
-            ReleaseStatus::Ingested => "ingested",
-            ReleaseStatus::Failed => "failed",
-            ReleaseStatus::Skipped => "skipped",
-        }
-    }
-
     pub fn from_str(s: &str) -> Self {
         match s {
             "ingested" => ReleaseStatus::Ingested,
@@ -187,7 +176,11 @@ impl Database {
             WHERE status = 'pending'
                OR (status = 'failed'
                    AND attempts < ?1
-                   AND (?2 - COALESCE(last_attempt_at, 0)) > (?3 << MIN(attempts, 16)))
+                   -- attempts is bumped at attempt START, so a once-failed row
+                   -- has attempts = 1 and should wait exactly the base delay:
+                   -- shift by attempts - 1 (MAX-guarded; SQLite's << misbehaves
+                   -- on negative shift counts).
+                   AND (?2 - COALESCE(last_attempt_at, 0)) > (?3 << MIN(MAX(attempts - 1, 0), 16)))
                OR (?4 AND status IN ('failed', 'skipped'))
             ORDER BY release_date ASC
             "#
@@ -448,6 +441,48 @@ mod tests {
         // But --retry-failed resurrects it.
         let work = db.release_worklist(true).unwrap();
         assert_eq!(work.len(), 2);
+    }
+
+    #[test]
+    fn test_first_retry_waits_exactly_the_base_delay() {
+        let (_dir, db) = open_test_db();
+        db.insert_release_pending(
+            "nixpkgs-unstable",
+            "release-a",
+            "a",
+            None,
+            date(1_000),
+            ReleaseSource::PackagesJson,
+        )
+        .unwrap();
+        let id = db.release_worklist(false).unwrap()[0].id;
+        db.mark_release_attempt(id).unwrap();
+        db.mark_release_failed(id, "boom").unwrap();
+
+        let set_elapsed = |secs: i64| {
+            db.conn
+                .execute(
+                    "UPDATE releases SET last_attempt_at = ? WHERE id = ?",
+                    rusqlite::params![Utc::now().timestamp() - secs, id],
+                )
+                .unwrap();
+        };
+
+        // Just under the 1h base delay: still backing off.
+        set_elapsed(RETRY_BASE_SECS - 100);
+        assert!(
+            db.release_worklist(false).unwrap().is_empty(),
+            "first retry must not fire before the base delay"
+        );
+
+        // Just past it: eligible again (regression: the shift used `attempts`
+        // instead of `attempts - 1`, doubling every delay).
+        set_elapsed(RETRY_BASE_SECS + 100);
+        assert_eq!(
+            db.release_worklist(false).unwrap().len(),
+            1,
+            "first retry must fire after the base delay, not 2x it"
+        );
     }
 
     #[test]
