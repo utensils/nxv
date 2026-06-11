@@ -156,6 +156,13 @@ impl S3Client {
             .user_agent(format!("nxv-indexer/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300))
+            // S3 closes idle keep-alive connections after ~20s; reqwest's
+            // default pool idle timeout (90s) happily reuses them, and in
+            // the eval era a worker's connections sit idle for the full
+            // 60-120s nix-env run — producing "response body error" failures
+            // mid-download (observed at ~2.6% of eval-era releases). Keep
+            // the pool fresher than S3's idle limit.
+            .pool_idle_timeout(Duration::from_secs(15))
             .build()?;
         Ok(Self {
             client,
@@ -195,17 +202,31 @@ impl S3Client {
     }
 
     /// Stream a URL to a file on disk (used for nixexprs/HEAD tarballs).
+    ///
+    /// The body copy is retried once: `get_with_retry` covers request-level
+    /// failures, but a connection can still die mid-body (stale keep-alive,
+    /// transient reset) after a 200.
     pub fn download_to_file(&self, url: &str, dest: &std::path::Path) -> Result<()> {
-        let mut resp = self.get_with_retry(url)?;
-        if !resp.status().is_success() {
-            return Err(NxvError::NetworkMessage(format!(
-                "download failed: HTTP {} from {url}",
-                resp.status()
-            )));
+        let mut last_err: Option<NxvError> = None;
+        for attempt in 0..2 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(HTTP_BASE_DELAY_MS));
+            }
+            let mut resp = self.get_with_retry(url)?;
+            if !resp.status().is_success() {
+                return Err(NxvError::NetworkMessage(format!(
+                    "download failed: HTTP {} from {url}",
+                    resp.status()
+                )));
+            }
+            let mut file = std::fs::File::create(dest)?;
+            match std::io::copy(&mut resp, &mut file) {
+                Ok(_) => return Ok(()),
+                Err(e) => last_err = Some(NxvError::Io(e)),
+            }
         }
-        let mut file = std::fs::File::create(dest)?;
-        std::io::copy(&mut resp, &mut file)?;
-        Ok(())
+        Err(last_err
+            .unwrap_or_else(|| NxvError::NetworkMessage(format!("download of {url} failed"))))
     }
 
     /// GET a URL with retry on transport errors and 5xx. Returns the final
