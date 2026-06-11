@@ -208,11 +208,17 @@ pub fn evaluate_release_gate(
         ));
     }
 
-    // 2. Rolling baseline (same channel AND same source era, so the
-    // 2020-03-27 era boundary never trips it). max() over the window keeps
-    // the baseline from ratcheting down if a shrunken release slips through.
-    let recent =
-        db.recent_ingested_attr_counts(&release.channel, release.source, BASELINE_WINDOW)?;
+    // 2. Rolling baseline: same channel, same source era (so the 2020-03-27
+    // era boundary never trips it), and only releases dated BEFORE this one
+    // (so backfilling history is never held to a newer, larger baseline).
+    // max() over the window keeps the baseline from ratcheting down if a
+    // shrunken release slips through.
+    let recent = db.recent_ingested_attr_counts(
+        &release.channel,
+        release.source,
+        BASELINE_WINDOW,
+        release.release_date,
+    )?;
     if let Some(&baseline) = recent.iter().max() {
         let relative_floor = (baseline as f64 * BASELINE_FRACTION) as i64;
         if (entries.len() as i64) < relative_floor {
@@ -585,6 +591,42 @@ mod tests {
             evaluate_release_gate(&db, &rel, &entries, None, &builtin_sentinels(&[])).unwrap();
         assert!(!gate.passed());
         assert!(gate.failures.iter().any(|f| f.contains("rolling baseline")));
+    }
+
+    #[test]
+    fn test_rolling_baseline_ignores_newer_releases_when_backfilling() {
+        let dir = tempdir().unwrap();
+        let mut db = Database::open(dir.path().join("t.db")).unwrap();
+
+        // A modern release (145k attrs) is already ingested — the state the
+        // first full rebuild started from.
+        db.insert_release_pending(
+            "nixpkgs-unstable",
+            "release-modern",
+            &"e".repeat(40),
+            None,
+            Utc.timestamp_opt(T_2026, 0).unwrap(),
+            ReleaseSource::PackagesJson,
+        )
+        .unwrap();
+        let id = db.release_worklist(false).unwrap()[0].id;
+        db.commit_flush_group(&[], &[(id, 145_000)]).unwrap();
+
+        // Backfilling a 2021 release with a legitimately smaller package
+        // set must NOT be held to the 2026 baseline.
+        let rel = release(
+            "nixpkgs-unstable",
+            ReleaseSource::PackagesJson,
+            1_622_000_000, // 2021-05
+        );
+        let entries = base_entries(69_000);
+        let gate =
+            evaluate_release_gate(&db, &rel, &entries, None, &builtin_sentinels(&[])).unwrap();
+        assert!(
+            gate.passed(),
+            "backfilled history must only be compared against earlier releases; failures: {:?}",
+            gate.failures
+        );
     }
 
     #[test]

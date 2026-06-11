@@ -272,24 +272,31 @@ impl Database {
         }
     }
 
-    /// attr_counts of the most recent `n` ingested releases of a channel
-    /// restricted to one source era — the monitor's rolling baseline.
+    /// attr_counts of the `n` ingested releases of a channel+era closest
+    /// BEFORE `before` — the monitor's rolling baseline.
+    ///
+    /// The date bound is what makes backfilling safe: a 2020 release must be
+    /// compared against its chronological neighbors, not against the newest
+    /// ingested data (the first full rebuild failed 2,634 perfectly good
+    /// historical releases by holding them to a 2026-sized baseline).
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn recent_ingested_attr_counts(
         &self,
         channel: &str,
         source: ReleaseSource,
         n: usize,
+        before: DateTime<Utc>,
     ) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT attr_count FROM releases
             WHERE status = 'ingested' AND channel = ? AND source = ? AND attr_count IS NOT NULL
+              AND release_date < ?
             ORDER BY release_date DESC LIMIT ?
             "#,
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![channel, source.as_str(), n as i64],
+            rusqlite::params![channel, source.as_str(), before.timestamp(), n as i64],
             |row| row.get::<_, i64>(0),
         )?;
         let mut out = Vec::new();
@@ -566,8 +573,24 @@ mod tests {
         }
 
         let counts = db
-            .recent_ingested_attr_counts("nixpkgs-unstable", ReleaseSource::PackagesJson, 10)
+            .recent_ingested_attr_counts(
+                "nixpkgs-unstable",
+                ReleaseSource::PackagesJson,
+                10,
+                date(10_000),
+            )
             .unwrap();
         assert_eq!(counts, vec![100]);
+
+        // The date bound: nothing ingested before the very first release.
+        let counts = db
+            .recent_ingested_attr_counts(
+                "nixpkgs-unstable",
+                ReleaseSource::PackagesJson,
+                10,
+                date(1_000),
+            )
+            .unwrap();
+        assert!(counts.is_empty());
     }
 }
