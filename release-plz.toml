@@ -1,0 +1,22 @@
+# release-plz drives the release PR (version bump + CHANGELOG) and the vX.Y.Z
+# tag ONLY. Everything downstream — GitHub release with binaries, crates.io,
+# Docker, FlakeHub — stays in the tag-triggered release.yml, so those two
+# features are deliberately disabled here.
+
+[workspace]
+# release.yml publishes to crates.io on tag push; release-plz still creates
+# the git tag with publishing disabled.
+publish = false
+
+# release.yml creates the GitHub release (softprops/action-gh-release) and
+# attaches the static binaries + SHA256SUMS.
+git_release_enable = false
+
+# On 0.x versions release-plz bumps only the patch for feat: commits by
+# default. This repo treats 0.x minors as feature releases (0.1 -> 0.2 were
+# feature bumps), so keep that convention.
+features_always_increment_minor = true
+
+# nxv is a CLI; the library target is an implementation detail, not a semver
+# contract worth a cargo-semver-checks baseline build on every release PR.
+semver_check = false

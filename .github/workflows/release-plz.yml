@@ -1,0 +1,82 @@
+name: Release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # Creates/updates the "chore: release vX.Y.Z" PR (version bump + CHANGELOG).
+  #
+  # Both jobs mint a GitHub App token instead of using GITHUB_TOKEN: events
+  # created with the default token never trigger other workflows (GitHub's
+  # recursion guard), so CI would not run on the release PR and the tag push
+  # would not trigger release.yml.
+  release-plz-pr:
+    name: Release PR
+    if: github.repository_owner == 'utensils'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # After the release PR merges, creates and pushes the vX.Y.Z tag, which
+  # triggers release.yml (binaries, GitHub release, crates.io, Docker) and
+  # flakehub-publish-tagged.yml. publish + git_release are disabled in
+  # release-plz.toml, so this job only tags.
+  #
+  # Deliberately NO concurrency group: cancelling a release mid-flight can
+  # skip it entirely (release-plz docs).
+  release-plz-release:
+    name: Release (tag)
+    if: github.repository_owner == 'utensils'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
