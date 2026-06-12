@@ -101,6 +101,9 @@
                     || (builtins.match ".*/frontend/fonts$" path) != null
                     || (builtins.match ".*/keys$" path) != null
                   );
+                # The agent-skill template is embedded via include_str! and
+                # must survive the Cargo source filter.
+                isSkillTemplate = (builtins.match ".*/src/skill/SKILL\.md$" path) != null;
                 isFrontendAsset =
                   type == "regular"
                   && (
@@ -114,6 +117,7 @@
               in
               (craneLib.filterCargoSources path type)
               || isFrontendDir
+              || isSkillTemplate
               || (isKey && notNodeModules)
               || (isFrontendAsset && notNodeModules);
           };
