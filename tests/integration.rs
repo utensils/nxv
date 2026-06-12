@@ -3512,12 +3512,7 @@ fn test_skill_uninstall_keeps_non_empty_dir() {
 fn test_skill_uninstall_nothing_installed() {
     let proj = tempdir().unwrap();
     nxv()
-        .args([
-            "skill",
-            "uninstall",
-            "--dir",
-            proj.path().to_str().unwrap(),
-        ])
+        .args(["skill", "uninstall", "--dir", proj.path().to_str().unwrap()])
         .assert()
         .success()
         .stderr(predicate::str::contains("No installed nxv skill"));
