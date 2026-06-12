@@ -338,6 +338,12 @@ agents (the generic cross-agent `.agents/skills` directory)
 | `--dir <PATH>` | Project directory to operate on (implies `--project`)     |
 | `--all`        | Install for all supported agents (install only)           |
 
+**List options:**
+
+| Flag      | Description                                |
+| --------- | ------------------------------------------ |
+| `--ascii` | Use ASCII table borders instead of Unicode |
+
 **Examples:**
 
 ```bash

@@ -189,7 +189,7 @@ The server bundles:
 
 ### HTTP Endpoints
 
-All paths are under `/api/v1`. Wrap responses always look like `{ "data": ..., "meta": {...} }` for paginated lists, `{ "data": ... }` for single items.
+All paths are under `/api/v1`. Wrapped responses always look like `{ "data": ..., "meta": {...} }` for paginated lists, `{ "data": ... }` for single items.
 
 | Method | Path                                                | Purpose                              |
 | ------ | --------------------------------------------------- | ------------------------------------ |
