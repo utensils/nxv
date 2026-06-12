@@ -59,6 +59,13 @@ The `agents` target is the generic cross-agent directory from the Agent Skills
 standard — most tools read it, so it also serves as the fallback when no agents
 are detected.
 
+The table shows each agent's primary directory — the one
+`nxv skill install <agent>` writes to. Several agents read additional locations:
+Copilot reads `.github/skills/`, `.claude/skills/`, or `.agents/skills/` in a
+repository, and Pi reads `.agents/skills/` as well as `.pi/skills/`. That is why
+the default project install writes only the `.claude` + `.agents` pair: every
+supported agent picks up one of the two.
+
 To remove installed skills:
 
 ```bash

@@ -256,9 +256,11 @@ Supported agents and where the skill lands (`<dir>/nxv/SKILL.md`):
 | `goose`    | `~/.config/goose/skills/` | `.agents/skills/` |
 | `agents`   | `~/.agents/skills/`       | `.agents/skills/` |
 
+The table shows each agent's primary directory — the one `nxv skill install <agent>` writes to. Several agents read additional locations: Copilot reads `.github/skills/`, `.claude/skills/`, or `.agents/skills/` in a repository, and Pi reads `.agents/skills/` as well as `.pi/skills/`.
+
 Semantics:
 
-- With no agent arguments, a user-wide install targets the agents detected on the machine (their config dir exists), falling back to the generic `agents` directory if none are found. A project install (`--project` / `--dir`) defaults to the `.claude` + `.agents` pair, which every agent above reads.
+- With no agent arguments, a user-wide install targets the agents detected on the machine (their config dir exists), falling back to the generic `agents` directory if none are found. A project install (`--project` / `--dir`) defaults to the `.claude` + `.agents` pair — per the read paths above, every supported agent picks up one of the two.
 - Agents sharing a directory (e.g. codex/cursor/gemini at project level) are deduplicated into a single write.
 - Install overwrites `skills/nxv/SKILL.md` unconditionally and never touches other files; uninstall removes only that file (and the `nxv/` directory if it is then empty).
 

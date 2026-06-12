@@ -273,7 +273,12 @@ pub fn cmd_install(cli: &Cli, args: &SkillInstallArgs) -> Result<()> {
                     detected
                 }
             }
-            // .claude + .agents covers every supported agent at project level.
+            // The pair covers every supported agent at project level: the
+            // table above holds each agent's PRIMARY directory, but Copilot
+            // also reads .claude/skills and .agents/skills in a repository
+            // (docs.github.com "about-agent-skills") and Pi also reads
+            // .agents/skills (pi-mono docs/skills.md); everything else
+            // already points at .claude or .agents.
             Scope::Project(_) => vec![Agent::Claude, Agent::Agents],
         }
     };
