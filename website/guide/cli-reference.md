@@ -139,8 +139,10 @@ index.
 | Homebrew        | Leaves binary alone; prints `brew upgrade nxv` (or reinstall)      |
 
 Set `GITHUB_TOKEN` to avoid unauthenticated rate limits when calling the GitHub
-API. If the binary check fails (e.g., network or rate limit), `nxv update`
-prints a warning but still reports the index update as successful.
+API. If GitHub rejects the token (401 — e.g. a stale token exported by a dev
+shell), the check is retried without it. If the binary check fails (e.g.,
+network or rate limit), `nxv update` prints a warning but still reports the
+index update as successful.
 
 **Examples:**
 
