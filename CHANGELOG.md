@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/utensils/nxv/compare/v0.3.0...v0.4.0) - 2026-06-12
+
+### Added
+
+- *(skill)* add nxv skill subcommand (list/install/uninstall/show)
+
+### Fixed
+
+- *(flake)* let the embedded skill template through the crane source filter
+- *(update)* retry self-update check without a rejected GITHUB_TOKEN
+
+### Other
+
+- *(skill)* address copilot review (list --ascii docs, grammar nit)
+- *(skill)* ground the default project-pair claim in agents' read paths
+- *(skill)* rustfmt integration tests
+- *(skill)* document nxv skill across README, AGENTS.md, and website
+- *(skill)* add integration tests and ship generated skill copies in-repo
+- sweep all docs for post-v4/0.3.0 accuracy
+
 ## [0.3.0](https://github.com/utensils/nxv/compare/v0.2.1...v0.3.0) - 2026-06-11
 
 ### Added
