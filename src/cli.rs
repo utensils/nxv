@@ -3,6 +3,7 @@
 use crate::output::OutputFormat;
 use crate::paths;
 use crate::search::SortOrder;
+use crate::skill::Agent;
 use crate::version;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
@@ -101,6 +102,16 @@ pub enum Commands {
     /// Generate shell completions.
     Completions(CompletionsArgs),
 
+    /// Install the nxv agent skill for AI coding agents.
+    ///
+    /// Generates a SKILL.md following the Agent Skills standard
+    /// (https://agentskills.io) and installs it where each supported agent
+    /// looks: Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot
+    /// CLI, Cursor, Gemini CLI, Amp, and Goose, plus the generic
+    /// cross-agent `.agents/skills` directory. Supports user-wide
+    /// (default) and project-level (--project) installs.
+    Skill(SkillArgs),
+
     /// Complete package names (for shell completion scripts).
     #[command(hide = true)]
     CompletePackage(CompletePackageArgs),
@@ -123,6 +134,86 @@ impl CompletionsArgs {
         // Silently ignore broken pipe errors (e.g., when piped to head or closed early)
         let _ = crate::completions::generate_completions(self.shell, &mut std::io::stdout());
     }
+}
+
+/// Arguments for the skill command.
+#[derive(Parser, Debug)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub command: SkillCommands,
+}
+
+/// Skill subcommands.
+#[derive(Subcommand, Debug)]
+pub enum SkillCommands {
+    /// List supported agents, their skill paths, and install status.
+    List(SkillListArgs),
+
+    /// Install the nxv skill (user-wide by default, --project for project-level).
+    ///
+    /// With no agent arguments, a user-wide install targets the agents
+    /// detected on this machine (their config directory exists), falling
+    /// back to the generic `agents` directory when none are found. A
+    /// project install defaults to the `.claude` + `.agents` pair, which
+    /// every supported agent reads.
+    Install(SkillInstallArgs),
+
+    /// Remove installed nxv skills.
+    ///
+    /// With no agent arguments, removes the skill from every known agent
+    /// path in the selected scope. Only `nxv/SKILL.md` is deleted; the
+    /// directory is kept if it contains other files.
+    Uninstall(SkillUninstallArgs),
+
+    /// Print the generated SKILL.md to stdout.
+    Show,
+}
+
+/// Arguments for `skill list`.
+#[derive(Parser, Debug)]
+pub struct SkillListArgs {
+    /// Use ASCII table borders instead of Unicode.
+    #[arg(long)]
+    pub ascii: bool,
+}
+
+/// Arguments for `skill install`.
+#[derive(Parser, Debug)]
+pub struct SkillInstallArgs {
+    /// Agents to install for (default: detected agents, or claude + agents
+    /// for project installs).
+    #[arg(value_enum)]
+    pub agents: Vec<Agent>,
+
+    /// Install into project-level skill directories under the current
+    /// directory instead of user-wide.
+    #[arg(long)]
+    pub project: bool,
+
+    /// Project directory to install into (implies --project).
+    #[arg(long, value_name = "PATH")]
+    pub dir: Option<PathBuf>,
+
+    /// Install for all supported agents regardless of detection.
+    #[arg(long, conflicts_with = "agents")]
+    pub all: bool,
+}
+
+/// Arguments for `skill uninstall`.
+#[derive(Parser, Debug)]
+pub struct SkillUninstallArgs {
+    /// Agents to uninstall from (default: every agent path in scope).
+    #[arg(value_enum)]
+    pub agents: Vec<Agent>,
+
+    /// Remove from project-level skill directories under the current
+    /// directory instead of user-wide.
+    #[arg(long)]
+    pub project: bool,
+
+    /// Project directory to uninstall from (implies --project).
+    #[arg(long, value_name = "PATH")]
+    pub dir: Option<PathBuf>,
 }
 
 /// Arguments for package name completion (used by shell completion scripts).
@@ -720,6 +811,55 @@ mod tests {
     fn test_quiet_conflicts_with_verbose() {
         let result = Cli::try_parse_from(["nxv", "-v", "-q", "stats"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skill_install_parsing() {
+        let args = Cli::try_parse_from(["nxv", "skill", "install", "claude", "codex", "--project"])
+            .unwrap();
+        match args.command {
+            Commands::Skill(skill) => match skill.command {
+                SkillCommands::Install(install) => {
+                    assert_eq!(install.agents, vec![Agent::Claude, Agent::Codex]);
+                    assert!(install.project);
+                    assert!(install.dir.is_none());
+                    assert!(!install.all);
+                }
+                _ => panic!("Expected Install subcommand"),
+            },
+            _ => panic!("Expected Skill command"),
+        }
+    }
+
+    #[test]
+    fn test_skill_install_all_conflicts_with_agents() {
+        let result = Cli::try_parse_from(["nxv", "skill", "install", "claude", "--all"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skill_uninstall_dir() {
+        let args =
+            Cli::try_parse_from(["nxv", "skill", "uninstall", "--dir", "/tmp/proj"]).unwrap();
+        match args.command {
+            Commands::Skill(skill) => match skill.command {
+                SkillCommands::Uninstall(uninstall) => {
+                    assert!(uninstall.agents.is_empty());
+                    assert_eq!(uninstall.dir, Some(PathBuf::from("/tmp/proj")));
+                }
+                _ => panic!("Expected Uninstall subcommand"),
+            },
+            _ => panic!("Expected Skill command"),
+        }
+    }
+
+    #[test]
+    fn test_skill_show_parsing() {
+        let args = Cli::try_parse_from(["nxv", "skill", "show"]).unwrap();
+        match args.command {
+            Commands::Skill(skill) => assert!(matches!(skill.command, SkillCommands::Show)),
+            _ => panic!("Expected Skill command"),
+        }
     }
 
     #[cfg(feature = "indexer")]

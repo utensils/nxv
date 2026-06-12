@@ -12,6 +12,7 @@ mod paths;
 mod remote;
 mod search;
 mod self_update;
+mod skill;
 pub mod version;
 
 #[cfg(feature = "indexer")]
@@ -73,6 +74,7 @@ fn main() {
             Ok(())
         }
         Commands::CompletePackage(args) => cmd_complete_package(&cli, args),
+        Commands::Skill(args) => cmd_skill(&cli, args),
         #[cfg(feature = "indexer")]
         Commands::Index(args) => cmd_index(&cli, args),
         #[cfg(feature = "indexer")]
@@ -955,6 +957,22 @@ fn cmd_complete_package(cli: &Cli, args: &cli::CompletePackageArgs) -> Result<()
     }
 
     Ok(())
+}
+
+/// Dispatch the `nxv skill` subcommands (list/install/uninstall/show).
+///
+/// Installs the embedded SKILL.md (Agent Skills standard) into the skills
+/// directories of supported AI coding agents, user-wide or per project.
+fn cmd_skill(cli: &Cli, args: &cli::SkillArgs) -> Result<()> {
+    match &args.command {
+        cli::SkillCommands::List(list_args) => skill::cmd_list(cli, list_args),
+        cli::SkillCommands::Install(install_args) => skill::cmd_install(cli, install_args),
+        cli::SkillCommands::Uninstall(uninstall_args) => skill::cmd_uninstall(cli, uninstall_args),
+        cli::SkillCommands::Show => {
+            print!("{}", skill::SKILL_MD);
+            Ok(())
+        }
+    }
 }
 
 /// Display version history for a package in one of several formats.
