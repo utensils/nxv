@@ -3318,3 +3318,225 @@ fn test_end_to_end_signed_manifest_verification() {
         "Database should NOT be created when signature verification fails"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `nxv skill` tests
+// ---------------------------------------------------------------------------
+
+/// The embedded skill template, as installed by `nxv skill install`.
+const SKILL_TEMPLATE: &str = include_str!("../src/skill/SKILL.md");
+
+#[test]
+fn test_skill_show_prints_template() {
+    nxv()
+        .args(["skill", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(SKILL_TEMPLATE));
+}
+
+#[test]
+fn test_skill_list_names_agents() {
+    nxv()
+        .args(["skill", "list", "--ascii"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude"))
+        .stdout(predicate::str::contains("copilot"))
+        .stdout(predicate::str::contains("openclaw"));
+}
+
+// User-scope tests override HOME, which `dirs::home_dir()` only honors on
+// unix (Windows resolves the profile dir via the known-folder API). The
+// project-scope tests below cover all platforms.
+#[cfg(unix)]
+#[test]
+fn test_skill_install_user_scope_explicit_agent() {
+    let home = tempdir().unwrap();
+    nxv()
+        .env("HOME", home.path())
+        .args(["skill", "install", "claude"])
+        .assert()
+        .success();
+    let installed = home.path().join(".claude/skills/nxv/SKILL.md");
+    assert_eq!(std::fs::read_to_string(installed).unwrap(), SKILL_TEMPLATE);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_skill_install_defaults_to_detected_agents() {
+    let home = tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".codex")).unwrap();
+    nxv()
+        .env("HOME", home.path())
+        .args(["skill", "install"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(".codex"));
+    assert!(home.path().join(".codex/skills/nxv/SKILL.md").exists());
+    // Undetected agents must not have directories conjured for them.
+    assert!(!home.path().join(".cursor").exists());
+    assert!(!home.path().join(".agents").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_skill_install_falls_back_to_generic_agents_dir() {
+    let home = tempdir().unwrap();
+    nxv()
+        .env("HOME", home.path())
+        .args(["skill", "install"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No agents detected"));
+    assert!(home.path().join(".agents/skills/nxv/SKILL.md").exists());
+}
+
+#[test]
+fn test_skill_install_project_default_pair() {
+    let proj = tempdir().unwrap();
+    nxv()
+        .args(["skill", "install", "--dir", proj.path().to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(proj.path().join(".claude/skills/nxv/SKILL.md").exists());
+    assert!(proj.path().join(".agents/skills/nxv/SKILL.md").exists());
+}
+
+#[test]
+fn test_skill_install_project_copilot_uses_github_dir() {
+    let proj = tempdir().unwrap();
+    nxv()
+        .args([
+            "skill",
+            "install",
+            "copilot",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(proj.path().join(".github/skills/nxv/SKILL.md").exists());
+    assert!(!proj.path().join(".claude").exists());
+}
+
+#[test]
+fn test_skill_install_dedupes_shared_paths() {
+    let proj = tempdir().unwrap();
+    nxv()
+        .args([
+            "skill",
+            "install",
+            "codex",
+            "cursor",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("(codex, cursor)"));
+    assert!(proj.path().join(".agents/skills/nxv/SKILL.md").exists());
+}
+
+#[test]
+fn test_skill_install_overwrites_existing() {
+    let proj = tempdir().unwrap();
+    let target_dir = proj.path().join(".claude/skills/nxv");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(target_dir.join("SKILL.md"), "stale garbage").unwrap();
+    nxv()
+        .args([
+            "skill",
+            "install",
+            "claude",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join("SKILL.md")).unwrap(),
+        SKILL_TEMPLATE
+    );
+}
+
+#[test]
+fn test_skill_uninstall_removes_only_nxv() {
+    let proj = tempdir().unwrap();
+    let dir_arg = proj.path().to_str().unwrap();
+
+    nxv()
+        .args(["skill", "install", "--dir", dir_arg])
+        .assert()
+        .success();
+
+    // A sibling skill must survive the uninstall.
+    let sibling = proj.path().join(".claude/skills/other");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("SKILL.md"), "other skill").unwrap();
+
+    nxv()
+        .args(["skill", "uninstall", "--dir", dir_arg])
+        .assert()
+        .success();
+
+    assert!(!proj.path().join(".claude/skills/nxv").exists());
+    assert!(!proj.path().join(".agents/skills/nxv").exists());
+    assert!(sibling.join("SKILL.md").exists());
+}
+
+#[test]
+fn test_skill_uninstall_keeps_non_empty_dir() {
+    let proj = tempdir().unwrap();
+    let dir_arg = proj.path().to_str().unwrap();
+
+    nxv()
+        .args(["skill", "install", "claude", "--dir", dir_arg])
+        .assert()
+        .success();
+
+    let extra = proj.path().join(".claude/skills/nxv/notes.txt");
+    std::fs::write(&extra, "user notes").unwrap();
+
+    nxv()
+        .args(["skill", "uninstall", "--dir", dir_arg])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Left non-empty directory"));
+
+    assert!(!proj.path().join(".claude/skills/nxv/SKILL.md").exists());
+    assert!(extra.exists());
+}
+
+#[test]
+fn test_skill_uninstall_nothing_installed() {
+    let proj = tempdir().unwrap();
+    nxv()
+        .args([
+            "skill",
+            "uninstall",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No installed nxv skill"));
+}
+
+/// The checked-in skill copies are generated from src/skill/SKILL.md — keep
+/// them byte-identical. Skipped when the copies are absent (the published
+/// crate excludes .claude/ and .agents/).
+#[test]
+fn test_checked_in_skill_copies_match_template() {
+    for rel in [".claude/skills/nxv/SKILL.md", ".agents/skills/nxv/SKILL.md"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk, SKILL_TEMPLATE,
+            "{rel} is stale; regenerate with `cargo run -- skill install claude agents --dir .`"
+        );
+    }
+}
