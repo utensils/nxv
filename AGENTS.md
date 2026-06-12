@@ -193,14 +193,19 @@ A NixOS module is provided for running nxv as a systemd service:
 }
 ```
 
-## Claude Code Skill
+## Agent Skill
 
-The repo ships a Claude Code skill at `.claude/skills/nxv/SKILL.md` that
-teaches Claude (and any agent that consumes the open Agent Skills standard,
-e.g. openclaw) how to drive the nxv CLI and HTTP API. When changing CLI flags,
-adding/removing subcommands, or altering JSON / API response shapes, also
-update the SKILL.md so the skill stays accurate. The user-facing guide lives
-at `website/guide/skill.md`.
+The canonical skill template lives at `src/skill/SKILL.md` — it is embedded
+in the binary and installed by `nxv skill install` for every major AI coding
+agent (Claude Code, Codex, Pi, OpenClaw, Copilot, Cursor, Gemini, Amp,
+Goose; see `src/skill/mod.rs` for the path table). The checked-in copies at
+`.claude/skills/nxv/SKILL.md` and `.agents/skills/nxv/SKILL.md` are
+**generated** — never edit them directly. After editing the template,
+regenerate both with `cargo run -- skill install claude agents --dir .`
+(the `test_checked_in_skill_copies_match_template` integration test enforces
+this). When changing CLI flags, adding/removing subcommands, or altering
+JSON / API response shapes, also update the template so the skill stays
+accurate. The user-facing guide lives at `website/guide/skill.md`.
 
 ## Releasing
 

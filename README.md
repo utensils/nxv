@@ -581,24 +581,24 @@ src/
     └── publisher.rs # Index publishing
 ```
 
-## Claude Code Skill
+## Agent Skill
 
-nxv ships a [Claude Code skill](https://code.claude.com/docs/en/skills) at
-[`.claude/skills/nxv/SKILL.md`](.claude/skills/nxv/SKILL.md) so Claude — and
-agents like [openclaw](https://github.com/utensils/openclaw) — can run nxv
-commands and call the HTTP API on your behalf without extra setup.
+nxv ships an [Agent Skills](https://agentskills.io)-standard skill so AI
+coding agents — Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot
+CLI, Cursor, Gemini CLI, Amp, Goose — can run nxv commands and call the HTTP
+API on your behalf without extra setup. The binary embeds the skill and
+installs it where each agent looks:
 
 ```bash
-# Install for all your projects
-mkdir -p ~/.claude/skills/nxv
-curl -sL https://raw.githubusercontent.com/utensils/nxv/main/.claude/skills/nxv/SKILL.md \
-  -o ~/.claude/skills/nxv/SKILL.md
+nxv skill install              # Install user-wide for detected agents
+nxv skill install --project    # Install into the current project
+nxv skill list                 # Show agents, paths, install status
 ```
 
-Then ask Claude things like *"which nixpkgs commit shipped python 2.7?"* or
-*"give me the `nix shell` command for nodejs 15.14"*. See the
-[skill guide](https://utensils.io/nxv/guide/skill) for installation, agent
-patterns, and JSON shapes.
+Then ask your agent things like *"which nixpkgs commit shipped python 2.7?"*
+or *"give me the `nix shell` command for nodejs 15.14"*. See the
+[skill guide](https://utensils.io/nxv/guide/skill) for the supported agents,
+agent patterns, and JSON shapes.
 
 ## Related Projects
 

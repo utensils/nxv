@@ -306,6 +306,52 @@ nxv completions zsh > ~/.zfunc/_nxv
 nxv completions fish > ~/.config/fish/completions/nxv.fish
 ```
 
+### skill
+
+Generate and install the nxv agent skill (a `SKILL.md` following the
+[Agent Skills](https://agentskills.io) standard) so AI coding agents can drive
+nxv. See the [Agent Skill guide](/guide/skill) for details.
+
+```bash
+nxv skill <list|install|uninstall|show>
+```
+
+**Subcommands:**
+
+| Subcommand              | Description                                            |
+| ----------------------- | ------------------------------------------------------ |
+| `list`                  | List supported agents, skill paths, and install status |
+| `install [AGENTS...]`   | Install the skill (user-wide by default)               |
+| `uninstall [AGENTS...]` | Remove installed skills                                |
+| `show`                  | Print the generated SKILL.md to stdout                 |
+
+**Agents:** claude, codex, pi, openclaw, copilot, cursor, gemini, amp, goose,
+agents (the generic cross-agent `.agents/skills` directory)
+
+**Install/uninstall options:**
+
+| Flag           | Description                                               |
+| -------------- | --------------------------------------------------------- |
+| `--project`    | Use project-level skill directories under the current dir |
+| `--dir <PATH>` | Project directory to operate on (implies `--project`)     |
+| `--all`        | Install for all supported agents (install only)           |
+
+**Examples:**
+
+```bash
+# Install user-wide for every agent detected on this machine
+nxv skill install
+
+# Install into the current project (.claude/skills + .agents/skills)
+nxv skill install --project
+
+# Install for specific agents
+nxv skill install claude codex
+
+# See where the skill is (or would be) installed
+nxv skill list
+```
+
 ## Output Formats
 
 ### table (default)

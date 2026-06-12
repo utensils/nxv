@@ -1,25 +1,74 @@
-# Claude Code Skill
+# Agent Skill
 
-nxv ships a [Claude Code skill](https://code.claude.com/docs/en/skills) that
-lets Claude — and agents like [openclaw](https://github.com/utensils/openclaw) —
-run nxv commands on your behalf without extra setup.
+nxv ships an [Agent Skills](https://agentskills.io)-standard skill that lets AI
+coding agents — Claude Code, OpenAI Codex CLI, Pi, OpenClaw, GitHub Copilot CLI,
+Cursor, Gemini CLI, Amp, Goose, and anything else that reads `SKILL.md` — run
+nxv commands on your behalf without extra setup. The nxv binary embeds the skill
+and installs it for you.
 
 ## What is a skill?
 
-A Claude Code skill is a `SKILL.md` file (with optional supporting files) that
-teaches Claude how to use a tool. When the skill is loaded, Claude knows every
+A skill is a `SKILL.md` file (with optional supporting files) that teaches an
+agent how to use a tool. When the skill is loaded, the agent knows every
 subcommand, flag, JSON output shape, and HTTP endpoint for nxv. It can answer
 questions like "which nixpkgs commit shipped python 2.7?" or "give me the
 `nix shell` command for nodejs 15" by running the right `nxv` invocation (or
 hitting the public API) and interpreting the result.
 
-The skill follows the open [Agent Skills](https://agentskills.io) standard, so
-it works with Claude Code, the Claude Agent SDK, openclaw, and any other tool
-that consumes the same `SKILL.md` format.
-
 ## Installing the skill
 
-### Personal skill (all your projects)
+The `nxv skill` subcommand generates and installs the skill from a single
+embedded template:
+
+```bash
+# Install user-wide for every agent detected on this machine
+nxv skill install
+
+# Install into the current project (.claude/skills + .agents/skills,
+# which every supported agent reads at project level)
+nxv skill install --project
+
+# Install for specific agents only
+nxv skill install claude codex
+
+# Install for every supported agent, detected or not
+nxv skill install --all
+
+# See supported agents, their paths, and what's installed where
+nxv skill list
+```
+
+A user-wide install (the default) targets agents whose config directory exists
+under your home directory. Per agent, the skill lands in
+`<skills dir>/nxv/SKILL.md`:
+
+| Agent      | User-wide                 | Project-level     |
+| ---------- | ------------------------- | ----------------- |
+| `claude`   | `~/.claude/skills/`       | `.claude/skills/` |
+| `codex`    | `~/.codex/skills/`        | `.agents/skills/` |
+| `pi`       | `~/.pi/agent/skills/`     | `.pi/skills/`     |
+| `openclaw` | `~/.openclaw/skills/`     | `.agents/skills/` |
+| `copilot`  | `~/.copilot/skills/`      | `.github/skills/` |
+| `cursor`   | `~/.cursor/skills/`       | `.agents/skills/` |
+| `gemini`   | `~/.gemini/skills/`       | `.agents/skills/` |
+| `amp`      | `~/.config/amp/skills/`   | `.agents/skills/` |
+| `goose`    | `~/.config/goose/skills/` | `.agents/skills/` |
+| `agents`   | `~/.agents/skills/`       | `.agents/skills/` |
+
+The `agents` target is the generic cross-agent directory from the Agent Skills
+standard — most tools read it, so it also serves as the fallback when no agents
+are detected.
+
+To remove installed skills:
+
+```bash
+nxv skill uninstall            # Remove from every user-wide agent path
+nxv skill uninstall --project  # Remove project-level installs
+```
+
+### Manual install (no nxv binary)
+
+Fetch the canonical copy straight from the repository:
 
 ```bash
 mkdir -p ~/.claude/skills/nxv
@@ -27,30 +76,10 @@ curl -sL https://raw.githubusercontent.com/utensils/nxv/main/.claude/skills/nxv/
   -o ~/.claude/skills/nxv/SKILL.md
 ```
 
-This makes the skill available in every Claude Code session on your machine.
-
-### Project-local skill
-
-```bash
-mkdir -p .claude/skills/nxv
-curl -sL https://raw.githubusercontent.com/utensils/nxv/main/.claude/skills/nxv/SKILL.md \
-  -o .claude/skills/nxv/SKILL.md
-```
-
-Only active when you're in that project's directory.
-
-### From this repo (if you cloned nxv)
-
-The skill is already at `.claude/skills/nxv/SKILL.md` in the repo root. Copy it
-wherever you need it:
-
-```bash
-cp .claude/skills/nxv/SKILL.md ~/.claude/skills/nxv/SKILL.md
-```
-
 ## Using the skill
 
-Once installed, you can invoke it directly:
+Once installed, agents that support slash-command invocation can call it
+directly:
 
 ```
 /nxv search python 2.7
@@ -58,8 +87,8 @@ Once installed, you can invoke it directly:
 /nxv history nodejs_15
 ```
 
-Or just ask Claude naturally — it will load the skill automatically when your
-question matches the description:
+Or just ask naturally — the agent loads the skill automatically when your
+question matches its description:
 
 > "Which nixpkgs commit had python 2.7?"
 >
@@ -67,12 +96,12 @@ question matches the description:
 >
 > "When was ruby 2.6 last in nixpkgs?"
 
-You don't need a local index for the skill to be useful — Claude can hit the
+You don't need a local index for the skill to be useful — agents can hit the
 public API at `https://nxv.urandom.io` directly, or you can set
 `NXV_API_URL=https://nxv.urandom.io` in your environment so the CLI uses the
 hosted instance transparently.
 
-## For agents (openclaw and others)
+## For agents
 
 The skill is designed so autonomous agents can extract structured data reliably.
 The `search`, `info`, and `history` subcommands support `--format json`, and
@@ -103,19 +132,17 @@ nxv search nodejs 15 --exact --format json | \
 
 ## Keeping the skill up to date
 
-Pull the latest version any time nxv ships new subcommands, flags, or API
-endpoints:
+The installed skill is byte-identical to the template embedded in your nxv
+binary, so refreshing it is just upgrading nxv and reinstalling:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/utensils/nxv/main/.claude/skills/nxv/SKILL.md \
-  -o ~/.claude/skills/nxv/SKILL.md
+nxv update           # Get the latest nxv (also refreshes the index)
+nxv skill install    # Rewrite the installed skills from the new binary
 ```
-
-The skill file itself contains a self-update reminder at the bottom with this
-same command.
 
 ## Skill source
 
-The canonical skill lives at
-[`.claude/skills/nxv/SKILL.md`](https://github.com/utensils/nxv/blob/main/.claude/skills/nxv/SKILL.md)
-in the repository.
+The canonical template lives at
+[`src/skill/SKILL.md`](https://github.com/utensils/nxv/blob/main/src/skill/SKILL.md)
+in the repository; the checked-in copies under `.claude/skills/` and
+`.agents/skills/` are generated from it.
