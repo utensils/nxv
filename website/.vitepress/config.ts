@@ -65,7 +65,7 @@ export default defineConfig({
         },
         {
           text: 'Integrations',
-          items: [{ text: 'Claude Code Skill', link: '/guide/skill' }],
+          items: [{ text: 'Agent Skill', link: '/guide/skill' }],
         },
       ],
       '/advanced/': [

@@ -426,11 +426,9 @@ pub fn perform_update<P: AsRef<Path>>(
     )?;
 
     match &status {
-        UpdateStatus::UpToDate { commit } => {
-            if show_progress {
-                eprintln!("Index is already up to date (commit {}).", &commit[..7]);
-            }
-        }
+        // No output here: cmd_update reports the UpToDate status to the
+        // user (printing it here too produced a duplicate line).
+        UpdateStatus::UpToDate { .. } => {}
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {
             apply_full_update(
                 manifest_url,

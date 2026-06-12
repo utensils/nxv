@@ -17,6 +17,7 @@ exclude = [
     "docs/",
     ".github/",
     ".claude/",
+    ".agents/",
     "benches/",
     "*.gif",
 ]

@@ -19,6 +19,17 @@ use crate::version;
 const GITHUB_REPO: &str = "utensils/nxv";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 
+/// GitHub API base URL, overridable for tests/mirrors via `NXV_GITHUB_API_BASE`.
+fn github_api_base() -> String {
+    std::env::var("NXV_GITHUB_API_BASE").unwrap_or_else(|_| GITHUB_API_BASE.to_string())
+}
+
+/// Typed marker for a 401 from the GitHub API, so the caller can detect an
+/// invalid `GITHUB_TOKEN` and retry the request unauthenticated.
+#[derive(Debug, thiserror::Error)]
+#[error("GitHub API returned 401 Unauthorized")]
+struct GithubUnauthorized;
+
 // ── GitHub API types ────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -298,30 +309,45 @@ fn replace_binary(_new_binary: &[u8], _exe_path: &Path) -> Result<()> {
 /// on unreachable hosts. We intentionally do **not** set a total-request
 /// timeout: the same client is reused for multi-MB binary downloads, and
 /// the user can always Ctrl+C an unresponsive session.
-fn build_client(connect_timeout_secs: u64) -> Result<reqwest::blocking::Client> {
+///
+/// When `use_env_token` is set, a non-empty `GITHUB_TOKEN` from the
+/// environment is attached as a Bearer token. The returned bool reports
+/// whether a token was actually attached, so the caller can retry
+/// unauthenticated if GitHub rejects it (401) — dev shells often export
+/// stale tokens, and the check works fine anonymously.
+fn build_client(
+    connect_timeout_secs: u64,
+    use_env_token: bool,
+) -> Result<(reqwest::blocking::Client, bool)> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
         "application/vnd.github+json".parse().expect("valid header"),
     );
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+    let mut has_token = false;
+    if use_env_token
+        && let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.trim().is_empty()
+    {
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {token}")
+            format!("Bearer {}", token.trim())
                 .parse()
                 .context("invalid GITHUB_TOKEN")?,
         );
+        has_token = true;
     }
-    reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .user_agent(format!("nxv/{}", version::PKG_VERSION))
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(connect_timeout_secs))
         .build()
-        .context("failed to build HTTP client")
+        .context("failed to build HTTP client")?;
+    Ok((client, has_token))
 }
 
 fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHubRelease> {
-    let url = format!("{GITHUB_API_BASE}/repos/{GITHUB_REPO}/releases/latest");
+    let url = format!("{}/repos/{GITHUB_REPO}/releases/latest", github_api_base());
     let resp = client
         .get(&url)
         .send()
@@ -338,7 +364,10 @@ fn fetch_release_by_tag(client: &reqwest::blocking::Client, tag: &str) -> Result
     } else {
         format!("v{tag}")
     };
-    let url = format!("{GITHUB_API_BASE}/repos/{GITHUB_REPO}/releases/tags/{tag}");
+    let url = format!(
+        "{}/repos/{GITHUB_REPO}/releases/tags/{tag}",
+        github_api_base()
+    );
     let resp = client
         .get(&url)
         .send()
@@ -352,6 +381,9 @@ fn fetch_release_by_tag(client: &reqwest::blocking::Client, tag: &str) -> Result
 }
 
 fn handle_github_status(resp: &reqwest::blocking::Response) -> Result<()> {
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(GithubUnauthorized.into());
+    }
     if resp.status() == reqwest::StatusCode::FORBIDDEN {
         bail!(
             "GitHub API rate limit exceeded. Set GITHUB_TOKEN to authenticate:\n  \
@@ -440,10 +472,26 @@ pub fn run(opts: SelfUpdateOptions<'_>) -> Result<()> {
         eprintln!("Checking for a newer nxv release...");
     }
 
-    let client = build_client(opts.connect_timeout_secs)?;
-    let release = match opts.version {
-        Some(tag) => fetch_release_by_tag(&client, tag)?,
-        None => fetch_latest_release(&client)?,
+    let (client, used_token) = build_client(opts.connect_timeout_secs, true)?;
+    let fetch_release = |client: &reqwest::blocking::Client| match opts.version {
+        Some(tag) => fetch_release_by_tag(client, tag),
+        None => fetch_latest_release(client),
+    };
+    // An invalid or expired GITHUB_TOKEN must not break a check that works
+    // anonymously (dev shells often export stale tokens): on 401, drop the
+    // token and retry. The unauthenticated client is then also used for the
+    // asset downloads below.
+    let (client, release) = match fetch_release(&client) {
+        Ok(release) => (client, release),
+        Err(e) if used_token && e.downcast_ref::<GithubUnauthorized>().is_some() => {
+            if !opts.quiet {
+                eprintln!("GITHUB_TOKEN was rejected (401 Unauthorized); retrying without it.");
+            }
+            let (client, _) = build_client(opts.connect_timeout_secs, false)?;
+            let release = fetch_release(&client)?;
+            (client, release)
+        }
+        Err(e) => return Err(e),
     };
     let remote_version = release
         .tag_name
@@ -838,5 +886,102 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".nxv-update-"))
             .collect();
         assert!(leftovers.is_empty(), "stray temp files: {leftovers:?}");
+    }
+
+    // ── GitHub 401 token fallback ────────────────────────────────────────
+    //
+    // Env-mutating tests are #[serial] (same precedent as src/client.rs);
+    // set_var/remove_var are unsafe in edition 2024.
+    mod github_auth {
+        use super::super::*;
+        use serial_test::serial;
+
+        const RELEASE_JSON: &str = r#"{"tag_name":"v99.0.0","assets":[]}"#;
+
+        fn check_opts() -> SelfUpdateOptions<'static> {
+            SelfUpdateOptions {
+                check: true,
+                force: false,
+                version: None,
+                connect_timeout_secs: 5,
+                show_progress: false,
+                quiet: true,
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn run_retries_unauthenticated_when_token_rejected() {
+            let mut server = mockito::Server::new();
+            let authed = server
+                .mock("GET", "/repos/utensils/nxv/releases/latest")
+                .match_header(
+                    "authorization",
+                    mockito::Matcher::Regex("Bearer.*".to_string()),
+                )
+                .with_status(401)
+                .create();
+            let anon = server
+                .mock("GET", "/repos/utensils/nxv/releases/latest")
+                .match_header("authorization", mockito::Matcher::Missing)
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(RELEASE_JSON)
+                .create();
+
+            unsafe {
+                std::env::set_var("NXV_GITHUB_API_BASE", server.url());
+                std::env::set_var("GITHUB_TOKEN", "stale-token");
+            }
+            let result = run(check_opts());
+            unsafe {
+                std::env::remove_var("NXV_GITHUB_API_BASE");
+                std::env::remove_var("GITHUB_TOKEN");
+            }
+
+            result.expect("401 with a token should fall back to an unauthenticated request");
+            authed.assert();
+            anon.assert();
+        }
+
+        #[test]
+        #[serial]
+        fn run_propagates_401_without_token() {
+            let mut server = mockito::Server::new();
+            let _m = server
+                .mock("GET", "/repos/utensils/nxv/releases/latest")
+                .with_status(401)
+                .create();
+
+            unsafe {
+                std::env::set_var("NXV_GITHUB_API_BASE", server.url());
+                std::env::remove_var("GITHUB_TOKEN");
+            }
+            let result = run(check_opts());
+            unsafe {
+                std::env::remove_var("NXV_GITHUB_API_BASE");
+            }
+
+            let err = result.expect_err("401 without a token has no fallback");
+            assert!(err.downcast_ref::<GithubUnauthorized>().is_some());
+        }
+
+        #[test]
+        #[serial]
+        fn build_client_skips_blank_token() {
+            unsafe { std::env::set_var("GITHUB_TOKEN", "   ") };
+            let (_, has_token) = build_client(5, true).unwrap();
+            unsafe { std::env::remove_var("GITHUB_TOKEN") };
+            assert!(!has_token, "a blank GITHUB_TOKEN must not be attached");
+        }
+
+        #[test]
+        #[serial]
+        fn build_client_ignores_token_when_disabled() {
+            unsafe { std::env::set_var("GITHUB_TOKEN", "some-valid-looking-token") };
+            let (_, has_token) = build_client(5, false).unwrap();
+            unsafe { std::env::remove_var("GITHUB_TOKEN") };
+            assert!(!has_token);
+        }
     }
 }
