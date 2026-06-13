@@ -191,8 +191,10 @@ jobs:
             --jq '.assets[].name' \
             | grep -Fx "${INDEX_ASSET_PREFIX}bloom.bin"
 
-          # Replace the signature first; the old manifest remains valid until
-          # manifest.json is replaced as the final step.
+          # GitHub release assets cannot replace manifest.json and its signature
+          # atomically. Payload assets are already present, and the restore logic
+          # keeps stable assets from staying missing; clients may see a brief
+          # signature mismatch until manifest.json is replaced as the final step.
           replace_stable_asset publish/manifest.json.minisig manifest.json.minisig
           replace_stable_asset publish/manifest.json manifest.json
 

@@ -3181,6 +3181,11 @@ fn test_publish_index_workflow_keeps_manifest_as_stable_pointer() {
         "manifest.json should be the final stable pointer replacement"
     );
     assert!(
+        workflow.contains("clients may see a brief")
+            && workflow.contains("signature mismatch until manifest.json is replaced"),
+        "workflow should document the non-atomic manifest/signature replacement window"
+    );
+    assert!(
         workflow.find("replace_stable_asset publish/manifest.json.minisig manifest.json.minisig")
             < workflow.find("replace_stable_asset publish/manifest.json manifest.json"),
         "manifest.json must be replaced after its signature"
