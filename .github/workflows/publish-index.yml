@@ -179,9 +179,12 @@ jobs:
           }
 
           echo "Uploading immutable index files to release..."
+          immutable_upload_dir="$(mktemp -d)"
+          cp publish/index.db.zst "${immutable_upload_dir}/${INDEX_ASSET_PREFIX}index.db.zst"
+          cp publish/bloom.bin "${immutable_upload_dir}/${INDEX_ASSET_PREFIX}bloom.bin"
           gh release upload "$INDEX_RELEASE_TAG" \
-            "publish/index.db.zst#${INDEX_ASSET_PREFIX}index.db.zst" \
-            "publish/bloom.bin#${INDEX_ASSET_PREFIX}bloom.bin"
+            "${immutable_upload_dir}/${INDEX_ASSET_PREFIX}index.db.zst" \
+            "${immutable_upload_dir}/${INDEX_ASSET_PREFIX}bloom.bin"
 
           echo "Verifying immutable assets are present before moving the manifest pointer..."
           gh release view "$INDEX_RELEASE_TAG" --json assets \

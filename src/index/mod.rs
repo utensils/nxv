@@ -55,6 +55,22 @@ const HEAD_EVAL_LAG_HOURS: i64 = 24;
 /// Environment override for the release bucket URL (tests, mirrors).
 const RELEASES_URL_ENV: &str = "NXV_RELEASES_URL";
 
+/// Upstream channel snapshots known to be malformed. They are kept out of
+/// ingestion permanently so data-quality gates can stay strict for every
+/// newly discovered anomaly without making the scheduled publisher red forever.
+const KNOWN_BAD_RELEASES: &[&str] = &[
+    "nixos-24.11pre657868.4a8e77c70685",
+    "nixpkgs-24.11pre657856.733453ac54a4",
+];
+
+fn known_bad_release_reason(release_name: &str) -> Option<&'static str> {
+    if KNOWN_BAD_RELEASES.contains(&release_name) {
+        Some("known malformed upstream snapshot: missing python*Packages.requests sentinel")
+    } else {
+        None
+    }
+}
+
 /// Entry point for `nxv index`.
 pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     let mut db = Database::open(&cli.db_path)?;
@@ -142,8 +158,22 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
         worklist.truncate(max);
     }
 
+    let mut skipped_known_bad = 0usize;
+    let mut filtered_worklist = Vec::with_capacity(worklist.len());
+    for release in worklist {
+        if let Some(reason) = known_bad_release_reason(&release.release_name) {
+            progress(&format!("  skipping {}: {reason}", release.release_name));
+            db.mark_release_skipped(release.id, reason)?;
+            skipped_known_bad += 1;
+        } else {
+            filtered_worklist.push(release);
+        }
+    }
+    let worklist = filtered_worklist;
+
     let mut report = RunReport {
         planned: worklist.len(),
+        skipped: skipped_known_bad,
         ..Default::default()
     };
 
