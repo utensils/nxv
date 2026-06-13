@@ -32,6 +32,7 @@ env:
   # Forks can override INDEX_URL_PREFIX via repository variable
   INDEX_RELEASE_TAG: index-latest
   INDEX_URL_PREFIX: ${{ vars.INDEX_URL_PREFIX || format('https://github.com/{0}/releases/download/index-latest', github.repository) }}
+  INDEX_ASSET_PREFIX: index-${{ github.run_id }}-${{ github.run_attempt }}-
 
 jobs:
   update-index:
@@ -72,11 +73,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.local/share/nxv
-          echo "Downloading existing index from ${INDEX_URL_PREFIX}..."
+          echo "Downloading existing manifest from ${INDEX_URL_PREFIX}..."
 
           # Incremental updates REQUIRE an existing index. The initial v4
           # full rebuild is run out-of-band and uploaded manually.
-          curl -sSfL "${INDEX_URL_PREFIX}/index.db.zst" -o ~/.local/share/nxv/index.db.zst
+          manifest_path="$(mktemp)"
+          curl -sSfL "${INDEX_URL_PREFIX}/manifest.json" -o "$manifest_path"
+          index_url="$(jq -r '.full_index.url // empty' "$manifest_path")"
+          if [ -z "$index_url" ]; then
+            echo "::error::Published manifest is missing full_index.url"
+            exit 1
+          fi
+
+          echo "Downloading existing index from ${index_url}..."
+          curl -sSfL "$index_url" -o ~/.local/share/nxv/index.db.zst
           zstd -d -f ~/.local/share/nxv/index.db.zst -o ~/.local/share/nxv/index.db
           rm ~/.local/share/nxv/index.db.zst
           echo "Index ready: $(du -h ~/.local/share/nxv/index.db | cut -f1)"
@@ -121,6 +131,7 @@ jobs:
           ./target/release/nxv publish \
             --output ./publish \
             --url-prefix "${INDEX_URL_PREFIX}" \
+            --artifact-name-prefix "${INDEX_ASSET_PREFIX}" \
             --min-version 4 \
             --sign
 
@@ -146,13 +157,53 @@ jobs:
               --latest=false
           fi
 
-          echo "Uploading index files to release..."
+          replace_stable_asset() {
+            local path="$1"
+            local name="$2"
+            local backup_dir
+            backup_dir="$(mktemp -d)"
+
+            if gh release view "$INDEX_RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              gh release download "$INDEX_RELEASE_TAG" --pattern "$name" --dir "$backup_dir"
+            fi
+
+            if gh release upload "$INDEX_RELEASE_TAG" "${path}#${name}" --clobber; then
+              return 0
+            fi
+
+            echo "::error::Failed to replace ${name}; attempting to restore previous asset"
+            if [ -f "${backup_dir}/${name}" ]; then
+              gh release upload "$INDEX_RELEASE_TAG" "${backup_dir}/${name}#${name}" --clobber || true
+            fi
+            return 1
+          }
+
+          echo "Uploading immutable index files to release..."
           gh release upload "$INDEX_RELEASE_TAG" \
-            publish/index.db.zst \
-            publish/bloom.bin \
-            publish/manifest.json \
-            publish/manifest.json.minisig \
-            --clobber
+            "publish/index.db.zst#${INDEX_ASSET_PREFIX}index.db.zst" \
+            "publish/bloom.bin#${INDEX_ASSET_PREFIX}bloom.bin"
+
+          echo "Verifying immutable assets are present before moving the manifest pointer..."
+          gh release view "$INDEX_RELEASE_TAG" --json assets \
+            --jq '.assets[].name' \
+            | grep -Fx "${INDEX_ASSET_PREFIX}index.db.zst"
+          gh release view "$INDEX_RELEASE_TAG" --json assets \
+            --jq '.assets[].name' \
+            | grep -Fx "${INDEX_ASSET_PREFIX}bloom.bin"
+
+          # Replace the signature first; the old manifest remains valid until
+          # manifest.json is replaced as the final step.
+          replace_stable_asset publish/manifest.json.minisig manifest.json.minisig
+          replace_stable_asset publish/manifest.json manifest.json
+
+          echo "Verifying published manifest points at this run's immutable assets..."
+          published_manifest="$(mktemp)"
+          curl -sSfL "${INDEX_URL_PREFIX}/manifest.json" -o "$published_manifest"
+          jq -e \
+            --arg index_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}index.db.zst" \
+            --arg bloom_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}bloom.bin" \
+            '.full_index.url == $index_url and .bloom_filter.url == $bloom_url' \
+            "$published_manifest" >/dev/null
 
       # AFTER publishing: turn anomalies into a red workflow run so they
       # page the operator. Failed releases stay in the (published) ledger

@@ -286,6 +286,7 @@ nxv dedupe                                           # Run
 # Publish distribution-ready compressed artifacts + manifest
 nxv publish --output ./publish --url-prefix https://your-server/nxv
 nxv publish --output ./publish --url-prefix https://... --sign --secret-key nxv.key
+nxv publish --output ./publish --url-prefix https://... --artifact-name-prefix run-123-
 
 # Generate a minisign keypair for signing manifests
 nxv keygen --secret-key ./nxv.key --public-key ./nxv.pub
@@ -295,7 +296,7 @@ Every recorded commit is a real, Hydra-built channel commit — `nix shell` comm
 
 Retired commands: `nxv backfill` and `nxv reset` are gone — snapshots carry complete metadata (source_path, homepage, known_vulnerabilities), and there is no checkout to reset.
 
-Most users never need these — they consume a pre-built published index via `nxv update`. Only run these when self-hosting an index.
+Most users never need these — they consume a pre-built published index via `nxv update`. Only run these when self-hosting an index. Use `--artifact-name-prefix` for mutable stores such as GitHub Releases so payload assets can be uploaded under immutable names before replacing `manifest.json`.
 
 ## Key Environment Variables
 

@@ -3110,6 +3110,10 @@ fn test_publish_with_signing() {
             "publish",
             "--output",
             output_dir.to_str().unwrap(),
+            "--url-prefix",
+            "https://example.com/releases",
+            "--artifact-name-prefix",
+            "run-123-",
             "--sign",
             "--secret-key",
             sk_path.to_str().unwrap(),
@@ -3137,6 +3141,49 @@ fn test_publish_with_signing() {
     assert!(
         sig_content.contains("trusted comment:"),
         "Signature should have trusted comment"
+    );
+
+    let manifest_content = std::fs::read_to_string(output_dir.join("manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_content).unwrap();
+    assert_eq!(
+        manifest["full_index"]["url"],
+        "https://example.com/releases/run-123-index.db.zst"
+    );
+    assert_eq!(
+        manifest["bloom_filter"]["url"],
+        "https://example.com/releases/run-123-bloom.bin"
+    );
+}
+
+#[test]
+fn test_publish_index_workflow_keeps_manifest_as_stable_pointer() {
+    let workflow = include_str!("../.github/workflows/publish-index.yml");
+
+    assert!(
+        workflow.contains("curl -sSfL \"${INDEX_URL_PREFIX}/manifest.json\""),
+        "publish-index should discover the current index from the manifest"
+    );
+    assert!(
+        workflow.contains("--artifact-name-prefix \"${INDEX_ASSET_PREFIX}\""),
+        "published manifests should point at run-scoped immutable assets"
+    );
+    assert!(
+        workflow.contains("\"publish/index.db.zst#${INDEX_ASSET_PREFIX}index.db.zst\""),
+        "index payload should upload under the run-scoped asset name"
+    );
+    assert!(
+        workflow
+            .contains("replace_stable_asset publish/manifest.json.minisig manifest.json.minisig"),
+        "signature should be replaced before manifest.json"
+    );
+    assert!(
+        workflow.contains("replace_stable_asset publish/manifest.json manifest.json"),
+        "manifest.json should be the final stable pointer replacement"
+    );
+    assert!(
+        workflow.find("replace_stable_asset publish/manifest.json.minisig manifest.json.minisig")
+            < workflow.find("replace_stable_asset publish/manifest.json manifest.json"),
+        "manifest.json must be replaced after its signature"
     );
 }
 
