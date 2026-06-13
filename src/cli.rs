@@ -527,6 +527,14 @@ pub struct PublishArgs {
     #[arg(long)]
     pub url_prefix: Option<String>,
 
+    /// Prefix to add to index and bloom artifact names in the manifest.
+    ///
+    /// This is useful for GitHub release publishing: payload artifacts can be
+    /// uploaded under immutable run-specific names while manifest.json remains
+    /// the stable pointer clients fetch.
+    #[arg(long)]
+    pub artifact_name_prefix: Option<String>,
+
     /// Sign the manifest with a minisign secret key.
     #[arg(long)]
     pub sign: bool,

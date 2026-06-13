@@ -25,6 +25,22 @@ pub const BLOOM_FILTER_NAME: &str = "bloom.bin";
 pub const MANIFEST_NAME: &str = "manifest.json";
 pub const MANIFEST_SIG_NAME: &str = "manifest.json.minisig";
 
+fn published_artifact_name(base_name: &str, artifact_name_prefix: Option<&str>) -> String {
+    format!("{}{}", artifact_name_prefix.unwrap_or_default(), base_name)
+}
+
+fn published_artifact_url(
+    base_name: &str,
+    url_prefix: Option<&str>,
+    artifact_name_prefix: Option<&str>,
+) -> String {
+    let name = published_artifact_name(base_name, artifact_name_prefix);
+    match url_prefix {
+        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), name),
+        None => name,
+    }
+}
+
 /// Replace the untrusted comment line in a minisign key string.
 ///
 /// Minisign keys have the format:
@@ -383,6 +399,7 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
     url_prefix: Option<&str>,
+    artifact_name_prefix: Option<&str>,
     show_progress: bool,
     min_version: Option<u32>,
 ) -> Result<(IndexFile, String, u32)> {
@@ -457,13 +474,8 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
         );
     }
 
-    let url = match url_prefix {
-        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), INDEX_DB_NAME),
-        None => INDEX_DB_NAME.to_string(),
-    };
-
     let index_file = IndexFile {
-        url,
+        url: published_artifact_url(INDEX_DB_NAME, url_prefix, artifact_name_prefix),
         size_bytes: size,
         sha256,
     };
@@ -511,6 +523,7 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
     url_prefix: Option<&str>,
+    artifact_name_prefix: Option<&str>,
     show_progress: bool,
 ) -> Result<IndexFile> {
     let db_path = db_path.as_ref();
@@ -568,13 +581,8 @@ pub fn generate_bloom_filter<P: AsRef<Path>, Q: AsRef<Path>>(
         eprintln!("  Bloom filter: {}", format_bytes(size));
     }
 
-    let url = match url_prefix {
-        Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), BLOOM_FILTER_NAME),
-        None => BLOOM_FILTER_NAME.to_string(),
-    };
-
     Ok(IndexFile {
-        url,
+        url: published_artifact_url(BLOOM_FILTER_NAME, url_prefix, artifact_name_prefix),
         size_bytes: size,
         sha256,
     })
@@ -593,6 +601,7 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db_path: P,
     output_dir: Q,
     url_prefix: Option<&str>,
+    artifact_name_prefix: Option<&str>,
     show_progress: bool,
     secret_key: Option<&str>,
     min_version: Option<u32>,
@@ -605,14 +614,26 @@ pub fn publish_index<P: AsRef<Path>, Q: AsRef<Path>>(
     if show_progress {
         eprintln!("Generating compressed index...");
     }
-    let (full_index, last_commit, resolved_min_version) =
-        generate_full_index(db_path, output_dir, url_prefix, show_progress, min_version)?;
+    let (full_index, last_commit, resolved_min_version) = generate_full_index(
+        db_path,
+        output_dir,
+        url_prefix,
+        artifact_name_prefix,
+        show_progress,
+        min_version,
+    )?;
 
     if show_progress {
         eprintln!();
         eprintln!("Generating bloom filter...");
     }
-    let bloom_filter = generate_bloom_filter(db_path, output_dir, url_prefix, show_progress)?;
+    let bloom_filter = generate_bloom_filter(
+        db_path,
+        output_dir,
+        url_prefix,
+        artifact_name_prefix,
+        show_progress,
+    )?;
 
     if show_progress {
         eprintln!();
@@ -721,7 +742,7 @@ mod tests {
         create_test_db(&db_path);
 
         let (index_file, last_commit, resolved_min) =
-            generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
+            generate_full_index(&db_path, &output_dir, None, None, false, None).unwrap();
 
         assert!(!index_file.sha256.is_empty());
         assert!(index_file.size_bytes > 0);
@@ -748,9 +769,39 @@ mod tests {
 
         let url_prefix = "https://example.com/releases";
         let (index_file, _, _) =
-            generate_full_index(&db_path, &output_dir, Some(url_prefix), false, None).unwrap();
+            generate_full_index(&db_path, &output_dir, Some(url_prefix), None, false, None)
+                .unwrap();
 
         assert_eq!(index_file.url, format!("{}/{}", url_prefix, INDEX_DB_NAME));
+    }
+
+    #[test]
+    fn test_generate_full_index_with_artifact_name_prefix() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+
+        let url_prefix = "https://example.com/releases";
+        let (index_file, _, _) = generate_full_index(
+            &db_path,
+            &output_dir,
+            Some(url_prefix),
+            Some("run-123-"),
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            index_file.url,
+            format!("{}/run-123-{}", url_prefix, INDEX_DB_NAME)
+        );
+        assert!(
+            output_dir.join(INDEX_DB_NAME).exists(),
+            "artifact prefix should affect manifest URLs, not local output names"
+        );
     }
 
     #[test]
@@ -765,7 +816,7 @@ mod tests {
 
         // min_version omitted: must default to the schema version and be
         // written into the published DB (the pre-download gate depends on it).
-        generate_full_index(&db_path, &output_dir, None, false, None).unwrap();
+        generate_full_index(&db_path, &output_dir, None, None, false, None).unwrap();
 
         let compressed_path = output_dir.join(INDEX_DB_NAME);
         let decompressed_path = dir.path().join("decompressed.db");
@@ -786,7 +837,8 @@ mod tests {
 
         // Publishing a schema-4 index readable-gated below 4 would let old
         // clients overwrite their working index with one they can't open.
-        let err = generate_full_index(&db_path, &output_dir, None, false, Some(3)).unwrap_err();
+        let err =
+            generate_full_index(&db_path, &output_dir, None, None, false, Some(3)).unwrap_err();
         assert!(err.to_string().contains("refusing to publish"));
     }
 
@@ -798,7 +850,7 @@ mod tests {
 
         create_test_db(&db_path);
 
-        let bloom_file = generate_bloom_filter(&db_path, &output_dir, None, false).unwrap();
+        let bloom_file = generate_bloom_filter(&db_path, &output_dir, None, None, false).unwrap();
 
         assert_eq!(bloom_file.url, BLOOM_FILTER_NAME);
         assert!(!bloom_file.sha256.is_empty());
@@ -1041,7 +1093,7 @@ mod tests {
         create_test_db(&db_path);
 
         // Publish without signing
-        publish_index(&db_path, &output_dir, None, false, None, None).unwrap();
+        publish_index(&db_path, &output_dir, None, None, false, None, None).unwrap();
 
         // Verify all artifacts except signature
         assert!(output_dir.join(INDEX_DB_NAME).exists());

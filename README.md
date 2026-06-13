@@ -346,6 +346,10 @@ nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 ```
 
 The `--url-prefix` sets the base URL that will appear in the manifest. This should match where you'll host the files.
+For GitHub Releases or other mutable asset stores, `--artifact-name-prefix` can
+put run-specific payload names in the manifest while keeping the local output
+files unchanged. Upload those payload assets first, then replace `manifest.json`
+last so clients keep using the old index until the new one is fully available.
 
 ### Integrity and Rollback
 
@@ -401,9 +405,14 @@ You can host the published artifacts anywhere that serves static files:
 <summary>GitHub Releases</summary>
 
 ```bash
+RUN_ID="$(date +%Y%m%d%H%M%S)-"
+
 # Generate artifacts
 nxv publish --output ./publish \
-  --url-prefix https://github.com/YOUR_USER/YOUR_REPO/releases/download/index-latest
+  --url-prefix https://github.com/YOUR_USER/YOUR_REPO/releases/download/index-latest \
+  --artifact-name-prefix "$RUN_ID" \
+  --sign \
+  --secret-key ./nxv.key
 
 # Create release and upload
 gh release create index-latest \
@@ -411,7 +420,13 @@ gh release create index-latest \
   --notes "nxv package index" \
   --latest=false
 
-gh release upload index-latest publish/* --clobber
+gh release upload index-latest \
+  "publish/index.db.zst#${RUN_ID}index.db.zst" \
+  "publish/bloom.bin#${RUN_ID}bloom.bin"
+
+# Replace the stable pointer only after the payload assets are present.
+gh release upload index-latest publish/manifest.json.minisig --clobber
+gh release upload index-latest publish/manifest.json --clobber
 ```
 
 </details>
