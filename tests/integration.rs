@@ -2897,6 +2897,77 @@ fn test_index_truncated_snapshot_fails_release_without_polluting() {
     assert!(error.is_some());
 }
 
+/// Known malformed upstream snapshots are quarantined as skipped so scheduled
+/// publishing does not stay red forever, while unknown bad snapshots still hit
+/// the normal gate-failure path.
+#[test]
+#[cfg(feature = "indexer")]
+fn test_index_known_bad_snapshot_is_skipped_without_fetching_packages() {
+    let mut server = mockito::Server::new();
+    let release_name = "nixos-24.11pre657868.4a8e77c70685";
+    let short = "4a8e77c70685";
+    let commit = format!("{short}{}", "0".repeat(28));
+
+    let listing = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+  <CommonPrefixes><Prefix>nixos/unstable-small/{release_name}/</Prefix></CommonPrefixes>
+</ListBucketResult>"#,
+    );
+    let _m1 = server
+        .mock("GET", "/")
+        .match_query(mockito::Matcher::Regex(
+            "prefix=nixos%2Funstable-small".to_string(),
+        ))
+        .with_body(listing)
+        .create();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1))
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+    let _m2 = server
+        .mock(
+            "GET",
+            format!("/nixos/unstable-small/{release_name}/git-revision").as_str(),
+        )
+        .with_header("Last-Modified", recent.as_str())
+        .with_body(&commit)
+        .create();
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+
+    nxv()
+        .env("NXV_RELEASES_URL", server.url())
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "index",
+            "--channel",
+            "nixos-unstable-small",
+        ])
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "skipping {release_name}: known malformed upstream snapshot"
+        )))
+        .stderr(predicate::str::contains("status: healthy"));
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let (status, error): (String, Option<String>) = conn
+        .query_row("SELECT status, error FROM releases", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(status, "skipped");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("known malformed upstream snapshot"))
+    );
+}
+
 /// --strict turns failed releases into a non-zero exit.
 #[test]
 #[cfg(feature = "indexer")]
@@ -3176,8 +3247,21 @@ fn test_publish_index_workflow_keeps_manifest_as_stable_pointer() {
         "published manifests should point at run-scoped immutable assets"
     );
     assert!(
-        workflow.contains("\"publish/index.db.zst#${INDEX_ASSET_PREFIX}index.db.zst\""),
-        "index payload should upload under the run-scoped asset name"
+        workflow.contains(
+            "cp publish/index.db.zst \"${immutable_upload_dir}/${INDEX_ASSET_PREFIX}index.db.zst\""
+        ) && workflow.contains(
+            "cp publish/bloom.bin \"${immutable_upload_dir}/${INDEX_ASSET_PREFIX}bloom.bin\""
+        ),
+        "payload basenames should be staged with run-scoped asset names before upload"
+    );
+    assert!(
+        workflow.contains("\"${immutable_upload_dir}/${INDEX_ASSET_PREFIX}index.db.zst\"")
+            && workflow.contains("\"${immutable_upload_dir}/${INDEX_ASSET_PREFIX}bloom.bin\""),
+        "index payload should upload from paths whose basenames are the run-scoped asset names"
+    );
+    assert!(
+        !workflow.contains("\"publish/index.db.zst#${INDEX_ASSET_PREFIX}index.db.zst\""),
+        "gh release upload treats # suffixes as labels, not asset filenames"
     );
     assert!(
         workflow

@@ -420,9 +420,13 @@ gh release create index-latest \
   --notes "nxv package index" \
   --latest=false
 
+upload_dir="$(mktemp -d)"
+cp publish/index.db.zst "${upload_dir}/${RUN_ID}index.db.zst"
+cp publish/bloom.bin "${upload_dir}/${RUN_ID}bloom.bin"
+
 gh release upload index-latest \
-  "publish/index.db.zst#${RUN_ID}index.db.zst" \
-  "publish/bloom.bin#${RUN_ID}bloom.bin"
+  "${upload_dir}/${RUN_ID}index.db.zst" \
+  "${upload_dir}/${RUN_ID}bloom.bin"
 
 # Replace the stable pointer only after the payload assets are present.
 gh release upload index-latest publish/manifest.json.minisig --clobber

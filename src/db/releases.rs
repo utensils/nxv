@@ -222,6 +222,16 @@ impl Database {
         Ok(())
     }
 
+    /// Mark a release as terminally skipped without consuming retry attempts.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn mark_release_skipped(&self, id: i64, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE releases SET status = 'skipped', error = ? WHERE id = ?",
+            rusqlite::params![reason, id],
+        )?;
+        Ok(())
+    }
+
     /// Atomically write a flush group: a batch of observations plus the
     /// `ingested` status for the releases they came from. Either everything
     /// commits or nothing does — a release can never be `ingested` without
