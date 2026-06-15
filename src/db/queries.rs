@@ -643,9 +643,15 @@ fn cached_i64(conn: &rusqlite::Connection, key: &str) -> Result<Option<i64>> {
     }
 }
 
-fn cached_package_stats(
-    conn: &rusqlite::Connection,
-) -> Result<Option<(i64, i64, i64, Option<i64>, Option<i64>)>> {
+struct PackageStatsCache {
+    total_ranges: i64,
+    unique_names: i64,
+    unique_versions: i64,
+    oldest: Option<i64>,
+    newest: Option<i64>,
+}
+
+fn cached_package_stats(conn: &rusqlite::Connection) -> Result<Option<PackageStatsCache>> {
     let Some(total_ranges) = cached_i64(conn, META_STATS_TOTAL_RANGES)? else {
         return Ok(None);
     };
@@ -655,20 +661,16 @@ fn cached_package_stats(
     let Some(unique_versions) = cached_i64(conn, META_STATS_UNIQUE_VERSIONS)? else {
         return Ok(None);
     };
-    let oldest = cached_i64(conn, META_STATS_OLDEST_COMMIT_DATE)?;
-    let newest = cached_i64(conn, META_STATS_NEWEST_COMMIT_DATE)?;
-    Ok(Some((
+    Ok(Some(PackageStatsCache {
         total_ranges,
         unique_names,
         unique_versions,
-        oldest,
-        newest,
-    )))
+        oldest: cached_i64(conn, META_STATS_OLDEST_COMMIT_DATE)?,
+        newest: cached_i64(conn, META_STATS_NEWEST_COMMIT_DATE)?,
+    }))
 }
 
-fn compute_package_stats(
-    conn: &rusqlite::Connection,
-) -> Result<(i64, i64, i64, Option<i64>, Option<i64>)> {
+fn compute_package_stats(conn: &rusqlite::Connection) -> Result<PackageStatsCache> {
     let total_ranges: i64 = conn.query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
         row.get(0)
     })?;
@@ -697,7 +699,13 @@ fn compute_package_stats(
         |row| row.get(0),
     )?;
 
-    Ok((total_ranges, unique_names, unique_versions, oldest, newest))
+    Ok(PackageStatsCache {
+        total_ranges,
+        unique_names,
+        unique_versions,
+        oldest,
+        newest,
+    })
 }
 
 /// Refresh cached package-table statistics in `meta`.
@@ -706,20 +714,22 @@ fn compute_package_stats(
 /// before WAL checkpoint/compression. Read-only callers automatically fall back
 /// to live scans when these keys are absent (older indexes).
 pub fn refresh_stats_cache(conn: &rusqlite::Connection) -> Result<()> {
-    let (total_ranges, unique_names, unique_versions, oldest, newest) =
-        compute_package_stats(conn)?;
+    let stats = compute_package_stats(conn)?;
     let calculated_at = Utc::now().to_rfc3339();
     let values = [
-        (META_STATS_TOTAL_RANGES, total_ranges.to_string()),
-        (META_STATS_UNIQUE_NAMES, unique_names.to_string()),
-        (META_STATS_UNIQUE_VERSIONS, unique_versions.to_string()),
+        (META_STATS_TOTAL_RANGES, stats.total_ranges.to_string()),
+        (META_STATS_UNIQUE_NAMES, stats.unique_names.to_string()),
+        (
+            META_STATS_UNIQUE_VERSIONS,
+            stats.unique_versions.to_string(),
+        ),
         (
             META_STATS_OLDEST_COMMIT_DATE,
-            oldest.map(|v| v.to_string()).unwrap_or_default(),
+            stats.oldest.map(|v| v.to_string()).unwrap_or_default(),
         ),
         (
             META_STATS_NEWEST_COMMIT_DATE,
-            newest.map(|v| v.to_string()).unwrap_or_default(),
+            stats.newest.map(|v| v.to_string()).unwrap_or_default(),
         ),
         (META_STATS_CALCULATED_AT, calculated_at),
     ];
@@ -734,22 +744,25 @@ pub fn refresh_stats_cache(conn: &rusqlite::Connection) -> Result<()> {
 
 /// Get index statistics.
 pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
-    let (total_ranges, unique_names, unique_versions, oldest, newest) =
-        match cached_package_stats(conn)? {
-            Some(stats) => stats,
-            None => compute_package_stats(conn)?,
-        };
+    let stats = match cached_package_stats(conn)? {
+        Some(stats) => stats,
+        None => compute_package_stats(conn)?,
+    };
 
     // Get meta values (backwards compatible - returns None if not present)
     let last_indexed_commit = meta_value(conn, "last_indexed_commit")?;
     let last_indexed_date = meta_value(conn, "last_indexed_date")?;
 
     Ok(IndexStats {
-        total_ranges,
-        unique_names,
-        unique_versions,
-        oldest_commit_date: oldest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
-        newest_commit_date: newest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        total_ranges: stats.total_ranges,
+        unique_names: stats.unique_names,
+        unique_versions: stats.unique_versions,
+        oldest_commit_date: stats
+            .oldest
+            .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        newest_commit_date: stats
+            .newest
+            .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         last_indexed_commit,
         last_indexed_date,
         channels: get_channel_coverage(conn).unwrap_or_default(),
