@@ -58,8 +58,10 @@ fn create_benchmark_db(
         );
 
         CREATE TABLE package_attrs (
-            attribute_path TEXT PRIMARY KEY
+            attribute_path TEXT PRIMARY KEY,
+            attribute_path_lc TEXT
         ) WITHOUT ROWID;
+        CREATE INDEX idx_package_attrs_lc ON package_attrs(attribute_path_lc, attribute_path);
 
         CREATE INDEX idx_packages_name ON package_versions(name);
         CREATE INDEX idx_packages_name_version ON package_versions(name, version, first_commit_date);
@@ -142,7 +144,9 @@ fn create_benchmark_db(
         }
     }
     tx.execute(
-        "INSERT INTO package_attrs(attribute_path) SELECT DISTINCT attribute_path FROM package_versions",
+        "INSERT INTO package_attrs(attribute_path, attribute_path_lc) \
+         SELECT attribute_path, lower(attribute_path) \
+         FROM (SELECT DISTINCT attribute_path FROM package_versions)",
         [],
     )
     .unwrap();
@@ -301,7 +305,7 @@ fn bench_completion(c: &mut Criterion) {
                 let rows: Vec<String> = conn
                     .prepare_cached(
                         "SELECT attribute_path FROM package_attrs \
-                         WHERE attribute_path >= ? AND attribute_path < ? \
+                         WHERE attribute_path_lc >= ? AND attribute_path_lc < ? \
                          ORDER BY attribute_path LIMIT 100",
                     )
                     .unwrap()

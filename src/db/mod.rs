@@ -197,7 +197,8 @@ impl Database {
             -- package_versions at index/publish finish and lets completion and
             -- bloom generation avoid DISTINCT scans over every version row.
             CREATE TABLE IF NOT EXISTS package_attrs (
-                attribute_path TEXT PRIMARY KEY
+                attribute_path TEXT PRIMARY KEY,
+                attribute_path_lc TEXT
             ) WITHOUT ROWID;
 
             -- Channel-release ingestion ledger: which snapshots have been observed,
@@ -228,6 +229,27 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
             "#,
+        )?;
+
+        // Keep the derived attr table upgradeable without a schema bump: it is
+        // strictly a cache and can be rebuilt from package_versions.
+        let has_attr_lc: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('package_attrs') WHERE name='attribute_path_lc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_attr_lc {
+            self.conn.execute(
+                "ALTER TABLE package_attrs ADD COLUMN attribute_path_lc TEXT",
+                [],
+            )?;
+        }
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_attrs_lc ON package_attrs(attribute_path_lc, attribute_path)",
+            [],
         )?;
 
         // Create FTS5 table if it doesn't exist
@@ -787,8 +809,9 @@ impl Database {
         self.conn.execute_batch(
             r#"
             DELETE FROM package_attrs;
-            INSERT INTO package_attrs (attribute_path)
-            SELECT DISTINCT attribute_path FROM package_versions;
+            INSERT INTO package_attrs (attribute_path, attribute_path_lc)
+            SELECT attribute_path, lower(attribute_path)
+              FROM (SELECT DISTINCT attribute_path FROM package_versions);
             "#,
         )?;
         Ok(())

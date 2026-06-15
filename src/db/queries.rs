@@ -427,40 +427,25 @@ pub fn search_by_name_version(
     package: &str,
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
-    // Search by attribute_path (package) and version prefix. Use a literal
-    // B-tree range for attribute prefixes when possible; on v4-sized indexes
-    // this avoids a full scan for narrow package families like `python311%`.
+    // Search by attribute_path (package) and version prefix. Keep SQLite LIKE's
+    // historical ASCII-case-insensitive behavior here so versioned and
+    // unversioned prefix searches agree for mixed-case package-set segments
+    // such as `python313Packages`.
+    let mut stmt = conn.prepare(&format!(
+        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
+         ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+    ))?;
+    let package_pattern = format!("{}%", escape_like_pattern(package));
     let version_pattern = format!("{}%", escape_like_pattern(version));
+    let rows = stmt.query_map(
+        [&package_pattern, &version_pattern],
+        PackageVersion::from_row,
+    )?;
+
     let mut results = Vec::new();
-
-    if let Some(upper) = prefix_upper_bound(package) {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT * FROM package_versions \
-             WHERE attribute_path >= ? AND attribute_path < ? AND version LIKE ? ESCAPE '\\' \
-             ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
-        ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![package, upper, version_pattern],
-            PackageVersion::from_row,
-        )?;
-        for row in rows {
-            results.push(row?);
-        }
-    } else {
-        let mut stmt = conn.prepare(&format!(
-            "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
-             ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
-        ))?;
-        let package_pattern = format!("{}%", escape_like_pattern(package));
-        let rows = stmt.query_map(
-            [&package_pattern, &version_pattern],
-            PackageVersion::from_row,
-        )?;
-        for row in rows {
-            results.push(row?);
-        }
+    for row in rows {
+        results.push(row?);
     }
-
     Ok(results)
 }
 
@@ -877,6 +862,16 @@ fn package_attrs_available(conn: &rusqlite::Connection) -> Result<bool> {
     if !has_table {
         return Ok(false);
     }
+    let has_lc: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('package_attrs') WHERE name='attribute_path_lc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_lc {
+        return Ok(false);
+    }
     let has_rows: Option<i64> = conn
         .query_row("SELECT 1 FROM package_attrs LIMIT 1", [], |row| row.get(0))
         .ok();
@@ -942,29 +937,31 @@ pub fn complete_package_prefix(
     };
     let distinct = if use_package_attrs { "" } else { "DISTINCT " };
 
-    if let Some(upper) = prefix_upper_bound(prefix) {
-        let sql = format!(
-            "SELECT {distinct}attribute_path FROM {table} \
-             WHERE attribute_path >= ? AND attribute_path < ? \
-             ORDER BY attribute_path LIMIT ?"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![prefix, upper, limit as i64], |row| {
-            row.get(0)
-        })?;
+    let lower_prefix = prefix.to_ascii_lowercase();
+    if use_package_attrs && let Some(upper) = prefix_upper_bound(&lower_prefix) {
+        let mut stmt = conn.prepare(
+            "SELECT attribute_path FROM package_attrs \
+             WHERE attribute_path_lc >= ? AND attribute_path_lc < ? \
+             ORDER BY attribute_path LIMIT ?",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![lower_prefix, upper, limit as i64],
+            |row| row.get(0),
+        )?;
         for row in rows {
             results.push(row?);
         }
-    } else {
-        let sql = format!(
-            "SELECT {distinct}attribute_path FROM {table} WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let pattern = format!("{}%", escape_like_pattern(prefix));
-        let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
-        for row in rows {
-            results.push(row?);
-        }
+        return Ok(results);
+    }
+
+    let sql = format!(
+        "SELECT {distinct}attribute_path FROM {table} WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let pattern = format!("{}%", escape_like_pattern(prefix));
+    let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
+    for row in rows {
+        results.push(row?);
     }
 
     Ok(results)
@@ -1054,6 +1051,26 @@ mod tests {
         let (_dir, db) = create_test_db();
         let results = search_by_name_version(db.connection(), "python", "99.99").unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_by_name_version_preserves_like_case_behavior() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('requests', '2.32.0', 'abc', 1700000000, 'def', 1700100000,
+                'python313Packages.requests', 'Requests')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_name_version(db.connection(), "python313packages", "2.32").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python313Packages.requests");
     }
 
     #[test]
@@ -1284,6 +1301,26 @@ mod tests {
 
         let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
         assert_eq!(results, vec!["python".to_string(), "python2".to_string()]);
+    }
+
+    #[test]
+    fn test_complete_package_prefix_cache_is_case_insensitive() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('requests', '2.32.0', 'abc', 1700000000, 'def', 1700100000,
+                'python313Packages.requests', 'Requests')
+            "#,
+                [],
+            )
+            .unwrap();
+        db.refresh_package_attrs().unwrap();
+
+        let results = complete_package_prefix(db.connection(), "python313packages", 10).unwrap();
+        assert_eq!(results, vec!["python313Packages.requests".to_string()]);
     }
 
     #[test]
