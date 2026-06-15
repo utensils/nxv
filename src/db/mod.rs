@@ -815,15 +815,44 @@ impl Database {
     /// Rebuild the derived unique attribute table used by completion and bloom generation.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn refresh_package_attrs(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            DELETE FROM package_attrs;
-            INSERT INTO package_attrs (attribute_path, attribute_path_lc)
-            SELECT attribute_path, lower(attribute_path)
-              FROM (SELECT DISTINCT attribute_path FROM package_versions);
-            "#,
-        )?;
-        Ok(())
+        self.conn
+            .execute_batch("SAVEPOINT nxv_refresh_package_attrs")?;
+
+        let refresh_result = (|| -> Result<()> {
+            self.conn.execute("DELETE FROM package_attrs", [])?;
+            self.conn.execute(
+                r#"
+                INSERT INTO package_attrs (attribute_path, attribute_path_lc)
+                SELECT attribute_path, lower(attribute_path)
+                  FROM (SELECT DISTINCT attribute_path FROM package_versions)
+                "#,
+                [],
+            )?;
+            Ok(())
+        })();
+
+        match refresh_result {
+            Ok(()) => {
+                if let Err(err) = self
+                    .conn
+                    .execute_batch("RELEASE SAVEPOINT nxv_refresh_package_attrs")
+                {
+                    let _ = self.conn.execute_batch(
+                        "ROLLBACK TO SAVEPOINT nxv_refresh_package_attrs; \
+                         RELEASE SAVEPOINT nxv_refresh_package_attrs;",
+                    );
+                    return Err(err.into());
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT nxv_refresh_package_attrs; \
+                     RELEASE SAVEPOINT nxv_refresh_package_attrs;",
+                );
+                Err(err)
+            }
+        }
     }
 
     /// Refresh aggregate stats cached in `meta` for fast read-only stats calls.
@@ -1019,6 +1048,59 @@ mod tests {
         assert_eq!(completions, vec!["nodejs_20".to_string()]);
         let stats = crate::db::queries::get_stats(db.connection()).unwrap();
         assert_eq!(stats.total_ranges, 2);
+    }
+
+    #[test]
+    fn test_refresh_package_attrs_rolls_back_on_error() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        let now = Utc::now();
+
+        db.upsert_observations(&[PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            first_commit_hash: "abc1234567890".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "def1234567890".to_string(),
+            last_commit_date: now,
+            attribute_path: "python311".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }])
+        .unwrap();
+        db.refresh_package_attrs().unwrap();
+
+        db.conn
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_package_attrs_refresh
+                BEFORE INSERT ON package_attrs
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced package_attrs insert failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        assert!(db.refresh_package_attrs().is_err());
+        let cached_attrs: Vec<String> = db
+            .conn
+            .prepare("SELECT attribute_path FROM package_attrs ORDER BY attribute_path")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(cached_attrs, vec!["python311".to_string()]);
     }
 
     #[test]
