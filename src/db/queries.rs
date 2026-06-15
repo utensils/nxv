@@ -472,7 +472,7 @@ pub fn get_first_occurrence(
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY first_commit_date ASC LIMIT 1",
     )?;
 
     let result = stmt.query_row([package, version], PackageVersion::from_row);
@@ -511,7 +511,7 @@ pub fn get_last_occurrence(
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY last_commit_date DESC LIMIT 1",
     )?;
 
     let result = stmt.query_row([package, version], PackageVersion::from_row);
@@ -554,6 +554,13 @@ pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
+    let schema_version = meta_value(conn, "schema_version")?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if schema_version < 4 {
+        return get_version_history_grouped(conn, package);
+    }
+
     // Schema v4 stores one row per (attribute_path, version), so the historical
     // GROUP BY/MIN/MAX query is redundant. Keep the cross-attribute security
     // semantics by checking the partial vulnerability index per returned row.
@@ -575,6 +582,64 @@ pub fn get_version_history(
         FROM package_versions pv
         WHERE pv.attribute_path = ?
         ORDER BY pv.first_commit_date DESC
+        "#,
+    )?;
+
+    let rows = stmt.query_map([package], |row| {
+        let version: String = row.get(0)?;
+        let first_ts: i64 = row.get(1)?;
+        let last_ts: i64 = row.get(2)?;
+        let is_insecure: i64 = row.get(3)?;
+
+        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                format!("Invalid first_seen timestamp: {}", first_ts).into(),
+            )
+        })?;
+
+        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Integer,
+                format!("Invalid last_seen timestamp: {}", last_ts).into(),
+            )
+        })?;
+
+        Ok((version, first_seen, last_seen, is_insecure != 0))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+fn get_version_history_grouped(
+    conn: &rusqlite::Connection,
+    package: &str,
+) -> Result<Vec<VersionHistoryEntry>> {
+    let mut stmt = conn.prepare(
+        r#"
+        WITH insecure_versions AS (
+            SELECT DISTINCT version
+            FROM package_versions
+            WHERE known_vulnerabilities IS NOT NULL
+              AND known_vulnerabilities != ''
+              AND known_vulnerabilities != '[]'
+              AND known_vulnerabilities != 'null'
+        )
+        SELECT pv.version,
+               MIN(pv.first_commit_date) as first_seen,
+               MAX(pv.last_commit_date) as last_seen,
+               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+        FROM package_versions pv
+        LEFT JOIN insecure_versions iv ON pv.version = iv.version
+        WHERE pv.attribute_path = ?
+        GROUP BY pv.version
+        ORDER BY first_seen DESC
         "#,
     )?;
 
@@ -1147,6 +1212,47 @@ mod tests {
         let (_dir, db) = create_test_db();
         let history = get_version_history(db.connection(), "nonexistent").unwrap();
         assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_get_version_history_groups_legacy_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES
+                ('python', '3.11.0', 'a', 100, 'b', 200, 'python'),
+                ('python', '3.11.0', 'c', 50, 'd', 300, 'python');
+            "#,
+        )
+        .unwrap();
+
+        let history = get_version_history(&conn, "python").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, "3.11.0");
+        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
     }
 
     #[test]
