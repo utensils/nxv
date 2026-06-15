@@ -223,6 +223,9 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     }
 
     // ── Finish ──────────────────────────────────────────────────────────
+    progress("refreshing attribute cache...");
+    db.refresh_package_attrs()?;
+
     progress("rebuilding bloom filter...");
     let bloom_path = crate::paths::get_bloom_path_for_db(&cli.db_path);
     save_bloom_filter(&db, &bloom_path)?;

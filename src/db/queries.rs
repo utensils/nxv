@@ -847,6 +847,21 @@ pub fn search_by_description(
     Ok(results)
 }
 
+fn package_attrs_available(conn: &rusqlite::Connection) -> Result<bool> {
+    let has_table: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='package_attrs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(false);
+    }
+    let has_rows: Option<i64> = conn
+        .query_row("SELECT 1 FROM package_attrs LIMIT 1", [], |row| row.get(0))
+        .ok();
+    Ok(has_rows.is_some())
+}
+
 /// Return all distinct package attribute paths from the database, ordered by attribute_path.
 ///
 /// The results are suitable for building membership structures (e.g., a bloom filter) used to
@@ -865,8 +880,12 @@ pub fn search_by_description(
 /// assert_eq!(attrs, vec!["pkg::a".to_string(), "pkg::b".to_string()]);
 /// ```
 pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path")?;
+    let sql = if package_attrs_available(conn)? {
+        "SELECT attribute_path FROM package_attrs ORDER BY attribute_path"
+    } else {
+        "SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -894,13 +913,21 @@ pub fn complete_package_prefix(
     limit: usize,
 ) -> Result<Vec<String>> {
     let mut results = Vec::new();
+    let use_package_attrs = package_attrs_available(conn)?;
+    let table = if use_package_attrs {
+        "package_attrs"
+    } else {
+        "package_versions"
+    };
+    let distinct = if use_package_attrs { "" } else { "DISTINCT " };
 
     if let Some(upper) = prefix_upper_bound(prefix) {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT attribute_path FROM package_versions \
+        let sql = format!(
+            "SELECT {distinct}attribute_path FROM {table} \
              WHERE attribute_path >= ? AND attribute_path < ? \
-             ORDER BY attribute_path LIMIT ?",
-        )?;
+             ORDER BY attribute_path LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![prefix, upper, limit as i64], |row| {
             row.get(0)
         })?;
@@ -908,9 +935,10 @@ pub fn complete_package_prefix(
             results.push(row?);
         }
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
-        )?;
+        let sql = format!(
+            "SELECT {distinct}attribute_path FROM {table} WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let pattern = format!("{}%", escape_like_pattern(prefix));
         let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
         for row in rows {
@@ -1191,6 +1219,35 @@ mod tests {
 
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
         assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_unique_attrs_uses_package_attrs_cache() {
+        let (_dir, db) = create_test_db();
+        db.refresh_package_attrs().unwrap();
+
+        db.connection()
+            .execute("DELETE FROM package_versions", [])
+            .unwrap();
+
+        let attrs = get_all_unique_attrs(db.connection()).unwrap();
+        assert_eq!(attrs.len(), 3);
+        assert!(attrs.contains(&"python".to_string()));
+        assert!(attrs.contains(&"python2".to_string()));
+        assert!(attrs.contains(&"nodejs".to_string()));
+    }
+
+    #[test]
+    fn test_complete_package_prefix_uses_package_attrs_cache() {
+        let (_dir, db) = create_test_db();
+        db.refresh_package_attrs().unwrap();
+
+        db.connection()
+            .execute("DELETE FROM package_versions", [])
+            .unwrap();
+
+        let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
+        assert_eq!(results, vec!["python".to_string(), "python2".to_string()]);
     }
 
     #[test]

@@ -193,6 +193,13 @@ impl Database {
                 CHECK(first_commit_date <= last_commit_date)
             );
 
+            -- Derived unique attribute set. This is rebuilt from
+            -- package_versions at index/publish finish and lets completion and
+            -- bloom generation avoid DISTINCT scans over every version row.
+            CREATE TABLE IF NOT EXISTS package_attrs (
+                attribute_path TEXT PRIMARY KEY
+            ) WITHOUT ROWID;
+
             -- Channel-release ingestion ledger: which snapshots have been observed,
             -- which are pending/failed, and their retry/backoff state.
             CREATE TABLE IF NOT EXISTS releases (
@@ -772,6 +779,19 @@ impl Database {
             rows_updated,
             rows_deleted,
         })
+    }
+
+    /// Rebuild the derived unique attribute table used by completion and bloom generation.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn refresh_package_attrs(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            DELETE FROM package_attrs;
+            INSERT INTO package_attrs (attribute_path)
+            SELECT DISTINCT attribute_path FROM package_versions;
+            "#,
+        )?;
+        Ok(())
     }
 
     /// Refresh aggregate stats cached in `meta` for fast read-only stats calls.

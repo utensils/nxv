@@ -442,6 +442,8 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     // Write min_schema_version to database for direct-download validation
     db.set_meta("min_schema_version", &min_version.to_string())?;
+    // Refresh derived read-optimization data before compressing the DB.
+    db.refresh_package_attrs()?;
     // Cache aggregate package stats so read-only stats calls do not rescan the
     // full v4 table on every CLI/API request.
     db.refresh_stats_cache()?;
