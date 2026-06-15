@@ -17,6 +17,20 @@ fn escape_like_pattern(input: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Return the exclusive upper bound for a binary-collated prefix range.
+///
+/// For example, `python` becomes `pythoo`, so callers can express a literal
+/// prefix search as `attribute_path >= 'python' AND attribute_path < 'pythoo'`.
+/// That lets SQLite seek into the `attribute_path` index instead of scanning it
+/// for `LIKE 'python%'`.
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    let last = chars.pop()?;
+    let next = char::from_u32(last as u32 + 1)?;
+    chars.push(next);
+    Some(chars.into_iter().collect())
+}
+
 /// Escapes user input for use in SQLite FTS5 MATCH queries.
 ///
 /// FTS5 has its own query syntax with operators like `NOT`, `OR`, `AND`, `*`, `^`,
@@ -344,7 +358,25 @@ pub fn search_by_name(
     Ok(results)
 }
 
-/// Search for packages by attribute path.
+/// Search for packages by exact attribute path.
+pub fn search_by_attr_exact(
+    conn: &rusqlite::Connection,
+    attr_path: &str,
+) -> Result<Vec<PackageVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM package_versions WHERE attribute_path = ? \
+         ORDER BY last_commit_date DESC",
+    )?;
+    let rows = stmt.query_map([attr_path], PackageVersion::from_row)?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Search for packages by attribute path prefix.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' \
@@ -385,22 +417,40 @@ pub fn search_by_name_version(
     package: &str,
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
-    // Search by attribute_path (package) and version prefix
-    let mut stmt = conn.prepare(&format!(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
-         ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
-    ))?;
-    let package_pattern = format!("{}%", escape_like_pattern(package));
+    // Search by attribute_path (package) and version prefix. Use a literal
+    // B-tree range for attribute prefixes when possible; on v4-sized indexes
+    // this avoids a full scan for narrow package families like `python311%`.
     let version_pattern = format!("{}%", escape_like_pattern(version));
-    let rows = stmt.query_map(
-        [&package_pattern, &version_pattern],
-        PackageVersion::from_row,
-    )?;
-
     let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
+
+    if let Some(upper) = prefix_upper_bound(package) {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT * FROM package_versions \
+             WHERE attribute_path >= ? AND attribute_path < ? AND version LIKE ? ESCAPE '\\' \
+             ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![package, upper, version_pattern],
+            PackageVersion::from_row,
+        )?;
+        for row in rows {
+            results.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
+             ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        ))?;
+        let package_pattern = format!("{}%", escape_like_pattern(package));
+        let rows = stmt.query_map(
+            [&package_pattern, &version_pattern],
+            PackageVersion::from_row,
+        )?;
+        for row in rows {
+            results.push(row?);
+        }
     }
+
     Ok(results)
 }
 
@@ -427,7 +477,7 @@ pub fn get_first_occurrence(
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY first_commit_date ASC LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? LIMIT 1",
     )?;
 
     let result = stmt.query_row([package, version], PackageVersion::from_row);
@@ -466,7 +516,7 @@ pub fn get_last_occurrence(
     version: &str,
 ) -> Result<Option<PackageVersion>> {
     let mut stmt = conn.prepare(
-        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? ORDER BY last_commit_date DESC LIMIT 1",
+        "SELECT * FROM package_versions WHERE attribute_path = ? AND version = ? LIMIT 1",
     )?;
 
     let result = stmt.query_row([package, version], PackageVersion::from_row);
@@ -509,32 +559,27 @@ pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
-    // Query history for the specific attribute path, but check if ANY package
-    // with the same version has vulnerabilities (since insecurity is about the
-    // version, not the attribute path - e.g., Python 2.7 is EOL regardless of
-    // whether it's called "python" or "python27")
-    //
-    // Uses a CTE to pre-compute insecure versions once, avoiding a correlated
-    // subquery that would run for each row in the result set.
+    // Schema v4 stores one row per (attribute_path, version), so the historical
+    // GROUP BY/MIN/MAX query is redundant. Keep the cross-attribute security
+    // semantics by checking the partial vulnerability index per returned row.
     let mut stmt = conn.prepare(
         r#"
-        WITH insecure_versions AS (
-            SELECT DISTINCT version
-            FROM package_versions
-            WHERE known_vulnerabilities IS NOT NULL
-              AND known_vulnerabilities != ''
-              AND known_vulnerabilities != '[]'
-              AND known_vulnerabilities != 'null'
-        )
         SELECT pv.version,
-               MIN(pv.first_commit_date) as first_seen,
-               MAX(pv.last_commit_date) as last_seen,
-               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+               pv.first_commit_date as first_seen,
+               pv.last_commit_date as last_seen,
+               EXISTS (
+                   SELECT 1
+                   FROM package_versions iv INDEXED BY idx_version_vulnerabilities
+                   WHERE iv.version = pv.version
+                     AND iv.known_vulnerabilities IS NOT NULL
+                     AND iv.known_vulnerabilities != ''
+                     AND iv.known_vulnerabilities != '[]'
+                     AND iv.known_vulnerabilities != 'null'
+                   LIMIT 1
+               ) as is_insecure
         FROM package_versions pv
-        LEFT JOIN insecure_versions iv ON pv.version = iv.version
         WHERE pv.attribute_path = ?
-        GROUP BY pv.version
-        ORDER BY first_seen DESC
+        ORDER BY pv.first_commit_date DESC
         "#,
     )?;
 
@@ -770,16 +815,31 @@ pub fn complete_package_prefix(
     prefix: &str,
     limit: usize,
 ) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
-    )?;
-    let pattern = format!("{}%", escape_like_pattern(prefix));
-    let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
-
     let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
+
+    if let Some(upper) = prefix_upper_bound(prefix) {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT attribute_path FROM package_versions \
+             WHERE attribute_path >= ? AND attribute_path < ? \
+             ORDER BY attribute_path LIMIT ?",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![prefix, upper, limit as i64], |row| {
+            row.get(0)
+        })?;
+        for row in rows {
+            results.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
+        )?;
+        let pattern = format!("{}%", escape_like_pattern(prefix));
+        let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
+        for row in rows {
+            results.push(row?);
+        }
     }
+
     Ok(results)
 }
 
@@ -883,6 +943,14 @@ mod tests {
         let results = search_by_attr(db.connection(), "nodejs").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].attribute_path, "nodejs");
+    }
+
+    #[test]
+    fn test_search_by_attr_exact_excludes_prefix_siblings() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr_exact(db.connection(), "python").unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|p| p.attribute_path == "python"));
     }
 
     #[test]

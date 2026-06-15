@@ -67,13 +67,7 @@ impl Backend {
     #[allow(dead_code)]
     pub fn get_package(&self, attr: &str) -> Result<Vec<PackageVersion>> {
         match self {
-            Backend::Local(db) => {
-                let results = queries::search_by_attr(db.connection(), attr)?;
-                Ok(results
-                    .into_iter()
-                    .filter(|p| p.attribute_path == attr)
-                    .collect())
-            }
+            Backend::Local(db) => queries::search_by_attr_exact(db.connection(), attr),
             Backend::Remote(client) => client.get_package(attr),
         }
     }
@@ -109,11 +103,8 @@ impl Backend {
                 if let Some(v) = version {
                     queries::search_by_name_version(db.connection(), package, v)
                 } else {
-                    // Try exact attribute path first
-                    let by_attr: Vec<_> = queries::search_by_attr(db.connection(), package)?
-                        .into_iter()
-                        .filter(|p| p.attribute_path == package)
-                        .collect();
+                    // Try exact attribute path first.
+                    let by_attr = queries::search_by_attr_exact(db.connection(), package)?;
 
                     if !by_attr.is_empty() {
                         Ok(by_attr)
