@@ -652,6 +652,12 @@ struct PackageStatsCache {
 }
 
 fn cached_package_stats(conn: &rusqlite::Connection) -> Result<Option<PackageStatsCache>> {
+    // Treat the calculated-at marker as the commit marker for the cache. It is
+    // written in the same INSERT statement as the values, so missing marker =>
+    // old/partial cache and live scans are safer.
+    if meta_value(conn, META_STATS_CALCULATED_AT)?.is_none() {
+        return Ok(None);
+    }
     let Some(total_ranges) = cached_i64(conn, META_STATS_TOTAL_RANGES)? else {
         return Ok(None);
     };
@@ -716,29 +722,31 @@ fn compute_package_stats(conn: &rusqlite::Connection) -> Result<PackageStatsCach
 pub fn refresh_stats_cache(conn: &rusqlite::Connection) -> Result<()> {
     let stats = compute_package_stats(conn)?;
     let calculated_at = Utc::now().to_rfc3339();
-    let values = [
-        (META_STATS_TOTAL_RANGES, stats.total_ranges.to_string()),
-        (META_STATS_UNIQUE_NAMES, stats.unique_names.to_string()),
-        (
+    conn.execute(
+        r#"
+        INSERT OR REPLACE INTO meta (key, value) VALUES
+            (?1, ?2),
+            (?3, ?4),
+            (?5, ?6),
+            (?7, ?8),
+            (?9, ?10),
+            (?11, ?12)
+        "#,
+        rusqlite::params![
+            META_STATS_TOTAL_RANGES,
+            stats.total_ranges.to_string(),
+            META_STATS_UNIQUE_NAMES,
+            stats.unique_names.to_string(),
             META_STATS_UNIQUE_VERSIONS,
             stats.unique_versions.to_string(),
-        ),
-        (
             META_STATS_OLDEST_COMMIT_DATE,
             stats.oldest.map(|v| v.to_string()).unwrap_or_default(),
-        ),
-        (
             META_STATS_NEWEST_COMMIT_DATE,
             stats.newest.map(|v| v.to_string()).unwrap_or_default(),
-        ),
-        (META_STATS_CALCULATED_AT, calculated_at),
-    ];
-    for (key, value) in values {
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            rusqlite::params![key, value],
-        )?;
-    }
+            META_STATS_CALCULATED_AT,
+            calculated_at,
+        ],
+    )?;
     Ok(())
 }
 
@@ -1154,6 +1162,8 @@ mod tests {
             .unwrap();
         db.set_meta(META_STATS_NEWEST_COMMIT_DATE, "1700000000")
             .unwrap();
+        db.set_meta(META_STATS_CALCULATED_AT, "2026-01-01T00:00:00Z")
+            .unwrap();
 
         let stats = get_stats(db.connection()).unwrap();
         assert_eq!(stats.total_ranges, 123);
@@ -1167,6 +1177,19 @@ mod tests {
             stats.newest_commit_date.unwrap(),
             Utc.timestamp_opt(1700000000, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn test_get_stats_ignores_partial_cache_without_marker() {
+        let (_dir, db) = create_test_db();
+        db.set_meta(META_STATS_TOTAL_RANGES, "123").unwrap();
+        db.set_meta(META_STATS_UNIQUE_NAMES, "45").unwrap();
+        db.set_meta(META_STATS_UNIQUE_VERSIONS, "67").unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 4);
+        assert_eq!(stats.unique_names, 4);
+        assert_eq!(stats.unique_versions, 4);
     }
 
     #[test]
