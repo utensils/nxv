@@ -243,6 +243,12 @@ impl Database {
         ingested: &[(i64, i64)], // (release id, attr_count)
     ) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        // Any successful package write makes derived attrs/stats stale until
+        // the finish step rebuilds them. Invalidate in the same transaction so
+        // an interrupted run falls back to source tables instead of old caches.
+        if !observations.is_empty() {
+            Database::invalidate_derived_caches_tx(&tx)?;
+        }
         let written = Database::upsert_observations_tx(&tx, observations)?;
         {
             let mut stmt = tx.prepare_cached(

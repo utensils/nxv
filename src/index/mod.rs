@@ -223,6 +223,9 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     }
 
     // ── Finish ──────────────────────────────────────────────────────────
+    progress("refreshing attribute cache...");
+    db.refresh_package_attrs()?;
+
     progress("rebuilding bloom filter...");
     let bloom_path = crate::paths::get_bloom_path_for_db(&cli.db_path);
     save_bloom_filter(&db, &bloom_path)?;
@@ -233,6 +236,9 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
         db.set_meta("last_indexed_commit", &newest.commit_hash)?;
         db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     }
+
+    progress("refreshing stats cache...");
+    db.refresh_stats_cache()?;
 
     report.finalize(&db, args.strict)?;
     if !quiet {

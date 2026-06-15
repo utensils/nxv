@@ -136,11 +136,9 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
         // Search by name and version
         queries::search_by_name_version(conn, &opts.query, version)?
     } else if opts.exact {
-        // Exact match on attribute_path
-        queries::search_by_attr(conn, &opts.query)?
-            .into_iter()
-            .filter(|p| p.attribute_path == opts.query)
-            .collect()
+        // Exact match on attribute_path. Avoid the old prefix query + Rust
+        // filter path, which materialized thousands of sibling attrs on v4 DBs.
+        queries::search_by_attr_exact(conn, &opts.query)?
     } else {
         // Prefix search on attribute_path
         queries::search_by_attr(conn, &opts.query)?

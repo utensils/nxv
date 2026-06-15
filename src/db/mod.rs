@@ -193,6 +193,14 @@ impl Database {
                 CHECK(first_commit_date <= last_commit_date)
             );
 
+            -- Derived unique attribute set. This is rebuilt from
+            -- package_versions at index/publish finish and lets completion and
+            -- bloom generation avoid DISTINCT scans over every version row.
+            CREATE TABLE IF NOT EXISTS package_attrs (
+                attribute_path TEXT PRIMARY KEY,
+                attribute_path_lc TEXT
+            ) WITHOUT ROWID;
+
             -- Channel-release ingestion ledger: which snapshots have been observed,
             -- which are pending/failed, and their retry/backoff state.
             CREATE TABLE IF NOT EXISTS releases (
@@ -221,6 +229,27 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
             "#,
+        )?;
+
+        // Keep the derived attr table upgradeable without a schema bump: it is
+        // strictly a cache and can be rebuilt from package_versions.
+        let has_attr_lc: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('package_attrs') WHERE name='attribute_path_lc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_attr_lc {
+            self.conn.execute(
+                "ALTER TABLE package_attrs ADD COLUMN attribute_path_lc TEXT",
+                [],
+            )?;
+        }
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_attrs_lc ON package_attrs(attribute_path_lc, attribute_path)",
+            [],
         )?;
 
         // Create FTS5 table if it doesn't exist
@@ -446,9 +475,18 @@ impl Database {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn upsert_observations(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        if !packages.is_empty() {
+            Self::invalidate_derived_caches_tx(&tx)?;
+        }
         let written = Self::upsert_observations_tx(&tx, packages)?;
         tx.commit()?;
         Ok(written)
+    }
+
+    pub(crate) fn invalidate_derived_caches_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        tx.execute("DELETE FROM package_attrs", [])?;
+        tx.execute("DELETE FROM meta WHERE key LIKE 'stats_%'", [])?;
+        Ok(())
     }
 
     /// Like [`Self::upsert_observations`] but runs inside a caller-provided
@@ -774,6 +812,55 @@ impl Database {
         })
     }
 
+    /// Rebuild the derived unique attribute table used by completion and bloom generation.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn refresh_package_attrs(&self) -> Result<()> {
+        self.conn
+            .execute_batch("SAVEPOINT nxv_refresh_package_attrs")?;
+
+        let refresh_result = (|| -> Result<()> {
+            self.conn.execute("DELETE FROM package_attrs", [])?;
+            self.conn.execute(
+                r#"
+                INSERT INTO package_attrs (attribute_path, attribute_path_lc)
+                SELECT attribute_path, lower(attribute_path)
+                  FROM (SELECT DISTINCT attribute_path FROM package_versions)
+                "#,
+                [],
+            )?;
+            Ok(())
+        })();
+
+        match refresh_result {
+            Ok(()) => {
+                if let Err(err) = self
+                    .conn
+                    .execute_batch("RELEASE SAVEPOINT nxv_refresh_package_attrs")
+                {
+                    let _ = self.conn.execute_batch(
+                        "ROLLBACK TO SAVEPOINT nxv_refresh_package_attrs; \
+                         RELEASE SAVEPOINT nxv_refresh_package_attrs;",
+                    );
+                    return Err(err.into());
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO SAVEPOINT nxv_refresh_package_attrs; \
+                     RELEASE SAVEPOINT nxv_refresh_package_attrs;",
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Refresh aggregate stats cached in `meta` for fast read-only stats calls.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn refresh_stats_cache(&self) -> Result<()> {
+        queries::refresh_stats_cache(&self.conn)
+    }
+
     /// Run `VACUUM` to reclaim disk space after a dedupe.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn vacuum(&self) -> Result<()> {
@@ -904,6 +991,116 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_upsert_observations_invalidates_derived_caches() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        let now = Utc::now();
+
+        let mut pkg = PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            first_commit_hash: "abc1234567890".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "def1234567890".to_string(),
+            last_commit_date: now,
+            attribute_path: "python311".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        };
+
+        db.upsert_observations(std::slice::from_ref(&pkg)).unwrap();
+        db.refresh_package_attrs().unwrap();
+        db.refresh_stats_cache().unwrap();
+
+        let cached_attrs: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_attrs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_attrs, 1);
+        assert!(db.get_meta("stats_calculated_at").unwrap().is_some());
+
+        pkg.name = "nodejs".to_string();
+        pkg.version = "20.0.0".to_string();
+        pkg.attribute_path = "nodejs_20".to_string();
+        db.upsert_observations(&[pkg]).unwrap();
+
+        let cached_attrs: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_attrs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_attrs, 0);
+        assert!(db.get_meta("stats_calculated_at").unwrap().is_none());
+
+        let completions =
+            crate::db::queries::complete_package_prefix(db.connection(), "node", 10).unwrap();
+        assert_eq!(completions, vec!["nodejs_20".to_string()]);
+        let stats = crate::db::queries::get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 2);
+    }
+
+    #[test]
+    fn test_refresh_package_attrs_rolls_back_on_error() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        let now = Utc::now();
+
+        db.upsert_observations(&[PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            first_commit_hash: "abc1234567890".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "def1234567890".to_string(),
+            last_commit_date: now,
+            attribute_path: "python311".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        }])
+        .unwrap();
+        db.refresh_package_attrs().unwrap();
+
+        db.conn
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_package_attrs_refresh
+                BEFORE INSERT ON package_attrs
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced package_attrs insert failure');
+                END;
+                "#,
+            )
+            .unwrap();
+
+        assert!(db.refresh_package_attrs().is_err());
+        let cached_attrs: Vec<String> = db
+            .conn
+            .prepare("SELECT attribute_path FROM package_attrs ORDER BY attribute_path")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(cached_attrs, vec!["python311".to_string()]);
     }
 
     #[test]

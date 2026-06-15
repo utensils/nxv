@@ -297,11 +297,7 @@ pub async fn get_package(
     let packages = run_db_operation(&state, move || {
         let _span = tracing::info_span!("db_get_package").entered();
         let db = Database::open_readonly(&db_path)?;
-        let results: Vec<_> = queries::search_by_attr(db.connection(), &attr_clone)?
-            .into_iter()
-            .filter(|p| p.attribute_path == attr_clone)
-            .collect();
-        Ok::<_, crate::error::NxvError>(results)
+        queries::search_by_attr_exact(db.connection(), &attr_clone)
     })
     .await?;
 

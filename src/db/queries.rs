@@ -17,6 +17,20 @@ fn escape_like_pattern(input: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Return the exclusive upper bound for a binary-collated prefix range.
+///
+/// For example, `python` becomes `pythoo`, so callers can express a literal
+/// prefix search as `attribute_path >= 'python' AND attribute_path < 'pythoo'`.
+/// That lets SQLite seek into the `attribute_path` index instead of scanning it
+/// for `LIKE 'python%'`.
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    let last = chars.pop()?;
+    let next = char::from_u32(last as u32 + 1)?;
+    chars.push(next);
+    Some(chars.into_iter().collect())
+}
+
 /// Escapes user input for use in SQLite FTS5 MATCH queries.
 ///
 /// FTS5 has its own query syntax with operators like `NOT`, `OR`, `AND`, `*`, `^`,
@@ -278,6 +292,16 @@ pub struct ChannelCoverageStat {
     pub newest_release_date: Option<DateTime<Utc>>,
 }
 
+/// Metadata keys for cached aggregate stats. They are populated by the indexer
+/// and publisher after package writes settle, so read-only `stats` calls don't
+/// have to rescan the full v4 package table.
+const META_STATS_TOTAL_RANGES: &str = "stats_total_ranges";
+const META_STATS_UNIQUE_NAMES: &str = "stats_unique_names";
+const META_STATS_UNIQUE_VERSIONS: &str = "stats_unique_versions";
+const META_STATS_OLDEST_COMMIT_DATE: &str = "stats_oldest_commit_date";
+const META_STATS_NEWEST_COMMIT_DATE: &str = "stats_newest_commit_date";
+const META_STATS_CALCULATED_AT: &str = "stats_calculated_at";
+
 /// Index statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -344,7 +368,25 @@ pub fn search_by_name(
     Ok(results)
 }
 
-/// Search for packages by attribute path.
+/// Search for packages by exact attribute path.
+pub fn search_by_attr_exact(
+    conn: &rusqlite::Connection,
+    attr_path: &str,
+) -> Result<Vec<PackageVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM package_versions WHERE attribute_path = ? \
+         ORDER BY last_commit_date DESC",
+    )?;
+    let rows = stmt.query_map([attr_path], PackageVersion::from_row)?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Search for packages by attribute path prefix.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' \
@@ -385,7 +427,10 @@ pub fn search_by_name_version(
     package: &str,
     version: &str,
 ) -> Result<Vec<PackageVersion>> {
-    // Search by attribute_path (package) and version prefix
+    // Search by attribute_path (package) and version prefix. Keep SQLite LIKE's
+    // historical ASCII-case-insensitive behavior here so versioned and
+    // unversioned prefix searches agree for mixed-case package-set segments
+    // such as `python313Packages`.
     let mut stmt = conn.prepare(&format!(
         "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
          ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
@@ -509,32 +554,34 @@ pub fn get_version_history(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
-    // Query history for the specific attribute path, but check if ANY package
-    // with the same version has vulnerabilities (since insecurity is about the
-    // version, not the attribute path - e.g., Python 2.7 is EOL regardless of
-    // whether it's called "python" or "python27")
-    //
-    // Uses a CTE to pre-compute insecure versions once, avoiding a correlated
-    // subquery that would run for each row in the result set.
+    let schema_version = meta_value(conn, "schema_version")?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if schema_version < 4 {
+        return get_version_history_grouped(conn, package);
+    }
+
+    // Schema v4 stores one row per (attribute_path, version), so the historical
+    // GROUP BY/MIN/MAX query is redundant. Keep the cross-attribute security
+    // semantics by checking the partial vulnerability index per returned row.
     let mut stmt = conn.prepare(
         r#"
-        WITH insecure_versions AS (
-            SELECT DISTINCT version
-            FROM package_versions
-            WHERE known_vulnerabilities IS NOT NULL
-              AND known_vulnerabilities != ''
-              AND known_vulnerabilities != '[]'
-              AND known_vulnerabilities != 'null'
-        )
         SELECT pv.version,
-               MIN(pv.first_commit_date) as first_seen,
-               MAX(pv.last_commit_date) as last_seen,
-               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+               pv.first_commit_date as first_seen,
+               pv.last_commit_date as last_seen,
+               EXISTS (
+                   SELECT 1
+                   FROM package_versions iv
+                   WHERE iv.version = pv.version
+                     AND iv.known_vulnerabilities IS NOT NULL
+                     AND iv.known_vulnerabilities != ''
+                     AND iv.known_vulnerabilities != '[]'
+                     AND iv.known_vulnerabilities != 'null'
+                   LIMIT 1
+               ) as is_insecure
         FROM package_versions pv
-        LEFT JOIN insecure_versions iv ON pv.version = iv.version
         WHERE pv.attribute_path = ?
-        GROUP BY pv.version
-        ORDER BY first_seen DESC
+        ORDER BY pv.first_commit_date DESC
         "#,
     )?;
 
@@ -570,8 +617,135 @@ pub fn get_version_history(
     Ok(results)
 }
 
-/// Get index statistics.
-pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
+fn get_version_history_grouped(
+    conn: &rusqlite::Connection,
+    package: &str,
+) -> Result<Vec<VersionHistoryEntry>> {
+    let has_vulnerabilities_column =
+        table_has_column(conn, "package_versions", "known_vulnerabilities")?;
+    let sql = if has_vulnerabilities_column {
+        r#"
+        WITH insecure_versions AS (
+            SELECT DISTINCT version
+            FROM package_versions
+            WHERE known_vulnerabilities IS NOT NULL
+              AND known_vulnerabilities != ''
+              AND known_vulnerabilities != '[]'
+              AND known_vulnerabilities != 'null'
+        )
+        SELECT pv.version,
+               MIN(pv.first_commit_date) as first_seen,
+               MAX(pv.last_commit_date) as last_seen,
+               CASE WHEN iv.version IS NOT NULL THEN 1 ELSE 0 END as is_insecure
+        FROM package_versions pv
+        LEFT JOIN insecure_versions iv ON pv.version = iv.version
+        WHERE pv.attribute_path = ?
+        GROUP BY pv.version
+        ORDER BY first_seen DESC
+        "#
+    } else {
+        r#"
+        SELECT version,
+               MIN(first_commit_date) as first_seen,
+               MAX(last_commit_date) as last_seen,
+               0 as is_insecure
+        FROM package_versions
+        WHERE attribute_path = ?
+        GROUP BY version
+        ORDER BY first_seen DESC
+        "#
+    };
+    let mut stmt = conn.prepare(sql)?;
+
+    let rows = stmt.query_map([package], |row| {
+        let version: String = row.get(0)?;
+        let first_ts: i64 = row.get(1)?;
+        let last_ts: i64 = row.get(2)?;
+        let is_insecure: i64 = row.get(3)?;
+
+        let first_seen = Utc.timestamp_opt(first_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Integer,
+                format!("Invalid first_seen timestamp: {}", first_ts).into(),
+            )
+        })?;
+
+        let last_seen = Utc.timestamp_opt(last_ts, 0).single().ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Integer,
+                format!("Invalid last_seen timestamp: {}", last_ts).into(),
+            )
+        })?;
+
+        Ok((version, first_seen, last_seen, is_insecure != 0))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+fn table_has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    let sql = format!("SELECT COUNT(*) > 0 FROM pragma_table_info({table:?}) WHERE name = ?");
+    Ok(conn.query_row(&sql, [column], |row| row.get(0))?)
+}
+
+fn meta_value(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
+    let result = conn.query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
+        row.get(0)
+    });
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn cached_i64(conn: &rusqlite::Connection, key: &str) -> Result<Option<i64>> {
+    match meta_value(conn, key)? {
+        Some(value) => Ok(value.parse::<i64>().ok()),
+        None => Ok(None),
+    }
+}
+
+struct PackageStatsCache {
+    total_ranges: i64,
+    unique_names: i64,
+    unique_versions: i64,
+    oldest: Option<i64>,
+    newest: Option<i64>,
+}
+
+fn cached_package_stats(conn: &rusqlite::Connection) -> Result<Option<PackageStatsCache>> {
+    // Treat the calculated-at marker as the commit marker for the cache. It is
+    // written in the same INSERT statement as the values, so missing marker =>
+    // old/partial cache and live scans are safer.
+    if meta_value(conn, META_STATS_CALCULATED_AT)?.is_none() {
+        return Ok(None);
+    }
+    let Some(total_ranges) = cached_i64(conn, META_STATS_TOTAL_RANGES)? else {
+        return Ok(None);
+    };
+    let Some(unique_names) = cached_i64(conn, META_STATS_UNIQUE_NAMES)? else {
+        return Ok(None);
+    };
+    let Some(unique_versions) = cached_i64(conn, META_STATS_UNIQUE_VERSIONS)? else {
+        return Ok(None);
+    };
+    Ok(Some(PackageStatsCache {
+        total_ranges,
+        unique_names,
+        unique_versions,
+        oldest: cached_i64(conn, META_STATS_OLDEST_COMMIT_DATE)?,
+        newest: cached_i64(conn, META_STATS_NEWEST_COMMIT_DATE)?,
+    }))
+}
+
+fn compute_package_stats(conn: &rusqlite::Connection) -> Result<PackageStatsCache> {
     let total_ranges: i64 = conn.query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
         row.get(0)
     })?;
@@ -588,45 +762,84 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         |row| row.get(0),
     )?;
 
-    let oldest: Option<i64> = conn
-        .query_row(
-            "SELECT MIN(first_commit_date) FROM package_versions",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let oldest: Option<i64> = conn.query_row(
+        "SELECT MIN(first_commit_date) FROM package_versions",
+        [],
+        |row| row.get(0),
+    )?;
 
-    let newest: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(last_commit_date) FROM package_versions",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let newest: Option<i64> = conn.query_row(
+        "SELECT MAX(last_commit_date) FROM package_versions",
+        [],
+        |row| row.get(0),
+    )?;
 
-    // Get meta values (backwards compatible - returns None if not present)
-    let last_indexed_commit: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'last_indexed_commit'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let last_indexed_date: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'last_indexed_date'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    Ok(IndexStats {
+    Ok(PackageStatsCache {
         total_ranges,
         unique_names,
         unique_versions,
-        oldest_commit_date: oldest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
-        newest_commit_date: newest.and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        oldest,
+        newest,
+    })
+}
+
+/// Refresh cached package-table statistics in `meta`.
+///
+/// This is intended for index/publish finish steps, after package writes and
+/// before WAL checkpoint/compression. Read-only callers automatically fall back
+/// to live scans when these keys are absent (older indexes).
+pub fn refresh_stats_cache(conn: &rusqlite::Connection) -> Result<()> {
+    let stats = compute_package_stats(conn)?;
+    let calculated_at = Utc::now().to_rfc3339();
+    conn.execute(
+        r#"
+        INSERT OR REPLACE INTO meta (key, value) VALUES
+            (?1, ?2),
+            (?3, ?4),
+            (?5, ?6),
+            (?7, ?8),
+            (?9, ?10),
+            (?11, ?12)
+        "#,
+        rusqlite::params![
+            META_STATS_TOTAL_RANGES,
+            stats.total_ranges.to_string(),
+            META_STATS_UNIQUE_NAMES,
+            stats.unique_names.to_string(),
+            META_STATS_UNIQUE_VERSIONS,
+            stats.unique_versions.to_string(),
+            META_STATS_OLDEST_COMMIT_DATE,
+            stats.oldest.map(|v| v.to_string()).unwrap_or_default(),
+            META_STATS_NEWEST_COMMIT_DATE,
+            stats.newest.map(|v| v.to_string()).unwrap_or_default(),
+            META_STATS_CALCULATED_AT,
+            calculated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get index statistics.
+pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
+    let stats = match cached_package_stats(conn)? {
+        Some(stats) => stats,
+        None => compute_package_stats(conn)?,
+    };
+
+    // Get meta values (backwards compatible - returns None if not present)
+    let last_indexed_commit = meta_value(conn, "last_indexed_commit")?;
+    let last_indexed_date = meta_value(conn, "last_indexed_date")?;
+
+    Ok(IndexStats {
+        total_ranges: stats.total_ranges,
+        unique_names: stats.unique_names,
+        unique_versions: stats.unique_versions,
+        oldest_commit_date: stats
+            .oldest
+            .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
+        newest_commit_date: stats
+            .newest
+            .and_then(|ts| Utc.timestamp_opt(ts, 0).single()),
         last_indexed_commit,
         last_indexed_date,
         channels: get_channel_coverage(conn).unwrap_or_default(),
@@ -724,6 +937,31 @@ pub fn search_by_description(
     Ok(results)
 }
 
+fn package_attrs_available(conn: &rusqlite::Connection) -> Result<bool> {
+    let has_table: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='package_attrs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(false);
+    }
+    let has_lc: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('package_attrs') WHERE name='attribute_path_lc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_lc {
+        return Ok(false);
+    }
+    let has_rows: Option<i64> = conn
+        .query_row("SELECT 1 FROM package_attrs LIMIT 1", [], |row| row.get(0))
+        .ok();
+    Ok(has_rows.is_some())
+}
+
 /// Return all distinct package attribute paths from the database, ordered by attribute_path.
 ///
 /// The results are suitable for building membership structures (e.g., a bloom filter) used to
@@ -742,8 +980,12 @@ pub fn search_by_description(
 /// assert_eq!(attrs, vec!["pkg::a".to_string(), "pkg::b".to_string()]);
 /// ```
 pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path")?;
+    let sql = if package_attrs_available(conn)? {
+        "SELECT attribute_path FROM package_attrs ORDER BY attribute_path"
+    } else {
+        "SELECT DISTINCT attribute_path FROM package_versions ORDER BY attribute_path"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| row.get(0))?;
 
     let mut results = Vec::new();
@@ -763,23 +1005,51 @@ pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> 
 ///
 /// # Arguments
 ///
-/// * `prefix` - The prefix to match against attribute paths (case-sensitive)
+/// * `prefix` - The prefix to match against attribute paths. Matching follows SQLite
+///   `LIKE` case behavior on legacy tables and is ASCII-case-insensitive when the
+///   `package_attrs` cache is available.
 /// * `limit` - Maximum number of results to return
 pub fn complete_package_prefix(
     conn: &rusqlite::Connection,
     prefix: &str,
     limit: usize,
 ) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT attribute_path FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?",
-    )?;
+    let mut results = Vec::new();
+    let use_package_attrs = package_attrs_available(conn)?;
+    let table = if use_package_attrs {
+        "package_attrs"
+    } else {
+        "package_versions"
+    };
+    let distinct = if use_package_attrs { "" } else { "DISTINCT " };
+
+    let lower_prefix = prefix.to_ascii_lowercase();
+    if use_package_attrs && let Some(upper) = prefix_upper_bound(&lower_prefix) {
+        let mut stmt = conn.prepare(
+            "SELECT attribute_path FROM package_attrs \
+             WHERE attribute_path_lc >= ? AND attribute_path_lc < ? \
+             ORDER BY attribute_path LIMIT ?",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![lower_prefix, upper, limit as i64],
+            |row| row.get(0),
+        )?;
+        for row in rows {
+            results.push(row?);
+        }
+        return Ok(results);
+    }
+
+    let sql = format!(
+        "SELECT {distinct}attribute_path FROM {table} WHERE attribute_path LIKE ? ESCAPE '\\' ORDER BY attribute_path LIMIT ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let pattern = format!("{}%", escape_like_pattern(prefix));
     let rows = stmt.query_map(rusqlite::params![&pattern, limit as i64], |row| row.get(0))?;
-
-    let mut results = Vec::new();
     for row in rows {
         results.push(row?);
     }
+
     Ok(results)
 }
 
@@ -870,6 +1140,26 @@ mod tests {
     }
 
     #[test]
+    fn test_search_by_name_version_preserves_like_case_behavior() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('requests', '2.32.0', 'abc', 1700000000, 'def', 1700100000,
+                'python313Packages.requests', 'Requests')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let results = search_by_name_version(db.connection(), "python313packages", "2.32").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python313Packages.requests");
+    }
+
+    #[test]
     fn test_search_by_attr() {
         let (_dir, db) = create_test_db();
         let results = search_by_attr(db.connection(), "python").unwrap();
@@ -883,6 +1173,14 @@ mod tests {
         let results = search_by_attr(db.connection(), "nodejs").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].attribute_path, "nodejs");
+    }
+
+    #[test]
+    fn test_search_by_attr_exact_excludes_prefix_siblings() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr_exact(db.connection(), "python").unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|p| p.attribute_path == "python"));
     }
 
     #[test]
@@ -938,6 +1236,88 @@ mod tests {
     }
 
     #[test]
+    fn test_get_version_history_groups_legacy_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '3');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT,
+                known_vulnerabilities TEXT
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES
+                ('python', '3.11.0', 'a', 100, 'b', 200, 'python'),
+                ('python', '3.11.0', 'c', 50, 'd', 300, 'python');
+            "#,
+        )
+        .unwrap();
+
+        let history = get_version_history(&conn, "python").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, "3.11.0");
+        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
+    }
+
+    #[test]
+    fn test_get_version_history_legacy_without_vulnerabilities_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES
+                ('python', '3.11.0', 'a', 100, 'b', 200, 'python'),
+                ('python', '3.11.0', 'c', 50, 'd', 300, 'python');
+            "#,
+        )
+        .unwrap();
+
+        let history = get_version_history(&conn, "python").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, "3.11.0");
+        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
+        assert!(!history[0].3);
+    }
+
+    #[test]
     fn test_get_stats() {
         let (_dir, db) = create_test_db();
         let stats = get_stats(db.connection()).unwrap();
@@ -955,6 +1335,58 @@ mod tests {
         assert_eq!(stats.total_ranges, 0);
         assert_eq!(stats.unique_names, 0);
         assert_eq!(stats.unique_versions, 0);
+    }
+
+    #[test]
+    fn test_get_stats_uses_cache_when_present() {
+        let (_dir, db) = create_test_db();
+        db.set_meta(META_STATS_TOTAL_RANGES, "123").unwrap();
+        db.set_meta(META_STATS_UNIQUE_NAMES, "45").unwrap();
+        db.set_meta(META_STATS_UNIQUE_VERSIONS, "67").unwrap();
+        db.set_meta(META_STATS_OLDEST_COMMIT_DATE, "1600000000")
+            .unwrap();
+        db.set_meta(META_STATS_NEWEST_COMMIT_DATE, "1700000000")
+            .unwrap();
+        db.set_meta(META_STATS_CALCULATED_AT, "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 123);
+        assert_eq!(stats.unique_names, 45);
+        assert_eq!(stats.unique_versions, 67);
+        assert_eq!(
+            stats.oldest_commit_date.unwrap(),
+            Utc.timestamp_opt(1600000000, 0).unwrap()
+        );
+        assert_eq!(
+            stats.newest_commit_date.unwrap(),
+            Utc.timestamp_opt(1700000000, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_get_stats_ignores_partial_cache_without_marker() {
+        let (_dir, db) = create_test_db();
+        db.set_meta(META_STATS_TOTAL_RANGES, "123").unwrap();
+        db.set_meta(META_STATS_UNIQUE_NAMES, "45").unwrap();
+        db.set_meta(META_STATS_UNIQUE_VERSIONS, "67").unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 4);
+        assert_eq!(stats.unique_names, 4);
+        assert_eq!(stats.unique_versions, 4);
+    }
+
+    #[test]
+    fn test_refresh_stats_cache_writes_live_counts() {
+        let (_dir, db) = create_test_db();
+        refresh_stats_cache(db.connection()).unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 4);
+        assert_eq!(stats.unique_names, 4);
+        assert_eq!(stats.unique_versions, 4);
+        assert!(db.get_meta(META_STATS_CALCULATED_AT).unwrap().is_some());
     }
 
     #[test]
@@ -1008,6 +1440,55 @@ mod tests {
 
         let attrs = get_all_unique_attrs(db.connection()).unwrap();
         assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_unique_attrs_uses_package_attrs_cache() {
+        let (_dir, db) = create_test_db();
+        db.refresh_package_attrs().unwrap();
+
+        db.connection()
+            .execute("DELETE FROM package_versions", [])
+            .unwrap();
+
+        let attrs = get_all_unique_attrs(db.connection()).unwrap();
+        assert_eq!(attrs.len(), 3);
+        assert!(attrs.contains(&"python".to_string()));
+        assert!(attrs.contains(&"python2".to_string()));
+        assert!(attrs.contains(&"nodejs".to_string()));
+    }
+
+    #[test]
+    fn test_complete_package_prefix_uses_package_attrs_cache() {
+        let (_dir, db) = create_test_db();
+        db.refresh_package_attrs().unwrap();
+
+        db.connection()
+            .execute("DELETE FROM package_versions", [])
+            .unwrap();
+
+        let results = complete_package_prefix(db.connection(), "python", 10).unwrap();
+        assert_eq!(results, vec!["python".to_string(), "python2".to_string()]);
+    }
+
+    #[test]
+    fn test_complete_package_prefix_cache_is_case_insensitive() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('requests', '2.32.0', 'abc', 1700000000, 'def', 1700100000,
+                'python313Packages.requests', 'Requests')
+            "#,
+                [],
+            )
+            .unwrap();
+        db.refresh_package_attrs().unwrap();
+
+        let results = complete_package_prefix(db.connection(), "python313packages", 10).unwrap();
+        assert_eq!(results, vec!["python313Packages.requests".to_string()]);
     }
 
     #[test]
