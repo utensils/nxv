@@ -29,18 +29,7 @@ pub fn import_delta_pack<P: AsRef<Path>>(conn: &Connection, path: P) -> Result<(
     // Read the SQL content
     let sql_content = fs::read_to_string(&sql_path)?;
 
-    // Execute the SQL statements
-    // The delta pack already contains BEGIN TRANSACTION and COMMIT
-    // But we should handle the case where it might not
-    if sql_content.contains("BEGIN TRANSACTION") {
-        // Execute as-is since it has its own transaction
-        conn.execute_batch(&sql_content)?;
-    } else {
-        // Wrap in transaction for safety
-        conn.execute_batch(&format!("BEGIN TRANSACTION;\n{}\nCOMMIT;", sql_content))?;
-    }
-
-    Ok(())
+    import_delta_sql(conn, &sql_content)
 }
 
 /// Import a delta pack from raw SQL content (uncompressed).
