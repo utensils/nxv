@@ -621,7 +621,9 @@ fn get_version_history_grouped(
     conn: &rusqlite::Connection,
     package: &str,
 ) -> Result<Vec<VersionHistoryEntry>> {
-    let mut stmt = conn.prepare(
+    let has_vulnerabilities_column =
+        table_has_column(conn, "package_versions", "known_vulnerabilities")?;
+    let sql = if has_vulnerabilities_column {
         r#"
         WITH insecure_versions AS (
             SELECT DISTINCT version
@@ -640,8 +642,20 @@ fn get_version_history_grouped(
         WHERE pv.attribute_path = ?
         GROUP BY pv.version
         ORDER BY first_seen DESC
-        "#,
-    )?;
+        "#
+    } else {
+        r#"
+        SELECT version,
+               MIN(first_commit_date) as first_seen,
+               MAX(last_commit_date) as last_seen,
+               0 as is_insecure
+        FROM package_versions
+        WHERE attribute_path = ?
+        GROUP BY version
+        ORDER BY first_seen DESC
+        "#
+    };
+    let mut stmt = conn.prepare(sql)?;
 
     let rows = stmt.query_map([package], |row| {
         let version: String = row.get(0)?;
@@ -673,6 +687,11 @@ fn get_version_history_grouped(
         results.push(row?);
     }
     Ok(results)
+}
+
+fn table_has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    let sql = format!("SELECT COUNT(*) > 0 FROM pragma_table_info({table:?}) WHERE name = ?");
+    Ok(conn.query_row(&sql, [column], |row| row.get(0))?)
 }
 
 fn meta_value(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
@@ -986,7 +1005,9 @@ pub fn get_all_unique_attrs(conn: &rusqlite::Connection) -> Result<Vec<String>> 
 ///
 /// # Arguments
 ///
-/// * `prefix` - The prefix to match against attribute paths (case-sensitive)
+/// * `prefix` - The prefix to match against attribute paths. Matching follows SQLite
+///   `LIKE` case behavior on legacy tables and is ASCII-case-insensitive when the
+///   `package_attrs` cache is available.
 /// * `limit` - Maximum number of results to return
 pub fn complete_package_prefix(
     conn: &rusqlite::Connection,
@@ -1253,6 +1274,47 @@ mod tests {
         assert_eq!(history[0].0, "3.11.0");
         assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
         assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
+    }
+
+    #[test]
+    fn test_get_version_history_legacy_without_vulnerabilities_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE package_versions (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                first_commit_hash TEXT NOT NULL,
+                first_commit_date INTEGER NOT NULL,
+                last_commit_hash TEXT NOT NULL,
+                last_commit_date INTEGER NOT NULL,
+                attribute_path TEXT NOT NULL,
+                description TEXT,
+                license TEXT,
+                homepage TEXT,
+                maintainers TEXT,
+                platforms TEXT,
+                source_path TEXT
+            );
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES
+                ('python', '3.11.0', 'a', 100, 'b', 200, 'python'),
+                ('python', '3.11.0', 'c', 50, 'd', 300, 'python');
+            "#,
+        )
+        .unwrap();
+
+        let history = get_version_history(&conn, "python").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].0, "3.11.0");
+        assert_eq!(history[0].1, Utc.timestamp_opt(50, 0).unwrap());
+        assert_eq!(history[0].2, Utc.timestamp_opt(300, 0).unwrap());
+        assert!(!history[0].3);
     }
 
     #[test]
