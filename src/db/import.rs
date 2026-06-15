@@ -54,6 +54,29 @@ pub fn import_delta_sql(conn: &Connection, sql_content: &str) -> Result<()> {
         conn.execute_batch(&format!("BEGIN TRANSACTION;\n{}\nCOMMIT;", sql_content))?;
     }
 
+    // Delta SQL mutates package_versions directly. Invalidate derived caches so
+    // callers that do not immediately refresh them never observe stale attrs or
+    // package aggregate stats.
+    invalidate_derived_caches(conn)?;
+
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name = ?",
+        [table],
+        |row| row.get(0),
+    )?)
+}
+
+fn invalidate_derived_caches(conn: &Connection) -> Result<()> {
+    if table_exists(conn, "package_attrs")? {
+        conn.execute("DELETE FROM package_attrs", [])?;
+    }
+    if table_exists(conn, "meta")? {
+        conn.execute("DELETE FROM meta WHERE key LIKE 'stats_%'", [])?;
+    }
     Ok(())
 }
 
@@ -301,5 +324,48 @@ COMMIT;
             )
             .unwrap();
         assert_eq!(new_commit, "updated_commit_xyz");
+    }
+
+    #[test]
+    fn test_import_delta_invalidates_derived_caches() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_test_db(&conn);
+        conn.execute_batch(
+            r#"
+            CREATE TABLE package_attrs (attribute_path TEXT PRIMARY KEY) WITHOUT ROWID;
+            INSERT INTO package_attrs (attribute_path) VALUES ('python311');
+            INSERT OR REPLACE INTO meta (key, value) VALUES
+                ('stats_total_ranges', '1'),
+                ('stats_unique_names', '1'),
+                ('stats_unique_versions', '1'),
+                ('stats_calculated_at', 'old');
+            "#,
+        )
+        .unwrap();
+
+        import_delta_sql(
+            &conn,
+            r#"
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path)
+            VALUES ('node', '20.0.0', 'ghi789', 1700000000, 'jkl012', 1700100000, 'nodejs');
+            "#,
+        )
+        .unwrap();
+
+        let attr_cache_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM package_attrs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(attr_cache_rows, 0);
+
+        let stats_keys: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key LIKE 'stats_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats_keys, 0);
     }
 }

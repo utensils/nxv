@@ -364,6 +364,9 @@ pub fn apply_delta_update<P: AsRef<Path>>(
     let db = Database::open(db_path)?;
     let sql_content = std::fs::read_to_string(&delta_path)?;
     import_delta_sql(db.connection(), &sql_content)?;
+    db.refresh_package_attrs()?;
+    db.refresh_stats_cache()?;
+    db.checkpoint()?;
 
     // Also update the bloom filter (sibling to database file)
     if show_progress {
