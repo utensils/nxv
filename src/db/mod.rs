@@ -774,6 +774,12 @@ impl Database {
         })
     }
 
+    /// Refresh aggregate stats cached in `meta` for fast read-only stats calls.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn refresh_stats_cache(&self) -> Result<()> {
+        queries::refresh_stats_cache(&self.conn)
+    }
+
     /// Run `VACUUM` to reclaim disk space after a dedupe.
     #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
     pub fn vacuum(&self) -> Result<()> {

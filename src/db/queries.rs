@@ -292,6 +292,16 @@ pub struct ChannelCoverageStat {
     pub newest_release_date: Option<DateTime<Utc>>,
 }
 
+/// Metadata keys for cached aggregate stats. They are populated by the indexer
+/// and publisher after package writes settle, so read-only `stats` calls don't
+/// have to rescan the full v4 package table.
+const META_STATS_TOTAL_RANGES: &str = "stats_total_ranges";
+const META_STATS_UNIQUE_NAMES: &str = "stats_unique_names";
+const META_STATS_UNIQUE_VERSIONS: &str = "stats_unique_versions";
+const META_STATS_OLDEST_COMMIT_DATE: &str = "stats_oldest_commit_date";
+const META_STATS_NEWEST_COMMIT_DATE: &str = "stats_newest_commit_date";
+const META_STATS_CALCULATED_AT: &str = "stats_calculated_at";
+
 /// Index statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexStats {
@@ -615,8 +625,50 @@ pub fn get_version_history(
     Ok(results)
 }
 
-/// Get index statistics.
-pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
+fn meta_value(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
+    let result = conn.query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
+        row.get(0)
+    });
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn cached_i64(conn: &rusqlite::Connection, key: &str) -> Result<Option<i64>> {
+    match meta_value(conn, key)? {
+        Some(value) => Ok(value.parse::<i64>().ok()),
+        None => Ok(None),
+    }
+}
+
+fn cached_package_stats(
+    conn: &rusqlite::Connection,
+) -> Result<Option<(i64, i64, i64, Option<i64>, Option<i64>)>> {
+    let Some(total_ranges) = cached_i64(conn, META_STATS_TOTAL_RANGES)? else {
+        return Ok(None);
+    };
+    let Some(unique_names) = cached_i64(conn, META_STATS_UNIQUE_NAMES)? else {
+        return Ok(None);
+    };
+    let Some(unique_versions) = cached_i64(conn, META_STATS_UNIQUE_VERSIONS)? else {
+        return Ok(None);
+    };
+    let oldest = cached_i64(conn, META_STATS_OLDEST_COMMIT_DATE)?;
+    let newest = cached_i64(conn, META_STATS_NEWEST_COMMIT_DATE)?;
+    Ok(Some((
+        total_ranges,
+        unique_names,
+        unique_versions,
+        oldest,
+        newest,
+    )))
+}
+
+fn compute_package_stats(
+    conn: &rusqlite::Connection,
+) -> Result<(i64, i64, i64, Option<i64>, Option<i64>)> {
     let total_ranges: i64 = conn.query_row("SELECT COUNT(*) FROM package_versions", [], |row| {
         row.get(0)
     })?;
@@ -633,38 +685,64 @@ pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
         |row| row.get(0),
     )?;
 
-    let oldest: Option<i64> = conn
-        .query_row(
-            "SELECT MIN(first_commit_date) FROM package_versions",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let oldest: Option<i64> = conn.query_row(
+        "SELECT MIN(first_commit_date) FROM package_versions",
+        [],
+        |row| row.get(0),
+    )?;
 
-    let newest: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(last_commit_date) FROM package_versions",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let newest: Option<i64> = conn.query_row(
+        "SELECT MAX(last_commit_date) FROM package_versions",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok((total_ranges, unique_names, unique_versions, oldest, newest))
+}
+
+/// Refresh cached package-table statistics in `meta`.
+///
+/// This is intended for index/publish finish steps, after package writes and
+/// before WAL checkpoint/compression. Read-only callers automatically fall back
+/// to live scans when these keys are absent (older indexes).
+pub fn refresh_stats_cache(conn: &rusqlite::Connection) -> Result<()> {
+    let (total_ranges, unique_names, unique_versions, oldest, newest) =
+        compute_package_stats(conn)?;
+    let calculated_at = Utc::now().to_rfc3339();
+    let values = [
+        (META_STATS_TOTAL_RANGES, total_ranges.to_string()),
+        (META_STATS_UNIQUE_NAMES, unique_names.to_string()),
+        (META_STATS_UNIQUE_VERSIONS, unique_versions.to_string()),
+        (
+            META_STATS_OLDEST_COMMIT_DATE,
+            oldest.map(|v| v.to_string()).unwrap_or_default(),
+        ),
+        (
+            META_STATS_NEWEST_COMMIT_DATE,
+            newest.map(|v| v.to_string()).unwrap_or_default(),
+        ),
+        (META_STATS_CALCULATED_AT, calculated_at),
+    ];
+    for (key, value) in values {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            rusqlite::params![key, value],
+        )?;
+    }
+    Ok(())
+}
+
+/// Get index statistics.
+pub fn get_stats(conn: &rusqlite::Connection) -> Result<IndexStats> {
+    let (total_ranges, unique_names, unique_versions, oldest, newest) =
+        match cached_package_stats(conn)? {
+            Some(stats) => stats,
+            None => compute_package_stats(conn)?,
+        };
 
     // Get meta values (backwards compatible - returns None if not present)
-    let last_indexed_commit: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'last_indexed_commit'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    let last_indexed_date: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'last_indexed_date'",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
+    let last_indexed_commit = meta_value(conn, "last_indexed_commit")?;
+    let last_indexed_date = meta_value(conn, "last_indexed_date")?;
 
     Ok(IndexStats {
         total_ranges,
@@ -1023,6 +1101,43 @@ mod tests {
         assert_eq!(stats.total_ranges, 0);
         assert_eq!(stats.unique_names, 0);
         assert_eq!(stats.unique_versions, 0);
+    }
+
+    #[test]
+    fn test_get_stats_uses_cache_when_present() {
+        let (_dir, db) = create_test_db();
+        db.set_meta(META_STATS_TOTAL_RANGES, "123").unwrap();
+        db.set_meta(META_STATS_UNIQUE_NAMES, "45").unwrap();
+        db.set_meta(META_STATS_UNIQUE_VERSIONS, "67").unwrap();
+        db.set_meta(META_STATS_OLDEST_COMMIT_DATE, "1600000000")
+            .unwrap();
+        db.set_meta(META_STATS_NEWEST_COMMIT_DATE, "1700000000")
+            .unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 123);
+        assert_eq!(stats.unique_names, 45);
+        assert_eq!(stats.unique_versions, 67);
+        assert_eq!(
+            stats.oldest_commit_date.unwrap(),
+            Utc.timestamp_opt(1600000000, 0).unwrap()
+        );
+        assert_eq!(
+            stats.newest_commit_date.unwrap(),
+            Utc.timestamp_opt(1700000000, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_refresh_stats_cache_writes_live_counts() {
+        let (_dir, db) = create_test_db();
+        refresh_stats_cache(db.connection()).unwrap();
+
+        let stats = get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 4);
+        assert_eq!(stats.unique_names, 4);
+        assert_eq!(stats.unique_versions, 4);
+        assert!(db.get_meta(META_STATS_CALCULATED_AT).unwrap().is_some());
     }
 
     #[test]

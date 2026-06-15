@@ -234,6 +234,9 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
         db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     }
 
+    progress("refreshing stats cache...");
+    db.refresh_stats_cache()?;
+
     report.finalize(&db, args.strict)?;
     if !quiet {
         report.print();
