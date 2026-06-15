@@ -247,8 +247,7 @@ impl Database {
         // the finish step rebuilds them. Invalidate in the same transaction so
         // an interrupted run falls back to source tables instead of old caches.
         if !observations.is_empty() {
-            tx.execute("DELETE FROM package_attrs", [])?;
-            tx.execute("DELETE FROM meta WHERE key LIKE 'stats_%'", [])?;
+            Database::invalidate_derived_caches_tx(&tx)?;
         }
         let written = Database::upsert_observations_tx(&tx, observations)?;
         {

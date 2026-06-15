@@ -475,9 +475,18 @@ impl Database {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn upsert_observations(&mut self, packages: &[PackageVersion]) -> Result<usize> {
         let tx = self.conn.transaction()?;
+        if !packages.is_empty() {
+            Self::invalidate_derived_caches_tx(&tx)?;
+        }
         let written = Self::upsert_observations_tx(&tx, packages)?;
         tx.commit()?;
         Ok(written)
+    }
+
+    pub(crate) fn invalidate_derived_caches_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        tx.execute("DELETE FROM package_attrs", [])?;
+        tx.execute("DELETE FROM meta WHERE key LIKE 'stats_%'", [])?;
+        Ok(())
     }
 
     /// Like [`Self::upsert_observations`] but runs inside a caller-provided
@@ -953,6 +962,63 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_upsert_observations_invalidates_derived_caches() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut db = Database::open(&db_path).unwrap();
+        let now = Utc::now();
+
+        let mut pkg = PackageVersion {
+            id: 0,
+            name: "python".to_string(),
+            version: "3.11.0".to_string(),
+            first_commit_hash: "abc1234567890".to_string(),
+            first_commit_date: now,
+            last_commit_hash: "def1234567890".to_string(),
+            last_commit_date: now,
+            attribute_path: "python311".to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        };
+
+        db.upsert_observations(std::slice::from_ref(&pkg)).unwrap();
+        db.refresh_package_attrs().unwrap();
+        db.refresh_stats_cache().unwrap();
+
+        let cached_attrs: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_attrs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_attrs, 1);
+        assert!(db.get_meta("stats_calculated_at").unwrap().is_some());
+
+        pkg.name = "nodejs".to_string();
+        pkg.version = "20.0.0".to_string();
+        pkg.attribute_path = "nodejs_20".to_string();
+        db.upsert_observations(&[pkg]).unwrap();
+
+        let cached_attrs: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM package_attrs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_attrs, 0);
+        assert!(db.get_meta("stats_calculated_at").unwrap().is_none());
+
+        let completions =
+            crate::db::queries::complete_package_prefix(db.connection(), "node", 10).unwrap();
+        assert_eq!(completions, vec!["nodejs_20".to_string()]);
+        let stats = crate::db::queries::get_stats(db.connection()).unwrap();
+        assert_eq!(stats.total_ranges, 2);
     }
 
     #[test]
