@@ -579,7 +579,7 @@ pub fn get_version_history(
                pv.last_commit_date as last_seen,
                EXISTS (
                    SELECT 1
-                   FROM package_versions iv INDEXED BY idx_version_vulnerabilities
+                   FROM package_versions iv
                    WHERE iv.version = pv.version
                      AND iv.known_vulnerabilities IS NOT NULL
                      AND iv.known_vulnerabilities != ''
