@@ -103,9 +103,11 @@ jobs:
           # strictly fresher than not publishing. Failures are alerted on in
           # the final step (after publish) instead of blocking it.
           ./target/release/nxv index --head-eval --report report.json
-          echo "ingested=$(jq -r '.ingested' report.json)" >> "$GITHUB_OUTPUT"
-          echo "healthy=$(jq -r '.healthy // false' report.json)" >> "$GITHUB_OUTPUT"
-          echo "failed=$(jq -r '.failed' report.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "ingested=$(jq -r '.ingested' report.json)"
+            echo "healthy=$(jq -r '.healthy // false' report.json)"
+            echo "failed=$(jq -r '.failed' report.json)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Decide whether to publish
         id: gate
@@ -203,7 +205,15 @@ jobs:
 
           echo "Verifying published manifest points at this run's immutable assets..."
           published_manifest="$(mktemp)"
-          curl -sSfL "${INDEX_URL_PREFIX}/manifest.json" -o "$published_manifest"
+          # Verify via the GitHub Release asset API rather than the stable
+          # /releases/download URL. The stable URL can briefly serve a cached
+          # previous manifest immediately after gh release upload --clobber,
+          # causing a false-negative workflow failure even though the release
+          # asset was replaced successfully.
+          gh release download "$INDEX_RELEASE_TAG" \
+            --pattern manifest.json \
+            --output "$published_manifest" \
+            --clobber
           jq -e \
             --arg index_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}index.db.zst" \
             --arg bloom_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}bloom.bin" \
@@ -225,20 +235,21 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Index Update Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f report.json ]; then
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat report.json >> $GITHUB_STEP_SUMMARY
-            echo '' >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "_No report generated (run failed before ingest)._" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ "${{ steps.gate.outputs.publish }}" = "true" ] && [ -f publish/manifest.json ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- **Published:** yes ($(du -h publish/index.db.zst | cut -f1))" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "- **Published:** no" >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "## Index Update Summary"
+            echo ""
+            if [ -f report.json ]; then
+              echo '```json'
+              cat report.json
+              echo ''
+              echo '```'
+            else
+              echo "_No report generated (run failed before ingest)._"
+            fi
+            echo ""
+            if [ "${{ steps.gate.outputs.publish }}" = "true" ] && [ -f publish/manifest.json ]; then
+              echo "- **Published:** yes ($(du -h publish/index.db.zst | cut -f1))"
+            else
+              echo "- **Published:** no"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
