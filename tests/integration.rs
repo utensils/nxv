@@ -3278,6 +3278,12 @@ fn test_publish_index_workflow_keeps_manifest_as_stable_pointer() {
         "workflow should document the non-atomic manifest/signature replacement window"
     );
     assert!(
+        workflow.contains("for attempt in {1..12}")
+            && workflow.contains("Manifest pointer has not propagated yet")
+            && workflow.contains("Published manifest did not point at this run's immutable assets after waiting for propagation"),
+        "manifest verification should retry to tolerate GitHub release/CDN propagation delay"
+    );
+    assert!(
         workflow.find("replace_stable_asset publish/manifest.json.minisig manifest.json.minisig")
             < workflow.find("replace_stable_asset publish/manifest.json manifest.json"),
         "manifest.json must be replaced after its signature"

@@ -203,12 +203,29 @@ jobs:
 
           echo "Verifying published manifest points at this run's immutable assets..."
           published_manifest="$(mktemp)"
-          curl -sSfL "${INDEX_URL_PREFIX}/manifest.json" -o "$published_manifest"
-          jq -e \
-            --arg index_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}index.db.zst" \
-            --arg bloom_url "${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}bloom.bin" \
-            '.full_index.url == $index_url and .bloom_filter.url == $bloom_url' \
-            "$published_manifest" >/dev/null
+          expected_index_url="${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}index.db.zst"
+          expected_bloom_url="${INDEX_URL_PREFIX}/${INDEX_ASSET_PREFIX}bloom.bin"
+          manifest_verified=false
+          for attempt in {1..12}; do
+            if curl -sSfL "${INDEX_URL_PREFIX}/manifest.json" -o "$published_manifest" \
+              && jq -e \
+                --arg index_url "$expected_index_url" \
+                --arg bloom_url "$expected_bloom_url" \
+                '.full_index.url == $index_url and .bloom_filter.url == $bloom_url' \
+                "$published_manifest" >/dev/null; then
+              manifest_verified=true
+              break
+            fi
+
+            echo "Manifest pointer has not propagated yet (attempt ${attempt}/12); retrying..."
+            sleep 5
+          done
+
+          if [ "$manifest_verified" != "true" ]; then
+            echo "::error::Published manifest did not point at this run's immutable assets after waiting for propagation."
+            jq . "$published_manifest" || cat "$published_manifest"
+            exit 1
+          fi
 
       # AFTER publishing: turn anomalies into a red workflow run so they
       # page the operator. Failed releases stay in the (published) ledger
