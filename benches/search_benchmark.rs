@@ -66,6 +66,13 @@ fn create_benchmark_db(
         CREATE INDEX idx_packages_name ON package_versions(name);
         CREATE INDEX idx_packages_name_version ON package_versions(name, version, first_commit_date);
         CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+        CREATE INDEX idx_packages_search_nocase ON package_versions(
+            attribute_path COLLATE NOCASE,
+            version COLLATE NOCASE,
+            (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+            last_commit_date DESC,
+            first_commit_date DESC
+        );
         CREATE INDEX idx_packages_first_date ON package_versions(first_commit_date DESC);
         CREATE INDEX idx_packages_last_date ON package_versions(last_commit_date DESC);
         CREATE INDEX idx_version_vulnerabilities ON package_versions(version)
@@ -184,7 +191,7 @@ fn bench_exact_lookup(c: &mut Criterion) {
                 b.iter(|| {
                     let sql = format!(
                         "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' \
-                     ORDER BY {depth} ASC, last_commit_date DESC LIMIT 5000"
+                     ORDER BY {depth} ASC, last_commit_date DESC, id ASC LIMIT 5000"
                     );
                     let rows: Vec<String> = conn
                         .prepare_cached(&sql)
@@ -234,7 +241,7 @@ fn bench_prefix_version_search(c: &mut Criterion) {
                 let sql = format!(
                     "SELECT * FROM package_versions \
                      WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
-                     ORDER BY {depth} ASC, first_commit_date DESC LIMIT 5000"
+                     ORDER BY {depth} ASC, first_commit_date DESC, id ASC LIMIT 5000"
                 );
                 let rows: Vec<String> = conn
                     .prepare_cached(&sql)
@@ -252,7 +259,7 @@ fn bench_prefix_version_search(c: &mut Criterion) {
                 let sql = format!(
                     "SELECT * FROM package_versions \
                      WHERE attribute_path >= ? AND attribute_path < ? AND version LIKE ? ESCAPE '\\' \
-                     ORDER BY {depth} ASC, first_commit_date DESC LIMIT 5000"
+                     ORDER BY {depth} ASC, first_commit_date DESC, id ASC LIMIT 5000"
                 );
                 let rows: Vec<String> = conn
                     .prepare_cached(&sql)
@@ -266,6 +273,37 @@ fn bench_prefix_version_search(c: &mut Criterion) {
                 black_box(rows)
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("covering_candidates", size),
+            size,
+            |b, _| {
+                b.iter(|| {
+                    let sql = format!(
+                        "WITH candidates AS MATERIALIZED ( \
+                             SELECT id, {depth} AS attr_depth, first_commit_date AS rank_date \
+                               FROM package_versions \
+                              WHERE attribute_path LIKE ? ESCAPE '\\' \
+                                AND version LIKE ? ESCAPE '\\' \
+                              ORDER BY attr_depth ASC, first_commit_date DESC, id ASC \
+                              LIMIT 5000 \
+                         ) \
+                         SELECT pv.attribute_path \
+                           FROM candidates c \
+                           JOIN package_versions pv ON pv.id = c.id \
+                          ORDER BY c.attr_depth ASC, c.rank_date DESC, c.id ASC"
+                    );
+                    let rows: Vec<String> = conn
+                        .prepare_cached(&sql)
+                        .unwrap()
+                        .query_map(["python311%", "3.11%"], |row| row.get(0))
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .collect();
+                    black_box(rows)
+                });
+            },
+        );
     }
 
     group.finish();

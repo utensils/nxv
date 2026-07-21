@@ -389,8 +389,17 @@ pub fn search_by_attr_exact(
 /// Search for packages by attribute path prefix.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' \
-         ORDER BY {ATTR_DEPTH_RANK} ASC, last_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        "WITH candidates AS MATERIALIZED ( \
+             SELECT id, {ATTR_DEPTH_RANK} AS attr_depth, last_commit_date AS rank_date \
+               FROM package_versions \
+              WHERE attribute_path LIKE ? ESCAPE '\\' \
+              ORDER BY attr_depth ASC, last_commit_date DESC, id ASC \
+              LIMIT {SEARCH_SQL_CAP} \
+         ) \
+         SELECT pv.* \
+           FROM candidates c \
+           JOIN package_versions pv ON pv.id = c.id \
+          ORDER BY c.attr_depth ASC, c.rank_date DESC, c.id ASC"
     ))?;
     let pattern = format!("{}%", escape_like_pattern(attr_path));
     let rows = stmt.query_map([&pattern], PackageVersion::from_row)?;
@@ -432,8 +441,18 @@ pub fn search_by_name_version(
     // unversioned prefix searches agree for mixed-case package-set segments
     // such as `python313Packages`.
     let mut stmt = conn.prepare(&format!(
-        "SELECT * FROM package_versions WHERE attribute_path LIKE ? ESCAPE '\\' AND version LIKE ? ESCAPE '\\' \
-         ORDER BY {ATTR_DEPTH_RANK} ASC, first_commit_date DESC LIMIT {SEARCH_SQL_CAP}"
+        "WITH candidates AS MATERIALIZED ( \
+             SELECT id, {ATTR_DEPTH_RANK} AS attr_depth, first_commit_date AS rank_date \
+               FROM package_versions \
+              WHERE attribute_path LIKE ? ESCAPE '\\' \
+                AND version LIKE ? ESCAPE '\\' \
+              ORDER BY attr_depth ASC, first_commit_date DESC, id ASC \
+              LIMIT {SEARCH_SQL_CAP} \
+         ) \
+         SELECT pv.* \
+           FROM candidates c \
+           JOIN package_versions pv ON pv.id = c.id \
+          ORDER BY c.attr_depth ASC, c.rank_date DESC, c.id ASC"
     ))?;
     let package_pattern = format!("{}%", escape_like_pattern(package));
     let version_pattern = format!("{}%", escape_like_pattern(version));
@@ -1181,6 +1200,213 @@ mod tests {
         let results = search_by_attr_exact(db.connection(), "python").unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|p| p.attribute_path == "python"));
+    }
+
+    // --- Covering prefix-search candidate index (ticket: nxv-covering-prefix-search) ---
+
+    /// The unversioned prefix search must plan through the covering candidate
+    /// index rather than scanning the wide `package_versions` table.
+    #[test]
+    fn test_search_by_attr_uses_covering_prefix_index() {
+        let (_dir, db) = create_test_db();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN WITH candidates AS MATERIALIZED ( \
+                 SELECT id, {ATTR_DEPTH_RANK} AS attr_depth, last_commit_date AS rank_date \
+                   FROM package_versions \
+                  WHERE attribute_path LIKE ? ESCAPE '\\' \
+                  ORDER BY attr_depth ASC, last_commit_date DESC, id ASC \
+                  LIMIT {SEARCH_SQL_CAP} \
+             ) \
+             SELECT pv.* FROM candidates c \
+             JOIN package_versions pv ON pv.id = c.id \
+             ORDER BY c.attr_depth ASC, c.rank_date DESC, c.id ASC"
+        );
+        let mut stmt = db.connection().prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(["python%"], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("COVERING INDEX idx_packages_search_nocase")),
+            "expected covering prefix index in query plan, got: {plan:?}"
+        );
+    }
+
+    /// The version-filtered prefix search must plan through the same covering
+    /// candidate index.
+    #[test]
+    fn test_search_by_name_version_uses_covering_prefix_index() {
+        let (_dir, db) = create_test_db();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN WITH candidates AS MATERIALIZED ( \
+                 SELECT id, {ATTR_DEPTH_RANK} AS attr_depth, first_commit_date AS rank_date \
+                   FROM package_versions \
+                  WHERE attribute_path LIKE ? ESCAPE '\\' \
+                    AND version LIKE ? ESCAPE '\\' \
+                  ORDER BY attr_depth ASC, first_commit_date DESC, id ASC \
+                  LIMIT {SEARCH_SQL_CAP} \
+             ) \
+             SELECT pv.* FROM candidates c \
+             JOIN package_versions pv ON pv.id = c.id \
+             ORDER BY c.attr_depth ASC, c.rank_date DESC, c.id ASC"
+        );
+        let mut stmt = db.connection().prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(["python%", "3.11%"], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("COVERING INDEX idx_packages_search_nocase")),
+            "expected covering prefix index in query plan, got: {plan:?}"
+        );
+    }
+
+    /// An old v4 database that predates the covering index must still return
+    /// identical results through the scan fallback.
+    #[test]
+    fn test_search_by_attr_is_compatible_without_covering_index() {
+        let (_dir, db) = create_test_db();
+        let indexed_ids: Vec<i64> = search_by_attr(db.connection(), "python")
+            .unwrap()
+            .into_iter()
+            .map(|package| package.id)
+            .collect();
+
+        db.connection()
+            .execute("DROP INDEX idx_packages_search_nocase", [])
+            .unwrap();
+        let fallback_ids: Vec<i64> = search_by_attr(db.connection(), "python")
+            .unwrap()
+            .into_iter()
+            .map(|package| package.id)
+            .collect();
+
+        assert_eq!(fallback_ids, indexed_ids);
+    }
+
+    /// The version-filtered path is equally correct without the covering index.
+    #[test]
+    fn test_search_by_name_version_is_compatible_without_covering_index() {
+        let (_dir, db) = create_test_db();
+        let indexed_ids: Vec<i64> = search_by_name_version(db.connection(), "python", "3.1")
+            .unwrap()
+            .into_iter()
+            .map(|package| package.id)
+            .collect();
+
+        db.connection()
+            .execute("DROP INDEX idx_packages_search_nocase", [])
+            .unwrap();
+        let fallback_ids: Vec<i64> = search_by_name_version(db.connection(), "python", "3.1")
+            .unwrap()
+            .into_iter()
+            .map(|package| package.id)
+            .collect();
+
+        assert_eq!(fallback_ids, indexed_ids);
+        assert_eq!(indexed_ids.len(), 2); // python 3.11.0 and 3.12.0
+    }
+
+    /// When attribute depth and rank date tie, `id ASC` is the deterministic
+    /// final tie-breaker for the unversioned path.
+    #[test]
+    fn test_search_by_attr_deterministic_id_tie() {
+        let (_dir, db) = create_test_db();
+        // Two rows with identical depth (1 dot) and identical last_commit_date,
+        // differing only by insertion order (id).
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                ('tie-a', '1.0', 'a', 1700000000, 'a', 1700000000, 'tiepkg.alpha', 't'),
+                ('tie-b', '1.0', 'b', 1700000000, 'b', 1700000000, 'tiepkg.beta', 't')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let ids: Vec<i64> = search_by_attr(db.connection(), "tiepkg")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0] < ids[1], "expected id ASC tie-break, got {ids:?}");
+    }
+
+    /// The version-filtered path applies the same `id ASC` tie-break.
+    #[test]
+    fn test_search_by_name_version_deterministic_id_tie() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES
+                ('tie-a', '9.9.0', 'a', 1700000000, 'a', 1700000000, 'vtie.alpha', 't'),
+                ('tie-b', '9.9.0', 'b', 1700000000, 'b', 1700000000, 'vtie.beta', 't')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        let ids: Vec<i64> = search_by_name_version(db.connection(), "vtie", "9.9")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0] < ids[1], "expected id ASC tie-break, got {ids:?}");
+    }
+
+    /// Literal `_`/`%` in the query must stay literal through the covering
+    /// candidate query (no wildcard injection).
+    #[test]
+    fn test_search_by_attr_escapes_literal_wildcards() {
+        let (_dir, db) = create_test_db();
+        db.connection()
+            .execute(
+                r#"
+            INSERT INTO package_versions (name, version, first_commit_hash, first_commit_date,
+                last_commit_hash, last_commit_date, attribute_path, description)
+            VALUES ('under', '1.0', 'a', 1700000000, 'a', 1700100000, 'python_test', 'u')
+            "#,
+                [],
+            )
+            .unwrap();
+
+        // `python_` must match only the literal underscore row, not `python2`.
+        let results = search_by_attr(db.connection(), "python_").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python_test");
+    }
+
+    /// Mixed-case prefixes match through the ASCII-case-insensitive covering
+    /// index, preserving SQLite LIKE's historical behavior.
+    #[test]
+    fn test_search_by_attr_mixed_case_prefix() {
+        let (_dir, db) = create_test_db();
+        let upper: Vec<String> = search_by_attr(db.connection(), "PYTHON")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.attribute_path)
+            .collect();
+        let lower: Vec<String> = search_by_attr(db.connection(), "python")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.attribute_path)
+            .collect();
+        assert_eq!(upper, lower);
+        assert_eq!(upper.len(), 3);
     }
 
     #[test]

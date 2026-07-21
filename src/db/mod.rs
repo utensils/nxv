@@ -226,6 +226,17 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_name ON package_versions(name);
             CREATE INDEX IF NOT EXISTS idx_packages_name_version ON package_versions(name, version, first_commit_date);
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
+            -- Cover the fields needed to rank prefix-search candidates before
+            -- fetching full rows. NOCASE matches SQLite LIKE's established
+            -- ASCII-case-insensitive behavior; the expression stores attribute
+            -- depth without adding a derived table column.
+            CREATE INDEX IF NOT EXISTS idx_packages_search_nocase ON package_versions(
+                attribute_path COLLATE NOCASE,
+                version COLLATE NOCASE,
+                (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+                last_commit_date DESC,
+                first_commit_date DESC
+            );
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
             "#,
