@@ -145,13 +145,20 @@ nxv info python311 --format json
 
 `info` resolves the package name as an **exact attribute path** first, so it needs no
 `--exact` flag: `nxv info python311 3.11.4` returns `python311` only, never
-`python311Full` or `python311Packages.*`. A name that is not a known attribute path is
-treated as a partial name and widened to a prefix search, so `nxv info python311Packages.tk`
-still resolves. If the package is known but never had the requested version, `info`
-reports not found instead of falling back to unrelated prefix matches — an empty result
-means "this package never had that version", not "try harder".
+`python311Full` or `python311Packages.*`. If the package is known but never had the
+requested version, `info` reports not found instead of falling back to unrelated prefix
+matches — an empty result means "this package never had that version", not "try harder".
 
-Use `nxv search` (with `--exact` as needed) when you actually want prefix matching.
+An unknown attribute path is widened to a prefix search, but what gets prefix-matched
+depends on whether a version was given:
+
+```bash
+nxv info python311Packages.tk 3.11.4     # widened over ATTRIBUTE PATHS -> resolves
+nxv info python311Packages.tk            # widened over the NAME field -> usually no match
+```
+
+So partial attribute paths generally only resolve when you also pass a version. For
+open-ended prefix lookups use `nxv search` (with `--exact` as needed) instead.
 
 ## History
 

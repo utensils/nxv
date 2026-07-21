@@ -60,11 +60,16 @@ pub enum Commands {
     ///
     /// The package name is resolved as an exact attribute path first, so
     /// `nxv info python311` reports on python311 itself and never on
-    /// python311Full or python311Packages.*. Only when the attribute path
-    /// is unknown is it treated as a partial name and widened to a prefix
-    /// search. A known package that never had the requested version
-    /// reports not found rather than falling back to unrelated prefix
-    /// matches. Use `nxv search` when you want prefix matching.
+    /// python311Full or python311Packages.*. A known package that never
+    /// had the requested version reports not found rather than falling
+    /// back to unrelated prefix matches.
+    ///
+    /// An unknown attribute path is widened to a prefix search, but what
+    /// gets prefix-matched differs: with a version it matches attribute
+    /// paths (so `nxv info python311Packages.req 2.32` resolves), and
+    /// without a version it matches the package name field instead (values
+    /// like `python-3.11.0`), so partial attribute paths generally do not
+    /// resolve unversioned. Use `nxv search` for prefix matching.
     Info(InfoArgs),
 
     /// Show index statistics.

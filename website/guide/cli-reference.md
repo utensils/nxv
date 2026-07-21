@@ -76,10 +76,16 @@ nxv info <package> [version] [options]
 
 **Matching:** `info` resolves `<package>` as an **exact attribute path** first, so it
 needs no `--exact` flag — `nxv info python311 3.11.4` returns `python311` only, never
-`python311Full` or `python311Packages.*`. A name that is not a known attribute path is
-treated as a partial name and widened to a prefix search. If the package is known but
-never had the requested version, `info` reports not found rather than falling back to
-unrelated prefix matches. Use [`search`](#search) when you want prefix matching.
+`python311Full` or `python311Packages.*`. If the package is known but never had the
+requested version, `info` reports not found rather than falling back to unrelated prefix
+matches.
+
+An unknown attribute path is widened to a prefix search, but what gets prefix-matched
+differs by invocation: **with** a version it matches attribute paths, so
+`nxv info python311Packages.req 2.32` resolves; **without** a version it matches the
+package `name` field instead (values like `python-3.11.0`), so partial attribute paths
+generally do not resolve unversioned. Use [`search`](#search) for open-ended prefix
+matching.
 
 **Examples:**
 
@@ -90,8 +96,8 @@ nxv info python311
 # Specific version — exact package, no prefix contamination
 nxv info python311 3.11.4
 
-# Partial names still resolve via prefix fallback
-nxv info python311Packages.req
+# Partial attribute path resolves when a version is supplied
+nxv info python311Packages.req 2.32
 ```
 
 ### history

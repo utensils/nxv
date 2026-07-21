@@ -450,8 +450,11 @@ pub fn search_by_attr_exact_version(
 /// ```no_run
 /// # use rusqlite::Connection;
 /// # let conn = Connection::open_in_memory().unwrap();
-/// assert!(attribute_path_exists(&conn, "python311").unwrap());
-/// assert!(!attribute_path_exists(&conn, "python311-not-a-real-attr").unwrap());
+/// // Against a populated index, `python311` is known while a typo is not.
+/// if attribute_path_exists(&conn, "python311")? {
+///     println!("python311 is a known attribute path");
+/// }
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn attribute_path_exists(conn: &rusqlite::Connection, attr_path: &str) -> Result<bool> {
     let mut stmt =
