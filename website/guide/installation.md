@@ -123,7 +123,7 @@ After installation, download the package index:
 nxv update
 ```
 
-This downloads ~190MB of compressed data to your local data directory:
+This downloads ~220MB of compressed data to your local data directory:
 
 - **Linux**: `~/.local/share/nxv/`
 - **macOS**: `~/Library/Application Support/nxv/`

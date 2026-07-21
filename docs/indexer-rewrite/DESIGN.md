@@ -140,6 +140,14 @@ CREATE TABLE releases (
     ingested_at INTEGER,
     UNIQUE(channel, release_name)
 );
+
+CREATE INDEX idx_packages_search_nocase ON package_versions(
+    attribute_path COLLATE NOCASE,
+    version COLLATE NOCASE,
+    (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+    last_commit_date DESC,
+    first_commit_date DESC
+);
 ```
 
 - **Writes**: order-agnostic widen-only upsert (CASE-WHEN bounds extension;
@@ -158,6 +166,12 @@ CREATE TABLE releases (
   triggers are dropped and FTS is rebuilt once at Finish
   (`INSERT INTO package_versions_fts(package_versions_fts) VALUES('rebuild')`).
   Measured: 28× writer slowdown without this.
+- **Prefix-search covering index**: `idx_packages_search_nocase` supplies
+  compact candidates for ASCII-case-insensitive prefix and prefix+version
+  searches before full rows are fetched by primary key. Bulk ingestion drops
+  it behind a durable marker and transactionally rebuilds it at finish; the
+  next writable run repairs interrupted drops, and publication repairs or
+  refuses an incomplete artifact.
 - **Bloom filter**: full dotted attribute paths (quoted segments stored
   unquoted). Leaf-segment entries are NOT added (no consumer in the query
   path; leaf-name resolution is a possible fast-follow, see §12).
@@ -384,16 +398,18 @@ API. `nxv stats` grep-scraping is replaced by the `--report` JSON.
 | Full rebuild, packages.json era (~2,866 releases, ~14.6 GB) | hours, parse-bound; 4 workers × ~250 MB + writer + aggregator ≈ **<2 GB RSS** |
 | Backfill 2016–2020 (~1,283 nix-env runs, 15–25 s each) | **~1.5–3 h**, 4 workers × ~1.5 GB |
 | Incremental (CI) | seconds–minutes, <500 MB; ~70% of runs ingest nothing and skip publish |
-| Row count, full history | ~1.1–1.4 M (attr,version) pairs (+~170k/yr) |
-| DB size | ~1.5–1.9 GB raw, **artifact target ≤250 MB zstd**; if exceeded, intern license/platforms/maintainers into dictionary side-tables behind the existing query API (measured ~50× metadata duplication — the named lever, not a v1 requirement) |
+| Row count, full history | ~1.77 M (attr,version) pairs as of 2026-07 (+~170k/yr) |
+| DB size | ~2.1 GB raw / ~220 MB zstd as of 2026-07, including the covering prefix index; **artifact target ≤250 MB zstd**. If exceeded, intern license/platforms/maintainers into dictionary side-tables behind the existing query API (measured ~50× metadata duplication — the named lever, not a v1 requirement) |
 | FTS | dropped-trigger ingest + one rebuild (~1–2 min at 1.2M rows) |
 | Write amplification | aggregator keeps writes O(distinct pairs), not O(attrs × releases) |
 
-Search under 144k dotted attrs (verified hazards): prefix search on
-`python` would match all ~11k `python313Packages.*` rows and
-`execute_search` materializes full result sets pre-pagination. v2 ships:
-(a) ranking that orders shallower attr paths first (`attribute_path` dot
-count ASC, then name), (b) SQL-level LIMIT pushdown in the search queries.
+Search under ~139k dotted attrs (verified hazards): prefix search on `python`
+matches thousands of `python3xxPackages.*` rows. Prefix and prefix+version
+queries use the covering ASCII-NOCASE index to rank at most 5,000 compact
+candidate IDs, then fetch full rows by primary key with deterministic `id ASC`
+tie-breaking. Ranking still orders shallower attr paths first
+(`attribute_path` dot count ASC, then name), and SQL-level LIMIT pushdown keeps
+pagination bounded.
 Bare-leaf resolution (`requests` → `python313Packages.requests`) is a named
 fast-follow, not v1.
 

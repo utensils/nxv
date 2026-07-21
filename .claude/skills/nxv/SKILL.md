@@ -383,7 +383,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python27`.
 - **Use `--exact`** when the package name is unambiguous; otherwise `python` returns dozens of variants (`python27`, `python311`, `python311Packages.numpy`, etc.).
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
-- **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~190MB index download entirely if you only need occasional lookups.
+- **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~220MB index download entirely if you only need occasional lookups.
 - **Update regularly**: the public index is republished every 6 hours (`publish-index.yml`); `nxv update` pulls the latest.
 - **For CI**: pin to `NXV_NO_SELF_UPDATE=1 nxv update` so the runner refreshes the index but never tries to swap its own binary.
 

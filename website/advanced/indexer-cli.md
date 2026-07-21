@@ -137,7 +137,7 @@ backward-compatible schema changes. Publishing a schema-4 index with
 
 | File                    | Size    | Description                            |
 | ----------------------- | ------- | -------------------------------------- |
-| `index.db.zst`          | ~190 MB | Zstd-compressed SQLite database        |
+| `index.db.zst`          | ~220 MB | Zstd-compressed SQLite database        |
 | `bloom.bin`             | ~330 KB | Bloom filter for fast negative lookups |
 | `manifest.json`         | ~1 KB   | Metadata with checksums                |
 | `manifest.json.minisig` | ~1 KB   | minisign signature (when `--sign`)     |

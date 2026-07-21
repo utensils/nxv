@@ -42,7 +42,7 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
 - **Version history** — See when each version was introduced and when it was superseded
 - **Multiple interfaces** — CLI tool, HTTP API server with web UI, or query via remote API
 - **NixOS module** — Run as a systemd service with automatic index updates
-- **Lightweight** — ~10MB static binary, ~190MB compressed index
+- **Lightweight** — ~10MB static binary, ~220MB compressed index
 
 ## How It Works
 
@@ -56,12 +56,12 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
                                                         ▼
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │   nxv search    │◀────│   Query Engine  │◀────│  Download from  │
-│   nxv serve     │     │  (bloom + FTS5) │     │  remote/local   │
+│   nxv serve     │     │ bloom + indexes │     │  remote/local   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
 The indexer ingests Hydra-built channel-release snapshots from releases.nixos.org (back to 2016): `packages.json.br` for releases from 2020 onward, and `nix-env` evaluation of `nixexprs.tar.xz` for the earlier era. Every recorded commit is one where the package version verifiably existed — including nested package sets like `python3Packages.*` and `haskellPackages.*`.
-Users download a pre-built compressed index (~190MB) and query it locally or via the API server.
+Users download a pre-built compressed index (~220MB) and query it locally or via the API server.
 
 ## Installation
 
@@ -340,7 +340,7 @@ Generate distribution-ready artifacts with the `publish` command:
 nxv publish --output ./publish --url-prefix https://your-server.com/nxv
 
 # Files created:
-#   publish/index.db.zst   - Compressed SQLite database (~190MB)
+#   publish/index.db.zst   - Compressed SQLite database (~220MB)
 #   publish/bloom.bin      - Bloom filter for fast lookups (~330KB)
 #   publish/manifest.json  - Manifest with URLs and checksums
 ```
