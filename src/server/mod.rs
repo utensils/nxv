@@ -708,6 +708,15 @@ mod tests {
             );
             CREATE INDEX idx_packages_name ON package_versions(name);
             CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+            -- Carry the production covering index so API search/pagination tests
+            -- run the indexed candidate path, not only the scan fallback.
+            CREATE INDEX idx_packages_search_nocase ON package_versions(
+                attribute_path COLLATE NOCASE,
+                version COLLATE NOCASE,
+                (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+                last_commit_date DESC,
+                first_commit_date DESC
+            );
             CREATE VIRTUAL TABLE package_versions_fts USING fts5(
                 attribute_path, description, content='package_versions', content_rowid='id'
             );
@@ -1000,6 +1009,93 @@ mod tests {
         let data = json["data"].as_array().unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(json["meta"]["offset"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_pagination_deterministic_across_ties() {
+        // Rows that tie on attribute depth and last_commit_date: only the SQL
+        // `id ASC` tie-break gives them a stable order, so this exercises the
+        // indexed candidate path's determinism through the real API offset
+        // plumbing. Walking pages must reconstruct the unpaginated order with no
+        // row dropped or repeated across a page boundary.
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ties.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE package_versions (
+                    id INTEGER PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL,
+                    first_commit_hash TEXT NOT NULL, first_commit_date INTEGER NOT NULL,
+                    last_commit_hash TEXT NOT NULL, last_commit_date INTEGER NOT NULL,
+                    attribute_path TEXT NOT NULL, description TEXT, license TEXT,
+                    homepage TEXT, maintainers TEXT, platforms TEXT, source_path TEXT,
+                    known_vulnerabilities TEXT,
+                    UNIQUE(attribute_path, version, first_commit_hash)
+                );
+                CREATE INDEX idx_packages_search_nocase ON package_versions(
+                    attribute_path COLLATE NOCASE,
+                    version COLLATE NOCASE,
+                    (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+                    last_commit_date DESC,
+                    first_commit_date DESC
+                );
+                CREATE VIRTUAL TABLE package_versions_fts USING fts5(
+                    attribute_path, description, content='package_versions', content_rowid='id'
+                );
+                INSERT INTO meta (key, value) VALUES ('last_indexed_commit', 'abc');
+                INSERT INTO package_versions
+                    (name, version, first_commit_hash, first_commit_date,
+                     last_commit_hash, last_commit_date, attribute_path, description, license)
+                VALUES
+                    ('tie', '1.0', 't1', 100, 'x', 900, 'tiepkg.a', 'd', 'MIT'),
+                    ('tie', '1.0', 't2', 100, 'x', 900, 'tiepkg.b', 'd', 'MIT'),
+                    ('tie', '1.0', 't3', 100, 'x', 900, 'tiepkg.c', 'd', 'MIT'),
+                    ('tie', '1.0', 't4', 100, 'x', 900, 'tiepkg.d', 'd', 'MIT'),
+                    ('tie', '1.0', 't5', 100, 'x', 900, 'tiepkg.e', 'd', 'MIT');
+                INSERT INTO package_versions_fts (rowid, attribute_path, description)
+                SELECT id, attribute_path, description FROM package_versions;
+                "#,
+            )
+            .unwrap();
+        }
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let attrs = |json: &Value| -> Vec<String> {
+            json["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["attribute_path"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Full unpaginated order.
+        let (_s, full_json) = get_json(&app, "/api/v1/search?q=tiepkg&limit=0").await;
+        let full = attrs(&full_json);
+        assert_eq!(full.len(), 5, "all five tie rows should be returned");
+
+        // Walk two-row pages; the concatenation must equal the full order.
+        let mut paged: Vec<String> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let uri = format!("/api/v1/search?q=tiepkg&limit=2&offset={offset}");
+            let (_s, page_json) = get_json(&app, &uri).await;
+            let rows = attrs(&page_json);
+            if rows.is_empty() {
+                break;
+            }
+            paged.extend(rows);
+            offset += 2;
+            assert!(offset < 100, "pagination walk failed to terminate");
+        }
+        assert_eq!(
+            paged, full,
+            "API offset pagination diverged across a tie boundary"
+        );
     }
 
     #[tokio::test]

@@ -585,3 +585,282 @@ mod proptests {
         }
     }
 }
+
+/// Prove the covering candidate index and the scan fallback yield identical
+/// observable output through the full `execute_search` pipeline — license
+/// filtering, sorting, dedup/full, `--limit 0`, and offset pagination across
+/// tie boundaries. Each test builds two databases with identical rows: one
+/// carrying `idx_packages_search_nocase`, one with it dropped so its candidate
+/// queries take the scan path. A green assertion therefore means the changed
+/// indexed path matches the fallback observably, not that both ran the fallback.
+#[cfg(test)]
+mod indexed_parity_tests {
+    use super::*;
+    use crate::db::Database;
+    use tempfile::{TempDir, tempdir};
+
+    // Rows are hand-tuned so higher-level modes are non-trivial. The production
+    // schema enforces UNIQUE(attribute_path, version) and
+    // CHECK(first_commit_date <= last_commit_date), so every row is a distinct
+    // pair with first_date <= last_date:
+    //  * `parity.alpha/bravo/charlie` share depth and `last_commit_date`,
+    //    forcing sort ties that only the SQL `id ASC` tie-break resolves
+    //    deterministically; `charlie` is GPL so a `license` filter drops it;
+    //  * `vpar.*` exercise the version-filtered path (`vpar.four` is excluded by
+    //    a `1` version prefix);
+    //  * `lw%hit` / `lw_hit` / `lwXhit` verify literal `%` and `_` handling.
+    const SEED: &str = r#"
+        INSERT INTO package_versions
+            (name, version, first_commit_hash, first_commit_date,
+             last_commit_hash, last_commit_date, attribute_path, description, license)
+        VALUES
+            ('aaa', '1.0.0', 'h1',  100, 'l1', 900, 'parity.alpha',   'd', 'MIT'),
+            ('bbb', '1.0.0', 'h2',  100, 'l2', 900, 'parity.bravo',   'd', 'MIT'),
+            ('ccc', '1.0.0', 'h3',  100, 'l3', 900, 'parity.charlie', 'd', 'GPL-3.0'),
+            ('ddd', '2.0.0', 'h4',  200, 'l4', 800, 'parity.delta',   'd', 'MIT'),
+            ('eee', '2.0.0', 'h5',  200, 'l5', 700, 'parity.echo',    'd', 'MIT'),
+            ('vaa', '1.1.0', 'h7',  300, 'l7', 600, 'vpar.one',       'd', 'MIT'),
+            ('vbb', '1.1.0', 'h8',  300, 'l8', 600, 'vpar.two',       'd', 'MIT'),
+            ('vcc', '1.2.0', 'h9',  300, 'l9', 650, 'vpar.three',     'd', 'MIT'),
+            ('vdd', '2.0.0', 'h10', 300, 'la', 660, 'vpar.four',      'd', 'MIT'),
+            ('lw1', '1.0.0', 'h11', 400, 'lb', 500, 'lw%hit',         'd', 'MIT'),
+            ('lw2', '1.0.0', 'h12', 400, 'lc', 500, 'lw_hit',         'd', 'MIT'),
+            ('lw3', '1.0.0', 'h13', 400, 'ld', 500, 'lwXhit',         'd', 'MIT');
+    "#;
+
+    fn index_present(db: &Database) -> bool {
+        db.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_packages_search_nocase'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    }
+
+    /// `(dir, indexed, fallback)` seeded identically; `fallback` has the covering
+    /// index dropped so its candidate queries take the scan path.
+    fn parity_dbs() -> (TempDir, Database, Database) {
+        let dir = tempdir().unwrap();
+        let indexed = Database::open(dir.path().join("indexed.db")).unwrap();
+        indexed.connection().execute_batch(SEED).unwrap();
+        let fallback = Database::open(dir.path().join("fallback.db")).unwrap();
+        fallback.connection().execute_batch(SEED).unwrap();
+        fallback
+            .connection()
+            .execute("DROP INDEX idx_packages_search_nocase", [])
+            .unwrap();
+
+        // Guard: the two databases genuinely differ in the covering index, so a
+        // green parity assertion can never mean "both fell back to the scan".
+        assert!(
+            index_present(&indexed),
+            "indexed db must carry the covering index"
+        );
+        assert!(
+            !index_present(&fallback),
+            "fallback db must not carry the covering index"
+        );
+        (dir, indexed, fallback)
+    }
+
+    fn ids(result: &SearchResult) -> Vec<i64> {
+        result.data.iter().map(|p| p.id).collect()
+    }
+
+    fn base(query: &str) -> SearchOptions {
+        SearchOptions {
+            query: query.to_string(),
+            limit: 50,
+            ..Default::default()
+        }
+    }
+
+    /// `execute_search` must agree on rows, order, total, and `has_more` across
+    /// both databases for the given options.
+    fn assert_parity(indexed: &Database, fallback: &Database, opts: &SearchOptions) {
+        let a = execute_search(indexed.connection(), opts).unwrap();
+        let b = execute_search(fallback.connection(), opts).unwrap();
+        assert_eq!(ids(&a), ids(&b), "row id order diverged for {opts:?}");
+        assert_eq!(a.total, b.total, "total diverged for {opts:?}");
+        assert_eq!(a.has_more, b.has_more, "has_more diverged for {opts:?}");
+    }
+
+    #[test]
+    fn indexed_matches_fallback_across_filter_sort_full_and_limit() {
+        let (_dir, indexed, fallback) = parity_dbs();
+
+        let mut matrix: Vec<SearchOptions> = vec![
+            base("parity"),
+            SearchOptions {
+                license: Some("mit".to_string()),
+                ..base("parity")
+            },
+            SearchOptions {
+                full: true,
+                ..base("parity")
+            },
+            SearchOptions {
+                limit: 0,
+                ..base("parity")
+            },
+        ];
+        for sort in [SortOrder::Date, SortOrder::Version, SortOrder::Name] {
+            for reverse in [false, true] {
+                matrix.push(SearchOptions {
+                    sort,
+                    reverse,
+                    ..base("parity")
+                });
+            }
+        }
+
+        for opts in &matrix {
+            assert_parity(&indexed, &fallback, opts);
+        }
+
+        // Sanity: the license filter actually changes the set, so the parity
+        // above is meaningful rather than vacuous. (Production's
+        // UNIQUE(attribute_path, version) means dedup and `--full` return the
+        // same rows on real data, so only their cross-path agreement is
+        // asserted, not a count difference.)
+        let all = execute_search(indexed.connection(), &base("parity")).unwrap();
+        assert_eq!(all.total, 5, "five distinct parity rows expected");
+        let mit = execute_search(
+            indexed.connection(),
+            &SearchOptions {
+                license: Some("mit".to_string()),
+                ..base("parity")
+            },
+        )
+        .unwrap();
+        assert!(
+            mit.total < all.total,
+            "expected license filter to drop the GPL row"
+        );
+    }
+
+    #[test]
+    fn indexed_offset_pagination_is_deterministic_across_ties() {
+        let (_dir, indexed, fallback) = parity_dbs();
+
+        // Walk fixed-size pages and confirm both databases return the same page
+        // at every offset — including across the `parity.*` tie boundary.
+        for offset in [0, 2, 4, 6] {
+            assert_parity(
+                &indexed,
+                &fallback,
+                &SearchOptions {
+                    limit: 2,
+                    offset,
+                    ..base("parity")
+                },
+            );
+        }
+
+        // Concatenating pages must reconstruct the unpaginated order exactly, so
+        // no tie row is dropped or repeated across a page boundary.
+        let full_ids = ids(&execute_search(
+            indexed.connection(),
+            &SearchOptions {
+                limit: 0,
+                ..base("parity")
+            },
+        )
+        .unwrap());
+        let mut paged: Vec<i64> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = execute_search(
+                indexed.connection(),
+                &SearchOptions {
+                    limit: 2,
+                    offset,
+                    ..base("parity")
+                },
+            )
+            .unwrap();
+            if page.data.is_empty() {
+                break;
+            }
+            paged.extend(ids(&page));
+            offset += 2;
+            assert!(offset < 100, "pagination walk failed to terminate");
+        }
+        assert_eq!(
+            paged, full_ids,
+            "paged walk diverged from unpaginated order"
+        );
+    }
+
+    #[test]
+    fn indexed_matches_fallback_on_version_filtered_path() {
+        let (_dir, indexed, fallback) = parity_dbs();
+
+        let versioned = || SearchOptions {
+            version: Some("1".to_string()),
+            ..base("vpar")
+        };
+
+        // The `1` version prefix excludes `vpar.four` (2.0.0) on both paths.
+        let res = execute_search(indexed.connection(), &versioned()).unwrap();
+        assert_eq!(res.total, 3, "version prefix should keep only the 1.x rows");
+        assert!(res.data.iter().all(|p| p.version.starts_with('1')));
+
+        let mut matrix = vec![
+            versioned(),
+            SearchOptions {
+                sort: SortOrder::Version,
+                ..versioned()
+            },
+            SearchOptions {
+                full: true,
+                ..versioned()
+            },
+            SearchOptions {
+                limit: 0,
+                ..versioned()
+            },
+        ];
+        for offset in [0, 1, 2] {
+            matrix.push(SearchOptions {
+                limit: 1,
+                offset,
+                ..versioned()
+            });
+        }
+        for opts in &matrix {
+            assert_parity(&indexed, &fallback, opts);
+        }
+    }
+
+    #[test]
+    fn indexed_matches_fallback_on_literal_wildcards() {
+        let (_dir, indexed, fallback) = parity_dbs();
+
+        // Literal `%` must not act as a wildcard: only `lw%hit` matches, not the
+        // `lwXhit` decoy.
+        let pct = execute_search(indexed.connection(), &base("lw%")).unwrap();
+        assert_eq!(
+            pct.data
+                .iter()
+                .map(|p| p.attribute_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lw%hit"]
+        );
+        assert_parity(&indexed, &fallback, &base("lw%"));
+
+        // Literal `_` must not act as a wildcard: only `lw_hit` matches.
+        let underscore = execute_search(indexed.connection(), &base("lw_hit")).unwrap();
+        assert_eq!(
+            underscore
+                .data
+                .iter()
+                .map(|p| p.attribute_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lw_hit"]
+        );
+        assert_parity(&indexed, &fallback, &base("lw_hit"));
+    }
+}

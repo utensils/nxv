@@ -177,6 +177,20 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
         ..Default::default()
     };
 
+    let bulk = worklist.len() >= FTS_BULK_THRESHOLD;
+
+    // Search-index recovery. A bulk run drops the covering index and rebuilds
+    // it at the finish path; if a previous bulk run was interrupted,
+    // `Database::open` left the index absent (the drop marker suppresses
+    // init_schema's eager rebuild). Restore it now UNLESS this run is itself
+    // bulk and will drop it again anyway — rebuilding a ~48s index only to
+    // immediately drop it is pure waste. A non-bulk or no-work run must leave
+    // the database search-ready.
+    if !bulk && !db.search_index_present()? {
+        progress("rebuilding search index (recovering interrupted bulk run)...");
+        db.rebuild_search_index()?;
+    }
+
     if worklist.is_empty() {
         progress("nothing to ingest: all known releases are settled");
     } else {
@@ -187,9 +201,12 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
                 .unwrap_or(2)
         });
 
-        let bulk = worklist.len() >= FTS_BULK_THRESHOLD;
+        // Bulk catch-up: drop the FTS triggers and the covering search index so
+        // the widen-only upserts avoid recurring write amplification; both are
+        // rebuilt on the finish path below before the run returns.
         if bulk {
             db.drop_fts_triggers()?;
+            db.drop_search_index()?;
         }
 
         let outcome = ingest_worklist(
@@ -203,9 +220,15 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
             &progress,
         );
 
+        // Rebuild before propagating any ingest error so the database is left
+        // search/publish ready. A rebuild failure here propagates (leaving the
+        // drop marker set for the next run to recover) rather than returning a
+        // falsely-ready database.
         if bulk {
             progress("rebuilding FTS index...");
             db.rebuild_fts()?;
+            progress("rebuilding search index...");
+            db.rebuild_search_index()?;
         }
         outcome?;
     }
