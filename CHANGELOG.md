@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4](https://github.com/utensils/nxv/compare/v0.4.3...v0.4.4) - 2026-07-21
+
+### Fixed
+
+- *(ci)* tolerate index manifest propagation delay
+
+### Other
+
+- sync prefix index documentation ([#51](https://github.com/utensils/nxv/pull/51))
+- *(db)* accelerate cold prefix searches ([#50](https://github.com/utensils/nxv/pull/50))
+
 ## [0.4.3](https://github.com/utensils/nxv/compare/v0.4.2...v0.4.3) - 2026-06-15
 
 ### Other
