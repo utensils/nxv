@@ -263,15 +263,26 @@ pub struct PackageVersionSchema {
     pub last_commit_date: DateTime<Utc>,
     pub attribute_path: String,
     pub description: Option<String>,
+    /// SPDX license identifiers (may be null when the package declares none).
+    #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub license: Option<String>,
     pub homepage: Option<String>,
+    /// Maintainer handles (may be null when the package declares none).
+    #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub maintainers: Option<String>,
+    /// Systems the package declares support for.
+    #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub platforms: Option<String>,
     /// Source file path relative to nixpkgs root (may be null for older packages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
-    /// Known security vulnerabilities (JSON array, may be null for secure packages).
+    /// Known security vulnerabilities (may be null for secure packages).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
+    #[schema(value_type = Option<Vec<String>>)]
     pub known_vulnerabilities: Option<String>,
 }
 

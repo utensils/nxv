@@ -289,6 +289,52 @@ fn test_search_json_output() {
     assert!(parsed.is_array(), "JSON output should be an array");
 }
 
+/// The JSON row shape documented in `src/skill/SKILL.md`. `license`,
+/// `maintainers`, `platforms` and `known_vulnerabilities` are stored in SQLite
+/// as JSON-array *strings*; that storage detail must never reach the wire
+/// (issue #54), so they serialize as real arrays or `null`.
+#[test]
+fn test_search_json_array_fields_are_not_stringified() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "rustc",
+            "--exact",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let row = &parsed.as_array().unwrap()[0];
+
+    assert_eq!(
+        row.get("license").unwrap(),
+        &serde_json::json!(["MIT", "Apache-2.0"]),
+        "multi-element license must be a real array, not a stringified one"
+    );
+
+    // Columns the fixture leaves NULL stay null rather than becoming `[]`.
+    for field in ["maintainers", "platforms", "known_vulnerabilities"] {
+        assert!(
+            row.get(field).unwrap().is_null(),
+            "{field} should be null when the column is NULL"
+        );
+    }
+
+    // Scalar fields are unaffected by the array treatment.
+    assert_eq!(row.get("attribute_path").unwrap(), "rustc");
+    assert_eq!(row.get("homepage").unwrap(), "https://rust-lang.org");
+}
+
 #[test]
 fn test_search_plain_output() {
     let dir = tempdir().unwrap();
@@ -1025,12 +1071,18 @@ fn test_search_with_license_filter() {
     // Should find python packages with MIT license
     assert!(!results.is_empty(), "Should find packages with MIT license");
 
-    // Verify all results have MIT in their license
+    // Verify all results have MIT in their license. `license` is a real JSON
+    // array, never a stringified one.
     for result in results {
-        let license = result.get("license").and_then(|l| l.as_str()).unwrap_or("");
+        let license = result.get("license").expect("license field present");
+        let entries = license
+            .as_array()
+            .unwrap_or_else(|| panic!("license should be a JSON array, got {}", license));
         assert!(
-            license.contains("MIT"),
-            "License '{}' should contain 'MIT'",
+            entries
+                .iter()
+                .any(|l| l.as_str().is_some_and(|l| l.contains("MIT"))),
+            "License {} should contain 'MIT'",
             license
         );
     }

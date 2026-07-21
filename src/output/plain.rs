@@ -38,7 +38,7 @@ pub fn print_plain(results: &[PackageVersion], show_platforms: bool) {
         let description = pkg.description.as_deref().unwrap_or("-");
 
         if show_platforms {
-            let platforms = pkg.platforms.as_deref().unwrap_or("-");
+            let platforms = crate::db::json_array::join_or(pkg.platforms.as_deref(), "-");
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
                 pkg.attribute_path, pkg.version, pkg.last_commit_hash, date, description, platforms

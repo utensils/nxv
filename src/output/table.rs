@@ -69,7 +69,7 @@ pub fn print_table(results: &[PackageVersion], options: TableOptions) {
         ];
 
         if options.show_platforms {
-            let platforms = pkg.platforms.as_deref().unwrap_or("-");
+            let platforms = crate::db::json_array::join_or(pkg.platforms.as_deref(), "-");
             row.push(Cell::new(platforms));
         }
 
