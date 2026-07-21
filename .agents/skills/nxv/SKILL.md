@@ -143,6 +143,16 @@ nxv info python311 -V 3.11.4             # Specific version (flag form)
 nxv info python311 --format json
 ```
 
+`info` resolves the package name as an **exact attribute path** first, so it needs no
+`--exact` flag: `nxv info python311 3.11.4` returns `python311` only, never
+`python311Full` or `python311Packages.*`. A name that is not a known attribute path is
+treated as a partial name and widened to a prefix search, so `nxv info python311Packages.tk`
+still resolves. If the package is known but never had the requested version, `info`
+reports not found instead of falling back to unrelated prefix matches — an empty result
+means "this package never had that version", not "try harder".
+
+Use `nxv search` (with `--exact` as needed) when you actually want prefix matching.
+
 ## History
 
 Version timeline — when each version first appeared and when it was last seen:
