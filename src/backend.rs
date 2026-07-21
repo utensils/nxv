@@ -347,7 +347,7 @@ mod tests {
     /// share its version, which is the shape that produced issue #53.
     fn local_backend() -> (tempfile::TempDir, Backend) {
         let dir = tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
         db.connection()
             .execute(
                 r#"
