@@ -276,11 +276,15 @@ pub struct PackageVersionSchema {
     #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
     #[schema(value_type = Option<Vec<String>>)]
     pub platforms: Option<String>,
-    /// Source file path relative to nixpkgs root (may be null for older packages).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Source file path relative to nixpkgs root (null for older packages).
+    ///
+    /// Serialized even when absent: the CLI emits `null` here, and omitting it
+    /// would make `/docs` and the API diverge from the row shape SKILL.md
+    /// documents for both backends.
     pub source_path: Option<String>,
-    /// Known security vulnerabilities (may be null for secure packages).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Known security vulnerabilities (null for secure packages).
+    ///
+    /// Serialized even when absent, for the same reason as `source_path`.
     #[serde(serialize_with = "crate::db::json_array::serialize_opt")]
     #[schema(value_type = Option<Vec<String>>)]
     pub known_vulnerabilities: Option<String>,
@@ -291,7 +295,7 @@ impl From<PackageVersion> for PackageVersionSchema {
     ///
     /// The resulting schema preserves all public metadata fields (ids, version and
     /// commit timestamps, paths, description, license, homepage, maintainers,
-    /// platforms, and optional `source_path`).
+    /// platforms, `source_path` and `known_vulnerabilities`).
     ///
     /// # Examples
     ///

@@ -77,8 +77,10 @@ where
 
 /// Deserialize a JSON-array column from either a real array or a legacy string.
 ///
-/// The value is normalized back to the canonical stringified form so the rest
-/// of the codebase sees one representation regardless of backend.
+/// An array is re-encoded to the stringified form the DB uses, so a value that
+/// arrived over HTTP is indistinguishable from one read out of SQLite. A legacy
+/// bare string is kept verbatim rather than wrapped — [`parse`] already accepts
+/// both spellings, so every consumer sees the same elements either way.
 pub fn deserialize_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,

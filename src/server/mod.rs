@@ -800,6 +800,40 @@ mod tests {
         assert!(json["meta"]["total"].as_u64().unwrap() >= 2);
     }
 
+    /// The API must return the same row shape the CLI does (issue #54):
+    /// array-valued metadata fields, and nullable fields present as `null`
+    /// rather than omitted.
+    #[tokio::test]
+    async fn test_search_row_shape_matches_cli() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+
+        let state = Arc::new(AppState::new(db_path));
+        let app = build_router(state, None, None);
+
+        let (_, json) = get_json(&app, "/api/v1/search?q=python311&exact=true").await;
+        let row = &json["data"][0];
+
+        // The fixture stores a legacy bare-string license; it still serializes
+        // as an array so consumers never have to branch on the encoding.
+        assert_eq!(row["license"], serde_json::json!(["PSF"]));
+
+        // Columns the fixture leaves NULL are present and null, not absent.
+        for field in [
+            "maintainers",
+            "platforms",
+            "source_path",
+            "known_vulnerabilities",
+        ] {
+            assert!(
+                row.get(field).is_some_and(|v| v.is_null()),
+                "{field} should be present and null, got {:?}",
+                row.get(field)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_search_exact_match() {
         let dir = tempdir().unwrap();
