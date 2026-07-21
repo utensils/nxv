@@ -57,6 +57,19 @@ pub enum Commands {
     Update(UpdateArgs),
 
     /// Show detailed information about a package.
+    ///
+    /// The package name is resolved as an exact attribute path first, so
+    /// `nxv info python311` reports on python311 itself and never on
+    /// python311Full or python311Packages.*. A known package that never
+    /// had the requested version reports not found rather than falling
+    /// back to unrelated prefix matches.
+    ///
+    /// An unknown attribute path is widened to a prefix search, but what
+    /// gets prefix-matched differs: with a version it matches attribute
+    /// paths (so `nxv info python311Packages.req 2.32` resolves), and
+    /// without a version it matches the package name field instead (values
+    /// like `python-3.11.0`), so partial attribute paths generally do not
+    /// resolve unversioned. Use `nxv search` for prefix matching.
     Info(InfoArgs),
 
     /// Show index statistics.
@@ -344,7 +357,7 @@ pub struct HistoryArgs {
 /// Arguments for the info command.
 #[derive(Parser, Debug)]
 pub struct InfoArgs {
-    /// Package name to show info for.
+    /// Package name to show info for (matched as an exact attribute path first).
     pub package: String,
 
     /// Specific version to show info for (positional).

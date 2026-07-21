@@ -74,14 +74,30 @@ nxv info <package> [version] [options]
 | `-V, --version <VERSION>` | Specific version (alternative to positional) |
 | `-f, --format <FORMAT>`   | Output format: table, json, plain            |
 
+**Matching:** `info` resolves `<package>` as an **exact attribute path** first, so it
+needs no `--exact` flag — `nxv info python311 3.11.4` returns `python311` only, never
+`python311Full` or `python311Packages.*`. If the package is known but never had the
+requested version, `info` reports not found rather than falling back to unrelated prefix
+matches.
+
+An unknown attribute path is widened to a prefix search, but what gets prefix-matched
+differs by invocation: **with** a version it matches attribute paths, so
+`nxv info python311Packages.req 2.32` resolves; **without** a version it matches the
+package `name` field instead (values like `python-3.11.0`), so partial attribute paths
+generally do not resolve unversioned. Use [`search`](#search) for open-ended prefix
+matching.
+
 **Examples:**
 
 ```bash
 # Latest version info
 nxv info python311
 
-# Specific version
+# Specific version — exact package, no prefix contamination
 nxv info python311 3.11.4
+
+# Partial attribute path resolves when a version is supplied
+nxv info python311Packages.req 2.32
 ```
 
 ### history
