@@ -56,7 +56,7 @@ Or visit **<https://nxv.urandom.io>** to search in your browser.
                                                         ▼
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │   nxv search    │◀────│   Query Engine  │◀────│  Download from  │
-│   nxv serve     │     │ (bloom + indexes)│     │  remote/local   │
+│   nxv serve     │     │ bloom + indexes │     │  remote/local   │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
