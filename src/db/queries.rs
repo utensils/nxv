@@ -413,6 +413,9 @@ pub fn search_by_attr_exact(
 /// (`2.7` matches `2.7.18`), matching the documented flag semantics — `--exact`
 /// constrains the attribute, never the version.
 ///
+/// Also backs `nxv info <pkg> <version>`, which resolves the package as an exact
+/// attribute path before considering any prefix fallback.
+///
 /// No row cap is applied: a single attribute path holds at most one row per
 /// distinct version, so the result set is inherently small.
 pub fn search_by_attr_exact_version(
@@ -433,6 +436,27 @@ pub fn search_by_attr_exact_version(
         results.push(row?);
     }
     Ok(results)
+}
+
+/// Reports whether an attribute path is known to the index at any version.
+///
+/// Callers use this to tell two different lookup failures apart: a package name the
+/// index has never seen (which may be a partial name worth widening into a prefix
+/// search) versus a known package that simply lacks the requested version (which
+/// should stay a precise "not found" instead of widening).
+///
+/// # Examples
+///
+/// ```no_run
+/// # use rusqlite::Connection;
+/// # let conn = Connection::open_in_memory().unwrap();
+/// assert!(attribute_path_exists(&conn, "python311").unwrap());
+/// assert!(!attribute_path_exists(&conn, "python311-not-a-real-attr").unwrap());
+/// ```
+pub fn attribute_path_exists(conn: &rusqlite::Connection, attr_path: &str) -> Result<bool> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM package_versions WHERE attribute_path = ? LIMIT 1")?;
+    Ok(stmt.exists([attr_path])?)
 }
 
 /// Search for packages by attribute path prefix.
@@ -1292,6 +1316,27 @@ mod tests {
             results.is_empty(),
             "'%' must be a literal, not a match-all wildcard"
         );
+    }
+
+    // --- Exact attribute path + version, `nxv info` side (issue #53) ---
+
+    /// A shorter version prefix may legitimately span several versions of the
+    /// same attribute; all of them belong to that one attribute path.
+    #[test]
+    fn test_search_by_attr_exact_version_matches_multiple_versions() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr_exact_version(db.connection(), "python", "3.1").unwrap();
+        assert_eq!(results.len(), 2, "3.1 matches both 3.11.0 and 3.12.0");
+        assert!(results.iter().all(|p| p.attribute_path == "python"));
+    }
+
+    #[test]
+    fn test_attribute_path_exists() {
+        let (_dir, db) = create_test_db();
+        assert!(attribute_path_exists(db.connection(), "python").unwrap());
+        // Prefix siblings must not make an unknown exact path look known.
+        assert!(!attribute_path_exists(db.connection(), "pyth").unwrap());
+        assert!(!attribute_path_exists(db.connection(), "nonexistent").unwrap());
     }
 
     // --- Covering prefix-search candidate index (ticket: nxv-covering-prefix-search) ---
