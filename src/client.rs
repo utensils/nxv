@@ -137,12 +137,18 @@ impl ApiClient {
             url.push_str(&format!("&license={}", urlencoding::encode(license)));
         }
 
+        // Omit the new default so a current client can still query an older
+        // server that does not know the `relevance` enum value. Current servers
+        // default an omitted sort to relevance; older ones retain date order.
         let sort_str = match opts.sort {
-            SortOrder::Date => "date",
-            SortOrder::Version => "version",
-            SortOrder::Name => "name",
+            SortOrder::Relevance => None,
+            SortOrder::Date => Some("date"),
+            SortOrder::Version => Some("version"),
+            SortOrder::Name => Some("name"),
         };
-        url.push_str(&format!("&sort={}", sort_str));
+        if let Some(sort_str) = sort_str {
+            url.push_str(&format!("&sort={}", sort_str));
+        }
 
         if opts.reverse {
             url.push_str("&reverse=true");

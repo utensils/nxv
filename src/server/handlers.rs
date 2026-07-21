@@ -132,7 +132,7 @@ params(
 ("version" = Option<String>, Query, description = "Filter by version prefix"),
 ("exact" = Option<bool>, Query, description = "Exact match only"),
 ("license" = Option<String>, Query, description = "Filter by license"),
-("sort" = Option<String>, Query, description = "Sort order: date, version, or name"),
+("sort" = Option<String>, Query, description = "Sort order: relevance, date, version, or name"),
 ("reverse" = Option<bool>, Query, description = "Reverse sort order"),
 ("limit" = Option<usize>, Query, description = "Maximum results (default: 50)"),
 ("offset" = Option<usize>, Query, description = "Results to skip"),

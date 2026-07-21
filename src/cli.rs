@@ -272,7 +272,7 @@ pub struct SearchArgs {
     pub show_platforms: bool,
 
     /// Sort results.
-    #[arg(long, value_enum, default_value_t = SortOrder::Date)]
+    #[arg(long, value_enum, default_value_t = SortOrder::Relevance)]
     pub sort: SortOrder,
 
     /// Reverse sort order.
@@ -672,6 +672,7 @@ mod tests {
                 assert_eq!(search.package, "python");
                 assert!(!search.exact);
                 assert_eq!(search.limit, 50);
+                assert_eq!(search.sort, SortOrder::Relevance);
             }
             _ => panic!("Expected Search command"),
         }

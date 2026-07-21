@@ -368,6 +368,56 @@ fn test_search_with_version_filter() {
 }
 
 #[test]
+fn test_search_defaults_to_relevance_but_allows_explicit_date_sort() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO package_versions \
+         (name, version, first_commit_hash, first_commit_date, last_commit_hash, \
+          last_commit_date, attribute_path, description) \
+         VALUES ('icontract', '2.7.3', 'new-first', 1800000000, 'new-last', \
+                 1800100000, 'python314Packages.icontract', 'Python library')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "2.7",
+            "--format",
+            "json",
+            "--limit",
+            "0",
+        ];
+        args.extend_from_slice(extra);
+        let output = nxv()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<Vec<serde_json::Value>>(&output).unwrap()
+    };
+
+    let relevant = run(&[]);
+    assert_eq!(relevant[0]["attribute_path"], "python2");
+    assert_eq!(relevant[1]["attribute_path"], "python314Packages.icontract");
+
+    let by_date = run(&["--sort", "date"]);
+    assert_eq!(by_date[0]["attribute_path"], "python314Packages.icontract");
+    assert_eq!(by_date[1]["attribute_path"], "python2");
+}
+
+#[test]
 fn test_search_json_output() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");

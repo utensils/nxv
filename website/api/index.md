@@ -70,7 +70,7 @@ GET /api/v1/search
 | `version` | string  | Version filter (prefix match)            |
 | `exact`   | boolean | Exact name match                         |
 | `license` | string  | License filter                           |
-| `sort`    | string  | Sort order: date, version, name          |
+| `sort`    | string  | Sort order: relevance (default), date, version, name |
 | `reverse` | boolean | Reverse sort                             |
 | `limit`   | integer | Max results (default: 50, capped at 100) |
 | `offset`  | integer | Results to skip (default: 0)             |
