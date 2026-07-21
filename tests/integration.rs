@@ -2809,11 +2809,37 @@ fn test_index_end_to_end_with_mock_bucket() {
         .unwrap();
     assert_eq!(ingested, 2);
 
+    let search_index_present: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_packages_search_nocase'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        search_index_present,
+        "a small index run must preserve the normally-maintained covering index"
+    );
+
     // Bloom filter must resolve dotted attrs (written next to the DB).
     let bloom_path = dir.path().join("index.bloom");
     assert!(bloom_path.exists(), "bloom filter should be written");
 
-    // Idempotence: a second run ingests nothing and stays healthy.
+    // Simulate an interrupted bulk run after its transactional marker+drop.
+    // The idempotent no-work run below must heal this state even though it has
+    // no package observations to write.
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         INSERT OR REPLACE INTO meta (key, value)
+         VALUES ('search_index_dropped', '1');
+         DROP INDEX idx_packages_search_nocase;
+         COMMIT;",
+    )
+    .unwrap();
+
+    // Idempotence: a second run ingests nothing, repairs the covering index,
+    // and stays healthy.
     nxv()
         .env("NXV_RELEASES_URL", server.url())
         .args([
@@ -2826,7 +2852,31 @@ fn test_index_end_to_end_with_mock_bucket() {
         .timeout(std::time::Duration::from_secs(60))
         .assert()
         .success()
-        .stderr(predicate::str::contains("nothing to ingest"));
+        .stderr(
+            predicate::str::contains("rebuilding search index")
+                .and(predicate::str::contains("nothing to ingest")),
+        );
+
+    let recovered: (bool, i64) = conn
+        .query_row(
+            "SELECT
+                 EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'index' AND name = 'idx_packages_search_nocase'
+                 ),
+                 (SELECT COUNT(*) FROM meta WHERE key = 'search_index_dropped')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        recovered.0,
+        "the no-work run must rebuild the covering index"
+    );
+    assert_eq!(
+        recovered.1, 0,
+        "the no-work recovery must clear the drop marker"
+    );
 }
 
 /// A truncated artifact must fail its release without polluting the table,

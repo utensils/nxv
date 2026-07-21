@@ -24,6 +24,30 @@ pub const SCHEMA_VERSION: u32 = 4;
 /// Indexes with min_schema_version > this value are incompatible.
 pub const MIN_READABLE_SCHEMA: u32 = 4;
 
+/// Name of the covering prefix-search index (see `queries.rs` candidate CTE).
+pub const SEARCH_INDEX_NAME: &str = "idx_packages_search_nocase";
+
+/// `meta` flag set while the covering search index is intentionally dropped for
+/// a bulk run. It suppresses `init_schema`'s eager recreation so a crash between
+/// [`Database::drop_search_index`] and [`Database::rebuild_search_index`] does
+/// not force the next `Database::open` to rebuild a ~48s index that the resumed
+/// bulk run would immediately drop again. Cleared atomically by the rebuild.
+const SEARCH_INDEX_DROPPED_META: &str = "search_index_dropped";
+
+/// DDL for the covering search index. Shared by `init_schema` and
+/// [`Database::rebuild_search_index`] so the two definitions can never drift.
+/// NOCASE matches SQLite LIKE's established ASCII-case-insensitive behavior;
+/// the expression stores attribute depth without adding a derived table column.
+const CREATE_SEARCH_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS idx_packages_search_nocase ON package_versions(
+        attribute_path COLLATE NOCASE,
+        version COLLATE NOCASE,
+        (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+        last_commit_date DESC,
+        first_commit_date DESC
+    );
+"#;
+
 /// Database connection wrapper.
 pub struct Database {
     conn: Connection,
@@ -226,21 +250,20 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_packages_name ON package_versions(name);
             CREATE INDEX IF NOT EXISTS idx_packages_name_version ON package_versions(name, version, first_commit_date);
             CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
-            -- Cover the fields needed to rank prefix-search candidates before
-            -- fetching full rows. NOCASE matches SQLite LIKE's established
-            -- ASCII-case-insensitive behavior; the expression stores attribute
-            -- depth without adding a derived table column.
-            CREATE INDEX IF NOT EXISTS idx_packages_search_nocase ON package_versions(
-                attribute_path COLLATE NOCASE,
-                version COLLATE NOCASE,
-                (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
-                last_commit_date DESC,
-                first_commit_date DESC
-            );
             CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
             CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
             "#,
         )?;
+
+        // The covering prefix-search index is created here (not in the batch
+        // above) and gated on the drop marker: a bulk run drops it to avoid
+        // date-widen write amplification, and this open must NOT eagerly
+        // rebuild it while that run is mid-flight or being resumed. When the
+        // marker is clear (steady state) this is a cheap `IF NOT EXISTS` no-op.
+        // See drop_search_index / rebuild_search_index for the full lifecycle.
+        if self.get_meta(SEARCH_INDEX_DROPPED_META)?.as_deref() != Some("1") {
+            self.conn.execute_batch(CREATE_SEARCH_INDEX_SQL)?;
+        }
 
         // Keep the derived attr table upgradeable without a schema bump: it is
         // strictly a cache and can be rebuilt from package_versions.
@@ -641,6 +664,75 @@ impl Database {
             END;
             "#,
         )?;
+        Ok(())
+    }
+
+    /// True when the covering prefix-search index (`idx_packages_search_nocase`)
+    /// is present. This is the source of truth for search/publish readiness: an
+    /// absent index means prefix searches fall back to the slow full scan.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn search_index_present(&self) -> Result<bool> {
+        let present: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?",
+            [SEARCH_INDEX_NAME],
+            |row| row.get(0),
+        )?;
+        Ok(present)
+    }
+
+    /// Drop the covering search index for bulk ingestion.
+    ///
+    /// The widen-only upsert touches `first_commit_date`/`last_commit_date` on
+    /// nearly every alive attr per snapshot; with the covering index live that
+    /// costs 2.70x the WAL frames and 1.99x the date-update work. A large
+    /// catch-up run drops the index up front and rebuilds it once at the finish
+    /// path ([`Self::rebuild_search_index`]).
+    ///
+    /// The drop and the [`SEARCH_INDEX_DROPPED_META`] marker commit together, so
+    /// a crash before the rebuild leaves a recoverable state: `init_schema` will
+    /// not eagerly recreate the index and the next writable run restores it
+    /// deterministically. Idempotent (`DROP INDEX IF EXISTS`).
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn drop_search_index(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, '1')",
+            [SEARCH_INDEX_DROPPED_META],
+        )?;
+        tx.execute_batch(&format!("DROP INDEX IF EXISTS {SEARCH_INDEX_NAME};"))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rebuild the covering search index and clear the drop marker.
+    ///
+    /// Recreates the index dropped by [`Self::drop_search_index`] and clears
+    /// [`SEARCH_INDEX_DROPPED_META`] in the same transaction, so the marker is
+    /// only cleared once the index is actually present. If index creation fails
+    /// the transaction rolls back, the marker stays set, and the error
+    /// propagates — readiness is never falsely signalled.
+    #[cfg_attr(not(feature = "indexer"), allow(dead_code))]
+    pub fn rebuild_search_index(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(CREATE_SEARCH_INDEX_SQL)?;
+        // Guard against a name squatted by a non-index object (e.g. a table):
+        // `CREATE INDEX IF NOT EXISTS` would no-op, leaving no real index. Never
+        // clear the marker unless a genuine index now exists.
+        let present: bool = tx.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='index' AND name=?",
+            [SEARCH_INDEX_NAME],
+            |row| row.get(0),
+        )?;
+        if !present {
+            return Err(NxvError::CorruptIndex(format!(
+                "failed to build covering search index '{SEARCH_INDEX_NAME}'"
+            )));
+        }
+        tx.execute(
+            "DELETE FROM meta WHERE key = ?",
+            [SEARCH_INDEX_DROPPED_META],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1566,6 +1658,171 @@ mod tests {
         assert_eq!(
             fts_hits, 1,
             "rows written while triggers were absent must be re-indexed"
+        );
+    }
+
+    /// A fresh database opens with the covering search index present and no
+    /// drop marker, so ordinary reads plan through it immediately.
+    #[test]
+    fn test_search_index_present_on_fresh_open() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+        assert!(db.search_index_present().unwrap());
+        assert!(db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().is_none());
+    }
+
+    /// drop_search_index removes the index and records the marker; the finish
+    /// path's rebuild restores the index and clears the marker.
+    #[test]
+    fn test_search_index_drop_rebuild_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.drop_search_index().unwrap();
+        assert!(!db.search_index_present().unwrap());
+        assert_eq!(
+            db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().as_deref(),
+            Some("1"),
+            "drop must record the marker so a crash is recoverable"
+        );
+
+        // Idempotent: dropping again is a harmless no-op.
+        db.drop_search_index().unwrap();
+        assert!(!db.search_index_present().unwrap());
+
+        db.rebuild_search_index().unwrap();
+        assert!(db.search_index_present().unwrap());
+        assert!(
+            db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().is_none(),
+            "rebuild must clear the marker once the index exists"
+        );
+    }
+
+    /// The drop marker must survive a reopen and suppress init_schema's eager
+    /// rebuild — otherwise a crash-recovery open would rebuild a ~48s index the
+    /// resumed bulk run drops again.
+    #[test]
+    fn test_dropped_marker_suppresses_init_schema_rebuild() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.drop_search_index().unwrap();
+            assert!(!db.search_index_present().unwrap());
+        }
+
+        // Reopen as the next run's Database::open would.
+        let db = Database::open(&db_path).unwrap();
+        assert!(
+            !db.search_index_present().unwrap(),
+            "init_schema must NOT recreate the index while the drop marker is set"
+        );
+        assert_eq!(
+            db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().as_deref(),
+            Some("1")
+        );
+
+        // Deterministic recovery: rebuild restores readiness and clears state.
+        db.rebuild_search_index().unwrap();
+        assert!(db.search_index_present().unwrap());
+
+        // A subsequent reopen keeps the index (marker cleared, IF NOT EXISTS).
+        drop(db);
+        let db = Database::open(&db_path).unwrap();
+        assert!(db.search_index_present().unwrap());
+    }
+
+    /// Simulate the indexer's bulk lifecycle at the DB layer (mirrors
+    /// test_fts_triggers_missing_detection_and_heal): drop for bulk, ingest,
+    /// rebuild at finish, and heal an interruption on the next open.
+    #[test]
+    fn test_search_index_bulk_lifecycle_and_recovery() {
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let now = Utc::now();
+        let pkg = |attr: &str, ver: &str| PackageVersion {
+            id: 0,
+            name: attr.to_string(),
+            version: ver.to_string(),
+            first_commit_hash: "a".repeat(40),
+            first_commit_date: now,
+            last_commit_hash: "a".repeat(40),
+            last_commit_date: now,
+            attribute_path: attr.to_string(),
+            description: None,
+            license: None,
+            homepage: None,
+            maintainers: None,
+            platforms: None,
+            source_path: None,
+            known_vulnerabilities: None,
+        };
+
+        // Normal bulk completion: drop → ingest → rebuild leaves the index up.
+        {
+            let mut db = Database::open(&db_path).unwrap();
+            db.drop_search_index().unwrap();
+            db.upsert_observations(&[pkg("ripgrep", "14.0.0")]).unwrap();
+            db.rebuild_search_index().unwrap();
+            assert!(db.search_index_present().unwrap());
+            assert!(db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().is_none());
+        }
+
+        // Interrupted bulk: drop, write, then die before the rebuild.
+        {
+            let mut db = Database::open(&db_path).unwrap();
+            db.drop_search_index().unwrap();
+            db.upsert_observations(&[pkg("fd", "10.0.0")]).unwrap();
+            // no rebuild — simulate a kill/OOM/power loss here.
+        }
+
+        // Next writable open detects the missing index and heals it. Results are
+        // still correct either way (planner falls back to the scan), which we
+        // confirm before and after the rebuild.
+        let db = Database::open(&db_path).unwrap();
+        assert!(!db.search_index_present().unwrap());
+        let before = crate::db::queries::search_by_attr(db.connection(), "fd").unwrap();
+        db.rebuild_search_index().unwrap();
+        assert!(db.search_index_present().unwrap());
+        let after = crate::db::queries::search_by_attr(db.connection(), "fd").unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "fallback and indexed paths must agree"
+        );
+        assert!(after.iter().any(|p| p.attribute_path == "fd"));
+    }
+
+    /// If the index cannot actually be built (its name is squatted by another
+    /// object), rebuild must error and must NOT clear the drop marker — so the
+    /// next run still recovers instead of trusting a falsely-ready database.
+    #[test]
+    fn test_search_index_rebuild_failure_keeps_marker() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db = Database::open(&db_path).unwrap();
+
+        db.drop_search_index().unwrap();
+        // Squat the index name with a table so CREATE INDEX IF NOT EXISTS cannot
+        // produce a real index.
+        db.conn
+            .execute_batch("CREATE TABLE idx_packages_search_nocase (x);")
+            .unwrap();
+
+        // The rebuild errors (either SQLite's name-clash error or our own guard
+        // when a version no-ops the CREATE); what matters is that it fails and
+        // leaves the recovery state intact.
+        assert!(db.rebuild_search_index().is_err());
+        assert!(!db.search_index_present().unwrap());
+        assert_eq!(
+            db.get_meta(SEARCH_INDEX_DROPPED_META).unwrap().as_deref(),
+            Some("1"),
+            "a failed rebuild must leave the marker set for recovery"
         );
     }
 

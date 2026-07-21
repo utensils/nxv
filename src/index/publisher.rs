@@ -438,6 +438,31 @@ pub fn generate_full_index<P: AsRef<Path>, Q: AsRef<Path>>(
         )));
     }
 
+    // Search-index readiness gate: the covering index must ship with the
+    // published database, or every client inherits the slow full-scan cold
+    // path. A crash mid-bulk can leave it dropped (the drop marker suppresses
+    // init_schema's auto-rebuild on open), so repair it here, then validate —
+    // never silently ship a missing-index artifact.
+    if !db.search_index_present()? {
+        if show_progress {
+            eprintln!("  Covering search index missing; rebuilding before publish...");
+        }
+        if let Err(e) = db.rebuild_search_index() {
+            return Err(NxvError::CorruptIndex(format!(
+                "covering search index '{}' is missing and could not be rebuilt ({e}); \
+                 refusing to publish the slow full-scan artifact",
+                crate::db::SEARCH_INDEX_NAME
+            )));
+        }
+    }
+    if !db.search_index_present()? {
+        return Err(NxvError::CorruptIndex(format!(
+            "covering search index '{}' is missing; \
+             refusing to publish the slow full-scan artifact",
+            crate::db::SEARCH_INDEX_NAME
+        )));
+    }
+
     // Set the indexed date to now (publish time) so it matches the manifest
     db.set_meta("last_indexed_date", &Utc::now().to_rfc3339())?;
     // Write min_schema_version to database for direct-download validation
@@ -736,6 +761,70 @@ mod tests {
             "#,
         )
         .unwrap();
+    }
+
+    /// Force the crash-recovery state on a publishable database: the covering
+    /// index dropped and the drop marker set, so `Database::open`'s init_schema
+    /// leaves it absent.
+    fn strand_search_index(path: &Path) {
+        let db = Database::open(path).unwrap();
+        db.drop_search_index().unwrap();
+        assert!(!db.search_index_present().unwrap());
+    }
+
+    #[test]
+    fn test_generate_full_index_repairs_missing_search_index() {
+        use crate::remote::download::decompress_zstd;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+        strand_search_index(&db_path);
+
+        // Publishing must repair the stranded index, not ship the slow artifact.
+        generate_full_index(&db_path, &output_dir, None, None, false, None).unwrap();
+
+        let compressed_path = output_dir.join(INDEX_DB_NAME);
+        let decompressed_path = dir.path().join("decompressed.db");
+        decompress_zstd(&compressed_path, &decompressed_path, false).unwrap();
+
+        let db = Database::open(&decompressed_path).unwrap();
+        assert!(
+            db.search_index_present().unwrap(),
+            "published database must carry the covering search index"
+        );
+        assert!(
+            db.get_meta("search_index_dropped").unwrap().is_none(),
+            "publish repair must clear the drop marker"
+        );
+    }
+
+    #[test]
+    fn test_generate_full_index_refuses_when_search_index_cannot_be_built() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let output_dir = dir.path().join("output");
+
+        create_test_db(&db_path);
+        strand_search_index(&db_path);
+
+        // Squat the index name with a table so the publish-time rebuild cannot
+        // produce a real index; publishing must refuse rather than ship it.
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.connection()
+                .execute_batch("CREATE TABLE idx_packages_search_nocase (x);")
+                .unwrap();
+        }
+
+        let err = generate_full_index(&db_path, &output_dir, None, None, false, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to publish") && msg.contains("search index"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
