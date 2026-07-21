@@ -90,6 +90,7 @@ Note the directory is `src/index/` even though the Cargo feature is named `index
 ### Database Schema (`db/mod.rs`, schema v4)
 
 - `package_versions`: One row per `(attribute_path, version)` with **observation-backed** bounds: the pair was seen at `first_commit` and `last_commit` (real, Hydra-built channel commits); interior presence is interpolated, not guaranteed
+- `idx_packages_search_nocase`: Covering ASCII-NOCASE index for prefix and prefix+version candidate ranking; bulk ingestion drops and transactionally rebuilds it, and publication repairs or refuses an incomplete index
 - `releases`: Per-channel ingestion ledger (pending/ingested/failed/skipped + retry backoff) — replaces the old single-checkpoint model; a gap is just a pending row the next run picks up
 - `package_versions_fts`: FTS5 virtual table for description search (triggers are WHEN-guarded; bulk runs drop + rebuild)
 - `meta`: Key-value store (last_indexed_commit = newest ingested release commit, schema_version, min_schema_version)

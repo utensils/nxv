@@ -153,7 +153,7 @@ nxv publish --output ./publish --sign --secret-key ./nxv.key
 
 | File                    | Size    | Description                        |
 | ----------------------- | ------- | ---------------------------------- |
-| `index.db.zst`          | ~190 MB | Zstd-compressed SQLite database    |
+| `index.db.zst`          | ~220 MB | Zstd-compressed SQLite database    |
 | `bloom.bin`             | ~330 KB | Bloom filter for fast lookups      |
 | `manifest.json`         | ~1 KB   | Metadata with checksums            |
 | `manifest.json.minisig` | ~1 KB   | minisign signature (when `--sign`) |
@@ -257,6 +257,15 @@ CREATE TABLE releases (
 CREATE VIRTUAL TABLE package_versions_fts
 USING fts5(name, description, content=package_versions, content_rowid=id);
 
+-- Cover prefix and prefix+version candidate ranking without fetching full rows
+CREATE INDEX idx_packages_search_nocase ON package_versions(
+    attribute_path COLLATE NOCASE,
+    version COLLATE NOCASE,
+    (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+    last_commit_date DESC,
+    first_commit_date DESC
+);
+
 -- Metadata
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
@@ -270,6 +279,12 @@ A given `(attribute_path, version)` pair is exactly one row, enforced by the
 `UNIQUE(attribute_path, version)` constraint. Re-observing a pair only widens
 its range. `nxv dedupe` exists to repair databases built by pre-0.1.5 indexer
 versions that left duplicate rows behind.
+
+Prefix searches first rank compact entries from `idx_packages_search_nocase`,
+then fetch at most 5,000 full rows by primary key. Bulk ingestion drops this
+covering index to avoid write amplification and rebuilds it transactionally. If
+a run is interrupted, the next writable run repairs it; publishing also repairs
+the index or refuses to emit a slow artifact.
 
 ### Insecure Packages
 

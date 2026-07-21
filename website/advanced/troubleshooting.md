@@ -80,7 +80,7 @@ if updates are managed externally.
 
 ### Disk full
 
-The compressed index download is ~190MB and unpacks to ~2GB of disk space:
+The compressed index download is ~220MB and unpacks to ~2.1GB of disk space:
 
 - Linux: `~/.local/share/nxv/`
 - macOS: `~/Library/Application Support/nxv/`

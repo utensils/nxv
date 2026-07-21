@@ -26,7 +26,7 @@ nix run github:utensils/nxv -- search python
 # One-liner install (downloads static binary)
 curl -fsSL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 
-# Update the package index (downloads ~190MB)
+# Update the package index (downloads ~220MB)
 nxv update
 
 # Search for a package
@@ -50,7 +50,7 @@ For each package version, nxv provides:
 
 nxv uses a pre-built SQLite index containing:
 
-- ~1.75 million version records across ~282,000 package attributes
+- ~1.77 million version records across ~139,000 package attributes
 - Package metadata (description, license, homepage)
 - Bloom filter for instant "not found" responses
 
