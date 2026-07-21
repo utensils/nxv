@@ -86,20 +86,51 @@ nxv search python --format json                      # Machine-readable JSON
 nxv search python --format plain                     # TSV for shell scripts
 ```
 
-**JSON shape per row:**
+**JSON shape per row** (the same shape is returned by `nxv info`, `nxv history <pkg> <version>`, `nxv history --full`, and the `/api/v1` package endpoints):
 
 ```json
 {
-  "attribute_path": "python311",
-  "version": "3.11.4",
-  "description": "A high-level dynamically-typed programming language",
-  "license": "Python-2.0",
-  "first_commit_hash": "abc123...",
-  "first_commit_date": "2023-06-15T00:00:00Z",
-  "last_commit_hash": "def456...",
-  "last_commit_date": "2023-12-01T00:00:00Z"
+  "id": 9630,
+  "name": "python3",
+  "version": "3.12.13",
+  "first_commit_hash": "d78e468770f4ab5e00c5015f4d77c1a499a76dc8",
+  "first_commit_date": "2026-03-06T20:06:54Z",
+  "last_commit_hash": "3d2613bc58a1f5b7805467a63a825e1d7bc9b7a9",
+  "last_commit_date": "2026-07-21T12:39:35Z",
+  "attribute_path": "python312",
+  "description": "High-level dynamically-typed programming language",
+  "license": ["Python-2.0"],
+  "homepage": "https://www.python.org",
+  "maintainers": ["mweinelt"],
+  "platforms": ["x86_64-linux", "aarch64-darwin"],
+  "source_path": "pkgs/development/interpreters/python/cpython/default.nix",
+  "known_vulnerabilities": null
 }
 ```
+
+| Field                                                     | Type            | Notes                                                                          |
+| --------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------ |
+| `id`                                                      | integer         | Index row id. Not stable across index rebuilds — never persist it.             |
+| `name`                                                    | string          | Upstream derivation name. **Not installable** — see below.                     |
+| `attribute_path`                                          | string          | The nixpkgs attribute. **This is what you install with.**                      |
+| `version`                                                 | string          | Package version.                                                               |
+| `first_commit_hash` / `last_commit_hash`                  | string          | Full 40-char nixpkgs commit hashes.                                            |
+| `first_commit_date` / `last_commit_date`                  | string          | RFC 3339 / ISO 8601 UTC.                                                       |
+| `description`, `homepage`, `source_path`                  | string \| null  | `source_path` is null for older packages.                                      |
+| `license`, `maintainers`, `platforms`                     | array \| null   | Arrays of strings. `null` when the package declares none.                      |
+| `known_vulnerabilities`                                   | array \| null   | `null` (or `[]`) means no known advisory; non-empty means the package is insecure. |
+
+**`name` vs `attribute_path`** — these routinely differ and confusing them produces commands that fail. `name` is the upstream derivation name (`pname` for top-level attrs, the final attribute segment for nested ones); `attribute_path` is the address you actually install with. For the row above, `nix shell nixpkgs/<hash>#python312` works and `#python3` may not. **Always use `attribute_path`.**
+
+`license`, `maintainers`, `platforms`, and `known_vulnerabilities` are real JSON arrays, so `jq` reaches them directly:
+
+```bash
+nxv search python312 --exact --format json | jq -r '.[0].license[]'        # Python-2.0
+nxv search python312 --exact --format json | jq -r '.[0].platforms | join(", ")'
+nxv search hello --format json | jq -r '.[] | select(.known_vulnerabilities != null) | .attribute_path'
+```
+
+> **Version note**: nxv **< 0.5.0** emitted these four fields as JSON-encoded *strings* (`"license": "[\"Python-2.0\"]"`), requiring a second `fromjson`. If you must support both, use `(.license | if type == "string" then fromjson else . end)`.
 
 ## Info
 
@@ -123,7 +154,7 @@ nxv history python311 --full             # Add commits, license, homepage, etc.
 nxv history python311 --format json
 ```
 
-**JSON shape per row:**
+**JSON shape per row** — plain `nxv history <pkg>` returns this compact timeline shape:
 
 ```json
 {
@@ -133,6 +164,8 @@ nxv history python311 --format json
   "is_insecure": false
 }
 ```
+
+Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`.
 
 ## Using a Found Version
 
@@ -375,7 +408,8 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Bloom filter gives instant negatives**: a search for a nonsense package name returns in <1 ms because the bloom filter rejects it before SQLite is touched. False positives are possible but rare.
 - **Coverage starts in September 2016**: nixpkgs commits before then are not indexed. Anything older needs raw git spelunking.
 - **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv update` rejects the signature.
-- **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump.
+- **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump — `license`/`maintainers`/`platforms`/`known_vulnerabilities` changed from stringified JSON to real arrays in 0.5.0.
+- **Install with `attribute_path`, never `name`**: they differ often (`"name": "python3"` vs `"attribute_path": "python312"`). `name` is the upstream derivation name and is not a valid flake attribute on its own.
 - **`/api/v1` data responses always wrap in `{data, meta}` (or `{data}` for single items)**: do `jq '.data'` first. Exceptions: the operational `/health` and `/metrics` endpoints are unwrapped.
 
 ## Practical Tips

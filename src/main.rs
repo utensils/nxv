@@ -590,15 +590,24 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                 println!("last_commit\t{}", pkg.last_commit_hash);
                 println!("last_date\t{}", pkg.last_commit_date.format("%Y-%m-%d"));
                 println!("description\t{}", pkg.description.as_deref().unwrap_or("-"));
-                println!("license\t{}", pkg.license.as_deref().unwrap_or("-"));
+                println!(
+                    "license\t{}",
+                    db::json_array::join_or(pkg.license.as_deref(), "-")
+                );
                 println!("homepage\t{}", pkg.homepage.as_deref().unwrap_or("-"));
-                println!("maintainers\t{}", pkg.maintainers.as_deref().unwrap_or("-"));
-                println!("platforms\t{}", pkg.platforms.as_deref().unwrap_or("-"));
+                println!(
+                    "maintainers\t{}",
+                    db::json_array::join_or(pkg.maintainers.as_deref(), "-")
+                );
+                println!(
+                    "platforms\t{}",
+                    db::json_array::join_or(pkg.platforms.as_deref(), "-")
+                );
                 println!("insecure\t{}", if pkg.is_insecure() { "yes" } else { "no" });
                 if pkg.is_insecure() {
                     println!(
                         "known_vulnerabilities\t{}",
-                        pkg.known_vulnerabilities.as_deref().unwrap_or("[]")
+                        db::json_array::join_or(pkg.known_vulnerabilities.as_deref(), "-")
                     );
                 }
                 println!();
@@ -636,7 +645,7 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             println!(
                 "  {:<16} {}",
                 "License:",
-                pkg.license.as_deref().unwrap_or("-")
+                db::json_array::join_or(pkg.license.as_deref(), "-")
             );
             println!();
 
@@ -655,22 +664,19 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
             );
             println!();
 
-            if let Some(ref maintainers) = pkg.maintainers {
+            let maintainers = db::json_array::parse(pkg.maintainers.as_deref().unwrap_or(""));
+            if !maintainers.is_empty() {
                 println!("{}", "Maintainers".bold().underline());
-                // Parse JSON array and display
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(maintainers) {
-                    for m in list {
-                        println!("  • {}", m);
-                    }
-                } else {
-                    println!("  {}", maintainers);
+                for m in maintainers {
+                    println!("  • {}", m);
                 }
                 println!();
             }
 
-            if let Some(ref platforms) = pkg.platforms {
+            let list = db::json_array::parse(pkg.platforms.as_deref().unwrap_or(""));
+            if !list.is_empty() {
                 println!("{}", "Platforms".bold().underline());
-                if let Ok(list) = serde_json::from_str::<Vec<String>>(platforms) {
+                {
                     // Detect current platform
                     let current_platform = format!(
                         "{}-{}",
@@ -718,8 +724,6 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
                         let formatted: Vec<_> = other.iter().map(|p| format_platform(p)).collect();
                         println!("  Other:  {}", formatted.join(", "));
                     }
-                } else {
-                    println!("  {}", platforms);
                 }
                 println!();
             }
@@ -1104,7 +1108,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
                         pkg.last_commit_short(),
                         pkg.last_commit_date.format("%Y-%m-%d"),
                         pkg.description.as_deref().unwrap_or("-"),
-                        pkg.license.as_deref().unwrap_or("-"),
+                        db::json_array::join_or(pkg.license.as_deref(), "-"),
                         pkg.homepage.as_deref().unwrap_or("-"),
                     );
                 }

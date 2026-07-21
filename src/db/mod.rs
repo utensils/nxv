@@ -1,6 +1,7 @@
 //! Database module for nxv index storage.
 
 pub mod import;
+pub mod json_array;
 pub mod queries;
 pub mod releases;
 

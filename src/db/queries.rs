@@ -111,13 +111,33 @@ pub struct PackageVersion {
     pub last_commit_date: DateTime<Utc>,
     pub attribute_path: String,
     pub description: Option<String>,
+    /// SPDX identifiers. Stored as a JSON array string; serialized as an array.
+    #[serde(
+        serialize_with = "super::json_array::serialize_opt",
+        deserialize_with = "super::json_array::deserialize_opt"
+    )]
     pub license: Option<String>,
     pub homepage: Option<String>,
+    /// Maintainer handles. Stored as a JSON array string; serialized as an array.
+    #[serde(
+        serialize_with = "super::json_array::serialize_opt",
+        deserialize_with = "super::json_array::deserialize_opt"
+    )]
     pub maintainers: Option<String>,
+    /// Supported systems. Stored as a JSON array string; serialized as an array.
+    #[serde(
+        serialize_with = "super::json_array::serialize_opt",
+        deserialize_with = "super::json_array::deserialize_opt"
+    )]
     pub platforms: Option<String>,
     /// Source file path relative to nixpkgs root
     pub source_path: Option<String>,
-    /// Known security vulnerabilities or EOL notices (JSON array)
+    /// Known security vulnerabilities or EOL notices. Stored as a JSON array
+    /// string; serialized as an array.
+    #[serde(
+        serialize_with = "super::json_array::serialize_opt",
+        deserialize_with = "super::json_array::deserialize_opt"
+    )]
     pub known_vulnerabilities: Option<String>,
 }
 
@@ -272,8 +292,8 @@ impl PackageVersion {
     /// Get parsed known vulnerabilities as a vector of strings.
     pub fn vulnerabilities(&self) -> Vec<String> {
         self.known_vulnerabilities
-            .as_ref()
-            .and_then(|v| serde_json::from_str(v).ok())
+            .as_deref()
+            .map(super::json_array::parse)
             .unwrap_or_default()
     }
 }
@@ -2087,13 +2107,16 @@ mod tests {
     }
 
     #[test]
-    fn test_vulnerabilities_invalid_json() {
+    fn test_vulnerabilities_invalid_json_is_preserved() {
         let pkg = make_test_package(
             Utc.timestamp_opt(1700000000, 0).unwrap(),
             Some("invalid json".to_string()),
         );
-        let vulns = pkg.vulnerabilities();
-        assert!(vulns.is_empty());
+        // Unparseable content is surfaced verbatim rather than dropped:
+        // `is_insecure()` already flags such a row, so returning an empty list
+        // would print the "has known vulnerabilities" banner with no reason.
+        assert!(pkg.is_insecure());
+        assert_eq!(pkg.vulnerabilities(), ["invalid json"]);
     }
 
     #[test]
