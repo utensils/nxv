@@ -254,7 +254,7 @@ fn test_search_exact_with_version_filter_restricts_to_exact_attr() {
             "--limit",
             "0",
         ];
-        args.extend(version_args.iter());
+        args.extend(version_args.iter().copied());
 
         let output = nxv()
             .args(&args)
