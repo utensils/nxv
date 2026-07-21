@@ -230,6 +230,109 @@ fn test_search_exact_match() {
         .stdout(predicate::str::contains("3.11").or(predicate::str::contains("3.12")));
 }
 
+/// Regression for #52: `--exact` used to be silently dropped whenever a
+/// version filter was present, so `nxv search python 3.11 --exact` returned
+/// `python311` too. Both invocation styles (positional and `-V`) are covered
+/// because they feed the same `SearchOptions`.
+#[test]
+fn test_search_exact_with_version_filter_restricts_to_exact_attr() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bloom_path = dir.path().join("nonexistent.bloom");
+    create_test_db(&db_path);
+
+    // `python` and `python311` both carry 3.11.0; --exact must keep only `python`.
+    for version_args in [vec!["3.11"], vec!["-V", "3.11"]] {
+        let mut args = vec![
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "--exact",
+            "--format",
+            "json",
+            "--limit",
+            "0",
+        ];
+        args.extend(version_args.iter());
+
+        let output = nxv()
+            .args(&args)
+            .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let results: Vec<serde_json::Value> =
+            serde_json::from_slice(&output).expect("search --format json must emit a JSON array");
+
+        assert!(
+            !results.is_empty(),
+            "expected the exact `python` 3.11 row, got nothing ({version_args:?})"
+        );
+        for r in &results {
+            assert_eq!(
+                r["attribute_path"], "python",
+                "--exact leaked a non-exact attr with a version filter ({version_args:?})"
+            );
+        }
+    }
+}
+
+/// The complementary case from the issue: `python` was never at 2.7.x, so an
+/// exact search must return zero rows rather than the `python2` sibling.
+#[test]
+fn test_search_exact_with_version_filter_returns_empty_when_unmatched() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let bloom_path = dir.path().join("nonexistent.bloom");
+    create_test_db(&db_path);
+
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "2.7",
+            "--exact",
+            "--format",
+            "json",
+            "--limit",
+            "0",
+        ])
+        .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be UTF-8");
+
+    // An empty result set writes nothing to stdout and reports "No packages
+    // found" on stderr instead of emitting `[]` — pre-existing behavior,
+    // unrelated to #52. Accept an empty stdout or an empty array, never a
+    // populated one.
+    if !stdout.trim().is_empty() {
+        let results: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("non-empty stdout must be a JSON array ({e}): {stdout}"));
+        assert!(
+            results.is_empty(),
+            "python was never at 2.7.x; got {results:?}"
+        );
+    }
+
+    // Belt and braces: the `python2` sibling does hold 2.7.18, so it would be
+    // returned by the buggy prefix path. It must appear in neither stream.
+    let stderr = String::from_utf8(output.stderr).expect("stderr must be UTF-8");
+    assert!(
+        !stdout.contains("python2") && !stderr.contains("python2"),
+        "--exact leaked the `python2` sibling:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
 #[test]
 fn test_search_prefix_match() {
     let dir = tempdir().unwrap();

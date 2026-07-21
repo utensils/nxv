@@ -386,6 +386,35 @@ pub fn search_by_attr_exact(
     Ok(results)
 }
 
+/// Search for packages by exact attribute path, restricted to a version prefix.
+///
+/// This is the `--exact` counterpart to [`search_by_name_version`]: the
+/// attribute path must match exactly while the version is still a prefix match
+/// (`2.7` matches `2.7.18`), matching the documented flag semantics — `--exact`
+/// constrains the attribute, never the version.
+///
+/// No row cap is applied: a single attribute path holds at most one row per
+/// distinct version, so the result set is inherently small.
+pub fn search_by_attr_exact_version(
+    conn: &rusqlite::Connection,
+    attr_path: &str,
+    version: &str,
+) -> Result<Vec<PackageVersion>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM package_versions WHERE attribute_path = ? \
+           AND version LIKE ? ESCAPE '\\' \
+         ORDER BY last_commit_date DESC",
+    )?;
+    let version_pattern = format!("{}%", escape_like_pattern(version));
+    let rows = stmt.query_map([attr_path, &version_pattern], PackageVersion::from_row)?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
 /// Search for packages by attribute path prefix.
 pub fn search_by_attr(conn: &rusqlite::Connection, attr_path: &str) -> Result<Vec<PackageVersion>> {
     let mut stmt = conn.prepare(&format!(
@@ -1200,6 +1229,49 @@ mod tests {
         let results = search_by_attr_exact(db.connection(), "python").unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|p| p.attribute_path == "python"));
+    }
+
+    /// Regression for #52: with a version filter present, the exact-attribute
+    /// restriction must still hold. `python2` carries 2.7.18 and would be
+    /// returned by the prefix-matching version query.
+    #[test]
+    fn test_search_by_attr_exact_version_excludes_prefix_siblings() {
+        let (_dir, db) = create_test_db();
+
+        // The prefix path matches the sibling attr `python2`...
+        let prefixed = search_by_name_version(db.connection(), "python", "2.7").unwrap();
+        assert_eq!(prefixed.len(), 1);
+        assert_eq!(prefixed[0].attribute_path, "python2");
+
+        // ...while the exact path must not: `python` was never at 2.7.x.
+        let exact = search_by_attr_exact_version(db.connection(), "python", "2.7").unwrap();
+        assert!(
+            exact.is_empty(),
+            "--exact must not leak sibling attrs, got {:?}",
+            exact.iter().map(|p| &p.attribute_path).collect::<Vec<_>>()
+        );
+    }
+
+    /// The version half of an exact search stays a prefix match: `3.11`
+    /// resolves `3.11.0` without requiring the full version string.
+    #[test]
+    fn test_search_by_attr_exact_version_matches_version_prefix() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr_exact_version(db.connection(), "python", "3.11").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].attribute_path, "python");
+        assert_eq!(results[0].version, "3.11.0");
+    }
+
+    /// LIKE metacharacters in the version filter are literals, not wildcards.
+    #[test]
+    fn test_search_by_attr_exact_version_escapes_wildcards() {
+        let (_dir, db) = create_test_db();
+        let results = search_by_attr_exact_version(db.connection(), "python", "%").unwrap();
+        assert!(
+            results.is_empty(),
+            "'%' must be a literal, not a match-all wildcard"
+        );
     }
 
     // --- Covering prefix-search candidate index (ticket: nxv-covering-prefix-search) ---

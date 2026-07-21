@@ -133,8 +133,14 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
         // FTS search on description
         queries::search_by_description(conn, &opts.query)?
     } else if let Some(ref version) = opts.version {
-        // Search by name and version
-        queries::search_by_name_version(conn, &opts.query, version)?
+        // Search by name and version. `--exact` composes with the version
+        // filter rather than being shadowed by it: the attribute path must
+        // match exactly, the version stays a prefix match.
+        if opts.exact {
+            queries::search_by_attr_exact_version(conn, &opts.query, version)?
+        } else {
+            queries::search_by_name_version(conn, &opts.query, version)?
+        }
     } else if opts.exact {
         // Exact match on attribute_path. Avoid the old prefix query + Rust
         // filter path, which materialized thousands of sibling attrs on v4 DBs.
@@ -467,6 +473,126 @@ mod tests {
         assert!(!opts.full);
         assert!(!opts.reverse);
         assert_eq!(opts.sort, SortOrder::Date);
+    }
+}
+
+/// Regression coverage for #52: `--exact` was shadowed by the version filter
+/// because `execute_search` dispatched on `version` before `exact`, routing the
+/// query into the prefix-matching `search_by_name_version`. These tests drive
+/// the real dispatch, so they fail if the branch ordering regresses.
+///
+/// Both the CLI and the API server build `SearchOptions` and call
+/// `execute_search`, so covering it here covers both front ends.
+#[cfg(test)]
+mod exact_with_version_tests {
+    use super::*;
+    use crate::db::Database;
+    use tempfile::{TempDir, tempdir};
+
+    /// Mirrors the issue's repro shape. Deliberately tuned so every assertion
+    /// below is non-vacuous — i.e. genuinely fails if the `exact` branch is
+    /// removed from `execute_search`:
+    ///  * `python` is the only exact attr, and it is NEVER at 2.7.x, so the
+    ///    2.7 queries must return zero rather than the siblings that do match;
+    ///  * `python313Packages.django` sits at 3.11.2 so even the "matching"
+    ///    3.11 query has a sibling to wrongly pick up without the fix.
+    const SEED: &str = r#"
+        INSERT INTO package_versions
+            (name, version, first_commit_hash, first_commit_date,
+             last_commit_hash, last_commit_date, attribute_path, description, license)
+        VALUES
+            ('python', '3.11.0', 'h1', 100, 'l1', 900, 'python',  'd', 'MIT'),
+            ('python2', '2.7.18', 'h2', 100, 'l2', 800, 'python2', 'd', 'MIT'),
+            ('granian', '2.7.9', 'h3', 100, 'l3', 700, 'python314Packages.granian', 'd', 'MIT'),
+            ('aiohappyeyeballs', '2.7.1', 'h4', 100, 'l4', 600, 'python313Packages.aiohappyeyeballs', 'd', 'MIT'),
+            ('django', '3.11.2', 'h5', 100, 'l5', 500, 'python313Packages.django', 'd', 'MIT');
+    "#;
+
+    fn seeded_db() -> (TempDir, Database) {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+        (dir, db)
+    }
+
+    fn opts(query: &str, version: Option<&str>, exact: bool) -> SearchOptions {
+        SearchOptions {
+            query: query.to_string(),
+            version: version.map(str::to_string),
+            exact,
+            limit: 0, // unlimited, matching the issue's `--limit 0`
+            ..Default::default()
+        }
+    }
+
+    /// The version the exact attr does carry: only `python` may come back,
+    /// never `python313Packages.django`, which also sits at 3.11.x.
+    #[test]
+    fn exact_with_version_filter_restricts_to_the_named_attr() {
+        let (_dir, db) = seeded_db();
+
+        let res = execute_search(db.connection(), &opts("python", Some("3.11"), true)).unwrap();
+
+        assert_eq!(
+            res.total,
+            1,
+            "--exact leaked sibling attrs: {:?}",
+            res.data
+                .iter()
+                .map(|p| &p.attribute_path)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(res.data[0].attribute_path, "python");
+        assert_eq!(res.data[0].version, "3.11.0");
+    }
+
+    /// The issue's own repro: `python` was never at 2.7.x, so the result must
+    /// be empty even though three sibling attrs do match that version prefix.
+    #[test]
+    fn exact_with_version_never_held_by_the_attr_returns_no_rows() {
+        let (_dir, db) = seeded_db();
+
+        let res = execute_search(db.connection(), &opts("python", Some("2.7"), true)).unwrap();
+
+        assert_eq!(
+            res.total,
+            0,
+            "python was never at 2.7.x, got {:?}",
+            res.data
+                .iter()
+                .map(|p| &p.attribute_path)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Guard the other half of the contract: without `--exact` the prefix
+    /// behavior is unchanged, so this failing means the fix over-reached.
+    #[test]
+    fn non_exact_with_version_filter_still_matches_prefix_siblings() {
+        let (_dir, db) = seeded_db();
+
+        let res = execute_search(db.connection(), &opts("python", Some("2.7"), false)).unwrap();
+
+        assert_eq!(res.total, 3, "prefix search should keep all 2.7.x siblings");
+        assert!(
+            res.data
+                .iter()
+                .any(|p| p.attribute_path == "python314Packages.granian")
+        );
+    }
+
+    /// `--exact` composes with the version filter without disturbing the
+    /// version's prefix semantics: a bare `3` still resolves `3.11.0`, and
+    /// still excludes the 3.11.x sibling.
+    #[test]
+    fn exact_keeps_version_as_a_prefix_match() {
+        let (_dir, db) = seeded_db();
+
+        let res = execute_search(db.connection(), &opts("python", Some("3"), true)).unwrap();
+
+        assert_eq!(res.total, 1);
+        assert_eq!(res.data[0].attribute_path, "python");
+        assert_eq!(res.data[0].version, "3.11.0");
     }
 }
 
