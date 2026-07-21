@@ -61,6 +61,15 @@ fn create_test_db(path: &std::path::Path) {
         CREATE INDEX IF NOT EXISTS idx_packages_name ON package_versions(name);
         CREATE INDEX IF NOT EXISTS idx_packages_name_version ON package_versions(name, version, first_commit_date);
         CREATE INDEX IF NOT EXISTS idx_packages_attr ON package_versions(attribute_path);
+        -- Match the production schema so higher-level search tests exercise the
+        -- covering candidate index rather than only the scan fallback.
+        CREATE INDEX IF NOT EXISTS idx_packages_search_nocase ON package_versions(
+            attribute_path COLLATE NOCASE,
+            version COLLATE NOCASE,
+            (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+            last_commit_date DESC,
+            first_commit_date DESC
+        );
         CREATE INDEX IF NOT EXISTS idx_packages_first_date ON package_versions(first_commit_date DESC);
         CREATE INDEX IF NOT EXISTS idx_packages_last_date ON package_versions(last_commit_date DESC);
 
@@ -1294,6 +1303,13 @@ fn create_compressed_test_db() -> (Vec<u8>, String) {
         CREATE INDEX idx_packages_name ON package_versions(name);
         CREATE INDEX idx_packages_name_version ON package_versions(name, version, first_commit_date);
         CREATE INDEX idx_packages_attr ON package_versions(attribute_path);
+        CREATE INDEX idx_packages_search_nocase ON package_versions(
+            attribute_path COLLATE NOCASE,
+            version COLLATE NOCASE,
+            (LENGTH(attribute_path) - LENGTH(REPLACE(attribute_path, '.', ''))),
+            last_commit_date DESC,
+            first_commit_date DESC
+        );
         CREATE INDEX idx_packages_first_date ON package_versions(first_commit_date DESC);
         CREATE INDEX idx_packages_last_date ON package_versions(last_commit_date DESC);
         CREATE VIRTUAL TABLE package_versions_fts USING fts5(name, description, content=package_versions, content_rowid=id);
