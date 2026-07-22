@@ -3,8 +3,11 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   title: 'nxv',
-  description: 'Find any version of any Nix package',
+  description: 'Find any version of any Nix package, instantly.',
   base: '/nxv/',
+
+  // Blueprint is dark-only by design — pin dark and drop the toggle.
+  appearance: 'force-dark',
 
   vite: {
     plugins: [tailwindcss()],
@@ -14,33 +17,38 @@ export default defineConfig({
     },
   },
 
+  markdown: {
+    // Single dark Shiki palette — the site never renders light.
+    theme: 'github-dark',
+  },
+
   head: [
-    ['link', { rel: 'icon', href: '/nxv/nxv-logo-dark.svg' }],
-    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'icon', href: '/nxv/nix-snowflake.svg' }],
     [
       'link',
       {
-        rel: 'preconnect',
-        href: 'https://fonts.gstatic.com',
+        rel: 'preload',
+        href: '/nxv/fonts/inter-var.woff2',
+        as: 'font',
+        type: 'font/woff2',
         crossorigin: '',
       },
     ],
     [
       'link',
       {
-        rel: 'stylesheet',
-        href: 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap',
+        rel: 'preload',
+        href: '/nxv/fonts/jetbrains-mono-var.woff2',
+        as: 'font',
+        type: 'font/woff2',
+        crossorigin: '',
       },
     ],
   ],
 
   themeConfig: {
-    logo: {
-      light: '/nxv-logo-light.svg',
-      dark: '/nxv-logo-dark.svg',
-      alt: 'nxv',
-    },
-    siteTitle: false,
+    logo: { src: '/nix-snowflake.svg', alt: 'nxv' },
+    siteTitle: 'nxv',
 
     nav: [
       { text: 'Guide', link: '/guide/' },
