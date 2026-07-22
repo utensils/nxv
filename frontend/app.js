@@ -684,7 +684,7 @@
         : 'card-ver--brand';
 
     return `
-      <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_100px_100px_150px] gap-4 items-center px-5 py-3.5 cursor-pointer transition-colors anim-in hover:bg-[var(--color-ink-1)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--border-subtle);">
+      <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_100px_150px] lg:grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_100px_100px_150px] gap-4 items-center px-5 py-3.5 cursor-pointer transition-colors anim-in hover:bg-[var(--color-ink-1)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--border-subtle);">
         <div class="min-w-0">
           <div class="flex items-baseline gap-2 min-w-0">
             <span class="mono text-[13px] text-[var(--color-fog-0)] font-medium truncate">${nameHtml}</span>
@@ -705,7 +705,7 @@
             ${flags.join('')}${platformsHtml}
           </div>
         </div>
-        <div class="mono text-[12px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.first)}</div>
+        <div class="hidden lg:block mono text-[12px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.first)}</div>
         <div class="mono text-[12px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.last)}</div>
         <div class="flex items-center justify-end gap-1.5">
           <button class="btn btn-ghost" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref">
@@ -1015,7 +1015,7 @@
       const dotStyle = operational
         ? ''
         : ' style="background: var(--color-red-glow); box-shadow: 0 0 7px oklch(0.66 0.19 25 / 0.7);"';
-      pill.innerHTML = `<span class="pill-dot"${dotStyle}></span><span id="headerStatus">${operational ? 'api operational' : 'api unreachable'}</span>`;
+      pill.innerHTML = `<span class="pill-dot"${dotStyle}></span><span id="headerStatus">${operational ? 'api operational' : 'api unreachable'}</span><span id="headerLatency" class="hidden lg:inline"></span>`;
     }
 
     const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
@@ -1058,12 +1058,14 @@
   }
 
   function refreshHeaderLatency(metrics) {
-    const el = document.getElementById('headerStatus');
+    const status = document.getElementById('headerStatus');
+    const latency = document.getElementById('headerLatency');
     const p50 = metrics?.latency?.p50_ms;
-    if (!el || p50 == null) return;
-    const operational = STATE.health ? 'api operational' : 'api unreachable';
-    const latencyTxt = metrics.latency.samples > 0 ? ` · p50 ${p50.toFixed(1)}ms` : '';
-    el.textContent = `${operational}${latencyTxt}`;
+    if (!status || p50 == null) return;
+    status.textContent = STATE.health ? 'api operational' : 'api unreachable';
+    // Latency lives in its own lg-only span so the pill stays short at
+    // tablet widths where the header would otherwise overflow.
+    if (latency) latency.textContent = metrics.latency.samples > 0 ? ` · p50 ${p50.toFixed(1)}ms` : '';
   }
 
   function renderHeroStats() {
