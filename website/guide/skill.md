@@ -126,8 +126,9 @@ envelope (plus `meta` for paginated lists; only the operational `/health` and
 For a version-qualified prefix search, nxv searches the shallowest matching
 attribute-path tier first. If no version matches, API consumers should inspect
 `meta.resolution.suggestions` and `deeper_matches_available`; pass
-`all_depths=true` only when nested package-set matches are intentional. CLI JSON
-stdout remains an array, with the equivalent miss explanation written to stderr.
+`all_depths=true` only when nested package-set matches are intentional.
+Successful CLI JSON searches return an array; an empty miss emits no stdout,
+with the miss explanation written to stderr.
 
 Example agent pattern — generate a `nix shell` invocation for a specific version
 directly from the public API:

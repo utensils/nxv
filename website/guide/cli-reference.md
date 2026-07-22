@@ -73,8 +73,9 @@ broad prefix behavior explicitly; it requires a version and cannot be combined
 with `--exact` or `--desc`.
 
 On a version miss, table/plain searches print nearby attribute/version
-suggestions and indicate when deeper matches are available. JSON stdout remains
-the stable array of package rows; diagnostics stay on stderr.
+suggestions and indicate when deeper matches are available. Successful JSON
+searches keep returning an array of package rows; an empty miss emits no stdout.
+Diagnostics stay on stderr in either case.
 
 ### info
 

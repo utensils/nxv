@@ -96,8 +96,8 @@ returning libraries whose own version is 2.7.3. A package-set query such as
 to request the legacy broad prefix behavior explicitly. The flag requires a version
 and conflicts with `--exact` and `--desc`.
 
-Version-miss diagnostics and suggestions are written to stderr, preserving the
-stable JSON-array stdout contract.
+Version-miss diagnostics and suggestions are written to stderr. Successful JSON
+searches return an array of package rows; an empty miss emits no stdout.
 
 **JSON shape per row** (the same shape is returned by `nxv info`, `nxv history <pkg> <version>`, `nxv history --full`, and the `/api/v1` package endpoints):
 

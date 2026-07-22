@@ -223,8 +223,11 @@
     STATE.query = p.get('q') || '';
     STATE.filters.exact = p.get('exact') === '1';
     STATE.filters.allDepths = p.get('all_depths') === '1';
-    if (STATE.filters.exact) STATE.filters.allDepths = false;
     STATE.filters.version = p.get('version') || '';
+    const parsedVersion = parseQuery(STATE.query).ver;
+    if (STATE.filters.exact || !(STATE.filters.version || parsedVersion)) {
+      STATE.filters.allDepths = false;
+    }
     STATE.filters.arch = p.get('arch') || '';
     STATE.filters.license = p.get('license') || '';
     STATE.filters.sort = p.get('sort') || 'relevance';
