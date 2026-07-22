@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/utensils/nxv/compare/v0.4.4...v0.5.0) - 2026-07-22
+
+### Added
+
+- Blueprint design-system UI refresh (web app + docs) ([#63](https://github.com/utensils/nxv/pull/63))
+- [**breaking**] emit license/maintainers/platforms as real JSON arrays ([#56](https://github.com/utensils/nxv/pull/56))
+
+### Fixed
+
+- *(history)* resolve full history by attribute path ([#66](https://github.com/utensils/nxv/pull/66))
+- *(search)* scope version queries to nearest attributes ([#62](https://github.com/utensils/nxv/pull/62))
+- *(search)* preserve relevance ordering by default ([#61](https://github.com/utensils/nxv/pull/61))
+- *(info)* match package names exactly instead of by prefix ([#57](https://github.com/utensils/nxv/pull/57))
+- *(search)* honor --exact when a version filter is present ([#58](https://github.com/utensils/nxv/pull/58))
+
+### Other
+
+- sync all documentation with the code ([#65](https://github.com/utensils/nxv/pull/65))
+
 ## [0.4.4](https://github.com/utensils/nxv/compare/v0.4.3...v0.4.4) - 2026-07-21
 
 ### Fixed
