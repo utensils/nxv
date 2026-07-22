@@ -358,6 +358,13 @@
       if (clientFiltered) {
         // paginate the filtered list on the client so count + prev/next agree
         total = filtered.length;
+        // clamp out-of-range deep links (?page=N beyond the last page) to the
+        // last valid page instead of rendering an empty slice
+        const totalPages = Math.max(1, Math.ceil(total / STATE.pageSize));
+        if (STATE.page > totalPages) {
+          STATE.page = totalPages;
+          syncUrl();
+        }
         const start = (STATE.page - 1) * STATE.pageSize;
         const end = start + STATE.pageSize;
         rows = filtered.slice(start, end);
@@ -369,6 +376,15 @@
         rows = filtered;
         total = serverMeta.total;
         hasMore = !!serverMeta.has_more;
+        // server-side pagination: an out-of-range page came back empty while
+        // the total says data exists — clamp to the last valid page and
+        // refetch it (converges: the clamped page is always in range)
+        const totalPages = Math.max(1, Math.ceil((total || 0) / STATE.pageSize));
+        if (STATE.page > totalPages) {
+          STATE.page = totalPages;
+          runSearch({ resetPage: false });
+          return;
+        }
       }
       STATE.total = total;
       STATE.hasMore = hasMore;
@@ -710,10 +726,13 @@
     const el = cache('pagination');
     const total = meta.total || 0;
     const totalPages = Math.max(1, Math.ceil(total / STATE.pageSize));
-    const startIdx = total === 0 ? 0 : (STATE.page - 1) * STATE.pageSize + 1;
-    const endIdx = Math.min(total, STATE.page * STATE.pageSize);
+    // defensive display clamp — STATE.page is clamped when responses arrive,
+    // but never show a range like "51–7 of 7" even if state drifts
+    const page = Math.min(Math.max(1, STATE.page), totalPages);
+    const startIdx = total === 0 ? 0 : (page - 1) * STATE.pageSize + 1;
+    const endIdx = Math.min(total, page * STATE.pageSize);
     el.innerHTML = `
-      <span>page <span class="text-[var(--color-fog-0)]">${STATE.page}</span> / <span class="text-[var(--color-fog-0)]">${totalPages}</span> · showing <span class="text-[var(--color-fog-0)]">${startIdx}–${endIdx}</span> of <span class="text-[var(--color-fog-0)]">${fmtNum(total)}</span></span>
+      <span>page <span class="text-[var(--color-fog-0)]">${page}</span> / <span class="text-[var(--color-fog-0)]">${totalPages}</span> · showing <span class="text-[var(--color-fog-0)]">${startIdx}–${endIdx}</span> of <span class="text-[var(--color-fog-0)]">${fmtNum(total)}</span></span>
       <div class="flex items-center gap-1.5">
         <button class="btn btn-ghost" data-page="prev" ${STATE.page <= 1 ? 'disabled style="opacity:.4; cursor:not-allowed;"' : ''}>← prev</button>
         <button class="btn btn-ghost" data-page="next" ${!meta.has_more ? 'disabled style="opacity:.4; cursor:not-allowed;"' : ''}>next →</button>
@@ -731,10 +750,23 @@
   }
 
   // ---------- drawer / version history ----------
+  // Focus is returned to the invoking element on close (a11y); falls back to
+  // the search input when the invoker is gone or was never focusable.
+  let drawerReturnFocus = null;
+  const restoreFocus = (stored) => {
+    const target =
+      stored && stored !== document.body && document.contains(stored)
+        ? stored
+        : cache('searchInput');
+    if (target && typeof target.focus === 'function') target.focus();
+  };
+
   async function openDrawer(r) {
     const drawer = cache('drawerOverlay');
+    drawerReturnFocus = document.activeElement;
     drawer.classList.remove('hidden');
     drawer.classList.add('flex');
+    drawer.setAttribute('aria-hidden', 'false');
     cache('drawerTitle').textContent = `${r.name} · ${r.attr}`;
     cache('drawerSub').innerHTML =
       `${escapeHtml(r.desc || '—')} <span class="text-[var(--color-ink-4)]">│</span> ${escapeHtml(r.license || '—')}`;
@@ -799,8 +831,12 @@
 
   function closeDrawer() {
     const drawer = cache('drawerOverlay');
+    if (drawer.classList.contains('hidden')) return; // already closed (e.g. stray Escape)
     drawer.classList.add('hidden');
     drawer.classList.remove('flex');
+    drawer.setAttribute('aria-hidden', 'true');
+    restoreFocus(drawerReturnFocus);
+    drawerReturnFocus = null;
   }
 
   async function fetchHistory(attr) {
@@ -982,10 +1018,11 @@
       pill.innerHTML = `<span class="pill-dot"${dotStyle}></span><span id="headerStatus">${operational ? 'api operational' : 'api unreachable'}</span>`;
     }
 
+    const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
+    const commit = health?.index_commit || stats?.last_indexed_commit || '';
+
     const strip = document.getElementById('statusStrip');
     if (strip) {
-      const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
-      const commit = health?.index_commit || stats?.last_indexed_commit || '';
       const oldest = stats?.oldest_commit_date
         ? new Date(stats.oldest_commit_date).toISOString().slice(0, 7)
         : '—';
@@ -998,6 +1035,19 @@
         <span>nixpkgs · <span class="text-[var(--color-fog-2)]">${oldest} → ${newest}</span></span>
         <span class="flex-1"></span>
         <span>press <span class="kbd">/</span> to focus</span>`;
+    }
+
+    // condensed single-line variant for < md viewports — api status + index
+    // date at minimum, so phones aren't blind to telemetry
+    const mobileStrip = document.getElementById('statusStripMobile');
+    if (mobileStrip) {
+      const dotClass = operational
+        ? 'text-[var(--color-green-glow)]'
+        : 'text-[var(--color-red-glow)]';
+      mobileStrip.innerHTML = `
+        <span><span class="${dotClass}" aria-hidden="true">●</span> ${operational ? 'api operational' : 'api unreachable'}</span>
+        <span>index · <span class="text-[var(--color-fog-3)]">${lastDate}</span></span>${commit ? `
+        <span>commit · <span class="text-[var(--color-fog-3)]">${shortHash(commit)}</span></span>` : ''}`;
     }
 
     // version tag in the hero eyebrow line
@@ -1245,10 +1295,13 @@
   let paletteIndex = 0;
   let paletteItems = [];
 
+  let paletteReturnFocus = null;
   function openPalette() {
     const p = cache('palette');
+    paletteReturnFocus = document.activeElement;
     p.classList.remove('hidden');
     p.classList.add('flex');
+    p.setAttribute('aria-hidden', 'false');
     const input = cache('paletteInput');
     input.value = '';
     input.focus();
@@ -1256,8 +1309,12 @@
   }
   function closePalette() {
     const p = cache('palette');
+    if (p.classList.contains('hidden')) return; // already closed (e.g. stray Escape)
     p.classList.add('hidden');
     p.classList.remove('flex');
+    p.setAttribute('aria-hidden', 'true');
+    restoreFocus(paletteReturnFocus);
+    paletteReturnFocus = null;
   }
   function renderPalette(q) {
     q = q.trim().toLowerCase();

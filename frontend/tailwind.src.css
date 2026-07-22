@@ -463,7 +463,8 @@
     transform: translateY(-2px);
   }
   .card:focus-visible {
-    outline: 2px solid var(--color-nix-500);
+    /* 3px ring per DS focus spec; outline (not box-shadow) survives forced-colors */
+    outline: 3px solid var(--color-nix-500);
     outline-offset: 2px;
   }
   .card-head {
@@ -630,9 +631,10 @@
     background: var(--accent-hover);
   }
 
-  /* Focus ring on interactive elements */
+  /* Focus ring on interactive elements — 3px per DS focus spec; outline
+     (not box-shadow) so it survives forced-colors mode */
   :focus-visible {
-    outline: 2px solid var(--color-nix-500);
+    outline: 3px solid var(--color-nix-500);
     outline-offset: 2px;
     border-radius: 5px;
   }

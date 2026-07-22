@@ -74,7 +74,7 @@
 
           <button
             id="paletteTrigger"
-            class="hidden sm:flex items-center gap-2 px-[11px] py-[7px] rounded-[7px] mono text-[12px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
+            class="hidden sm:flex items-center gap-2 px-[11px] py-[7px] rounded-[7px] mono text-[12px] whitespace-nowrap text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
             style="border: 1px solid var(--border)"
           >
             <svg
@@ -93,7 +93,7 @@
             <span class="kbd">⌘K</span>
           </button>
 
-          <span id="statusPill" class="pill hidden lg:inline-flex">
+          <span id="statusPill" class="pill hidden md:inline-flex">
             <span class="pill-dot"></span>
             api operational
           </span>
@@ -135,6 +135,22 @@
             press
             <span class="kbd">/</span>
             to focus
+          </span>
+        </div>
+
+        <!-- Condensed status strip for narrow (< md) viewports — populated by app.js at boot -->
+        <div
+          id="statusStripMobile"
+          class="md:hidden mx-auto max-w-[1240px] px-5 py-[3px] flex flex-wrap items-center gap-x-3 gap-y-0.5 mono text-[10px] leading-[1.6] text-[var(--color-fog-4)]"
+          style="border-top: 1px solid var(--border-subtle)"
+        >
+          <span>
+            <span class="text-[var(--color-green-glow)]" aria-hidden="true">●</span>
+            api operational
+          </span>
+          <span>
+            index ·
+            <span class="text-[var(--color-fog-3)]">2026-04-19</span>
           </span>
         </div>
       </header>
@@ -180,6 +196,12 @@
             />
             <span class="mono text-[17px] text-[var(--color-nix-400)] caret-blink select-none" aria-hidden="true">
               ▌
+            </span>
+            <span
+              class="hidden sm:inline-flex items-center gap-1.5 mono text-[11px] text-[var(--color-fog-4)] select-none"
+            >
+              <span class="kbd">↵</span>
+              run
             </span>
           </div>
 
