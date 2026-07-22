@@ -186,6 +186,7 @@ fn test_search_help() {
         .stdout(predicate::str::contains("Search for package versions"))
         .stdout(predicate::str::contains("--version"))
         .stdout(predicate::str::contains("--exact"))
+        .stdout(predicate::str::contains("--all-depths"))
         .stdout(predicate::str::contains("--format"));
 }
 
@@ -368,7 +369,7 @@ fn test_search_with_version_filter() {
 }
 
 #[test]
-fn test_search_defaults_to_relevance_but_allows_explicit_date_sort() {
+fn test_version_search_scopes_by_default_and_all_depths_preserves_legacy_search() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
     create_test_db(&db_path);
@@ -410,11 +411,107 @@ fn test_search_defaults_to_relevance_but_allows_explicit_date_sort() {
 
     let relevant = run(&[]);
     assert_eq!(relevant[0]["attribute_path"], "python2");
-    assert_eq!(relevant[1]["attribute_path"], "python314Packages.icontract");
+    assert_eq!(relevant.len(), 1);
 
     let by_date = run(&["--sort", "date"]);
-    assert_eq!(by_date[0]["attribute_path"], "python314Packages.icontract");
-    assert_eq!(by_date[1]["attribute_path"], "python2");
+    assert_eq!(by_date[0]["attribute_path"], "python2");
+    assert_eq!(by_date.len(), 1);
+
+    let all_depths = run(&["--all-depths", "--sort", "date"]);
+    assert_eq!(
+        all_depths[0]["attribute_path"],
+        "python314Packages.icontract"
+    );
+    assert_eq!(all_depths[1]["attribute_path"], "python2");
+}
+
+#[test]
+fn test_version_miss_explains_scope_and_suggests_nearby_versions() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO package_versions \
+         (name, version, first_commit_hash, first_commit_date, last_commit_hash, \
+          last_commit_date, attribute_path, description) \
+         VALUES ('itables', '2.7.3', 'new-first', 1800000000, 'new-last', \
+                 1800100000, 'python314Packages.itables', 'Python library')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "2.7.3",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "No direct attribute matching 'python' has version prefix '2.7.3'",
+        ))
+        .stderr(predicate::str::contains("python2 2.7.18"))
+        .stderr(predicate::str::contains(
+            "Nested matches exist. Re-run with --all-depths",
+        ));
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "2.7.3",
+            "--all-depths",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("python314Packages.itables"));
+}
+
+#[test]
+fn test_all_depths_requires_version_and_conflicts_with_exact() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "--all-depths",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--all-depths requires a version filter",
+        ));
+
+    nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "search",
+            "python",
+            "2.7",
+            "--all-depths",
+            "--exact",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with '--exact'"));
 }
 
 #[test]

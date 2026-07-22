@@ -90,6 +90,7 @@ directly:
 
 ```
 /nxv search python 2.7
+/nxv search python 2.7.3 --all-depths
 /nxv info python311 3.11.4
 /nxv history nodejs_15
 ```
@@ -121,6 +122,13 @@ envelope (plus `meta` for paginated lists; only the operational `/health` and
 2. Pipe to `jq` (or parse in-process) for the specific field they need.
 3. Never rely on the human-readable table output — column widths and formatting
    are terminal-dependent.
+
+For a version-qualified prefix search, nxv searches the shallowest matching
+attribute-path tier first. If no version matches, API consumers should inspect
+`meta.resolution.suggestions` and `deeper_matches_available`; pass
+`all_depths=true` only when nested package-set matches are intentional.
+Successful CLI JSON searches return an array; an empty miss emits no stdout,
+with the miss explanation written to stderr.
 
 Example agent pattern — generate a `nix shell` invocation for a specific version
 directly from the public API:

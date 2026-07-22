@@ -125,7 +125,8 @@ Shell completions for bash, zsh, and fish are included via `nxv completions <she
 
 ```bash
 nxv search python                    # Find all python packages
-nxv search python 3.11               # Filter by version prefix
+nxv search python 3.11               # Search the closest attribute tier
+nxv search python 2.7.3 --all-depths # Include nested package-set members
 nxv search python --exact            # Exact name match only
 nxv search "json parser" --desc      # Search descriptions (FTS)
 nxv search python --format json      # JSON output
@@ -187,7 +188,7 @@ nxv serve --host 0.0.0.0 --port 3000 --cors  # Public with CORS
 | -------- | ----------- |
 | `GET /` | Web UI |
 | `GET /docs` | OpenAPI documentation (Scalar) |
-| `GET /api/v1/search?q=python` | Search packages |
+| `GET /api/v1/search?q=python` | Search packages (`all_depths=true` opts into nested version matches) |
 | `GET /api/v1/search/description?q=json` | Search descriptions |
 | `GET /api/v1/packages/{attr}` | Package details |
 | `GET /api/v1/packages/{attr}/history` | Version history |

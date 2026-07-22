@@ -75,6 +75,7 @@ Find packages and the commits where each version existed:
 ```bash
 nxv search python                                    # Recent per (pkg, version)
 nxv search python 3.11                               # Version prefix filter
+nxv search python 2.7.3 --all-depths                 # Include nested package-set members
 nxv search python --exact                            # Exact attribute name only
 nxv search python --license MIT                      # Filter by license
 nxv search python --sort date --reverse              # Oldest first
@@ -85,6 +86,18 @@ nxv search python --limit 5                          # Cap at 5 results
 nxv search python --format json                      # Machine-readable JSON
 nxv search python --format plain                     # TSV for shell scripts
 ```
+
+For version-qualified prefix searches, nxv first resolves the shallowest
+attribute-path tier matching the package prefix, then applies the version prefix.
+This keeps `python 3.11` on interpreter attributes such as `python311`; a query like
+`python 2.7.3` reports a precise miss with nearby interpreter versions instead of
+returning libraries whose own version is 2.7.3. A package-set query such as
+`python27Packages 2.7.3` resolves its member depth naturally. Pass `--all-depths`
+to request the legacy broad prefix behavior explicitly. The flag requires a version
+and conflicts with `--exact` and `--desc`.
+
+Version-miss diagnostics and suggestions are written to stderr. Successful JSON
+searches return an array of package rows; an empty miss emits no stdout.
 
 **JSON shape per row** (the same shape is returned by `nxv info`, `nxv history <pkg> <version>`, `nxv history --full`, and the `/api/v1` package endpoints):
 
@@ -243,7 +256,7 @@ All paths are under `/api/v1`. Wrapped responses always look like `{ "data": ...
 
 | Method | Path                                                | Purpose                              |
 | ------ | --------------------------------------------------- | ------------------------------------ |
-| `GET`  | `/search?q=<name>&limit=&offset=&sort=&exact=`      | Search packages                      |
+| `GET`  | `/search?q=<name>&limit=&offset=&sort=&exact=&all_depths=` | Search packages                 |
 | `GET`  | `/search/description?q=<text>&limit=&offset=`       | Full-text search descriptions (FTS5) |
 | `GET`  | `/packages/{attr}`                                  | All version records for a package    |
 | `GET`  | `/packages/{attr}/history`                          | Version timeline (first/last seen)   |
@@ -261,6 +274,7 @@ All paths are under `/api/v1`. Wrapped responses always look like `{ "data": ...
 | `q`       | string  | Search query (required)              |
 | `version` | string  | Version filter (prefix match)        |
 | `exact`   | boolean | Exact attribute name match           |
+| `all_depths` | boolean | Include every attribute depth; requires `version` |
 | `license` | string  | License filter                       |
 | `sort`    | string  | `relevance` (default), `date`, `version`, or `name` |
 | `reverse` | boolean | Reverse sort order                   |
@@ -275,6 +289,11 @@ curl -s "https://nxv.urandom.io/api/v1/packages/python311/history" | jq '.data[0
 curl -s "https://nxv.urandom.io/api/v1/packages/nodejs_15/versions/15.14.0/first" | jq
 curl -s "https://nxv.urandom.io/api/v1/stats" | jq '.data'
 ```
+
+Version-qualified search responses add an optional `meta.resolution` object with
+`scope`, `resolved_depth`, `requested_version`, `version_matched`, optional
+`deeper_matches_available`, and up to five `{attribute_path, version}` suggestions.
+This metadata is additive; package rows and the CLI JSON array are unchanged.
 
 ## Skill Management
 
@@ -422,6 +441,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 
 - **Search is dedup-by-default**: by default, only the most recent record per `(attribute_path, version)` pair is returned. Pass `--full` (CLI) or use the `/packages/{attr}` HTTP endpoint to see every commit.
 - **Version filters are prefix matches**: `nxv search python 3.11` matches `3.11.0`, `3.11.4`, `3.11.10`, etc. Use `--exact` for whole-attribute matches, not for whole-version matches.
+- **Version searches use the closest attribute tier**: nested package-set members do not fill a direct-package miss. Inspect API `meta.resolution` or CLI stderr for suggestions, query the package-set prefix directly, or opt into `--all-depths` / `all_depths=true`.
 - **Bloom filter gives instant negatives**: a search for a nonsense package name returns in <1 ms because the bloom filter rejects it before SQLite is touched. False positives are possible but rare.
 - **Coverage starts in September 2016**: nixpkgs commits before then are not indexed. Anything older needs raw git spelunking.
 - **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv update` rejects the signature.
@@ -432,7 +452,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 ## Practical Tips
 
 - **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python27`.
-- **Use `--exact`** when the package name is unambiguous; otherwise `python` returns dozens of variants (`python27`, `python311`, `python311Packages.numpy`, etc.).
+- **Use `--exact`** when one exact attribute is required. Default version searches stay within the shallowest matching tier; use `--all-depths` only when nested variants are intentional.
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
 - **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~220MB index download entirely if you only need occasional lookups.
 - **Update regularly**: the public index is republished every 6 hours (`publish-index.yml`); `nxv update` pulls the latest.

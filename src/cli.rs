@@ -287,6 +287,10 @@ pub struct SearchArgs {
     #[arg(short, long)]
     pub exact: bool,
 
+    /// Include nested attribute-path depths in a version search.
+    #[arg(long, conflicts_with_all = ["exact", "desc"])]
+    pub all_depths: bool,
+
     /// Show all commits (by default, only most recent per package+version is shown).
     #[arg(long)]
     pub full: bool,

@@ -1,7 +1,7 @@
 //! API request and response types.
 
 use crate::db::queries::{IndexStats, PackageVersion};
-use crate::search::SortOrder;
+use crate::search::{SearchResolution, SortOrder};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -65,6 +65,28 @@ impl<T: Serialize> ApiResponse<T> {
                 limit,
                 offset,
                 has_more,
+                resolution: None,
+            }),
+        }
+    }
+
+    /// Attach pagination and search-resolution metadata.
+    pub fn with_search_pagination(
+        data: T,
+        total: usize,
+        limit: usize,
+        offset: usize,
+        has_more: bool,
+        resolution: Option<SearchResolution>,
+    ) -> Self {
+        Self {
+            data,
+            meta: Some(PaginationMeta {
+                total,
+                limit,
+                offset,
+                has_more,
+                resolution,
             }),
         }
     }
@@ -81,6 +103,9 @@ pub struct PaginationMeta {
     pub offset: usize,
     /// Whether more results are available.
     pub has_more: bool,
+    /// How a version-qualified search resolved the attribute scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<SearchResolution>,
 }
 
 /// Search query parameters.
@@ -94,6 +119,9 @@ pub struct SearchParams {
     /// Exact match only (default: false).
     #[serde(default)]
     pub exact: bool,
+    /// Include all matching attribute-path depths (requires a version).
+    #[serde(default)]
+    pub all_depths: bool,
     /// Filter by license (case-insensitive contains).
     #[serde(default)]
     pub license: Option<String>,

@@ -114,6 +114,7 @@ where
 ///     q: "serde".to_string(),
 ///     version: None,
 ///     exact: false,
+///     all_depths: false,
 ///     license: None,
 ///     sort: SortOrder::Relevance,
 ///     reverse: false,
@@ -130,6 +131,7 @@ params(
 ("q" = String, Query, description = "Package name or attribute path to search"),
 ("version" = Option<String>, Query, description = "Filter by version prefix"),
 ("exact" = Option<bool>, Query, description = "Exact match only"),
+("all_depths" = Option<bool>, Query, description = "Include every attribute-path depth (requires version)"),
 ("license" = Option<String>, Query, description = "Filter by license"),
 ("sort" = Option<String>, Query, description = "Sort order: relevance, date, version, or name"),
 ("reverse" = Option<bool>, Query, description = "Reverse sort order"),
@@ -150,6 +152,17 @@ pub async fn search_packages(
 ) -> Result<Json<ApiResponse<Vec<PackageVersion>>>, ApiError> {
     let db_path = state.db_path.clone();
 
+    if params.all_depths && params.version.is_none() {
+        return Err(ApiError::bad_request(
+            "all_depths=true requires a version filter",
+        ));
+    }
+    if params.all_depths && params.exact {
+        return Err(ApiError::bad_request(
+            "all_depths=true cannot be combined with exact=true",
+        ));
+    }
+
     // Cap limit to prevent memory exhaustion from malicious requests
     let capped_limit = params.limit.min(types::MAX_LIMIT);
 
@@ -157,6 +170,7 @@ pub async fn search_packages(
         query: params.q,
         version: params.version,
         exact: params.exact,
+        all_depths: params.all_depths,
         desc: false,
         license: params.license,
         sort: params.sort,
@@ -183,12 +197,13 @@ pub async fn search_packages(
         "Search completed"
     );
 
-    Ok(Json(ApiResponse::with_pagination(
+    Ok(Json(ApiResponse::with_search_pagination(
         result.data,
         result.total,
         limit,
         offset,
         result.has_more,
+        result.resolution,
     )))
 }
 
