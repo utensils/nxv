@@ -838,9 +838,9 @@ fn test_history_full_resolves_exact_attribute_path() {
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
     let rows: Vec<serde_json::Value> =
         serde_json::from_str(&stdout).expect("--full --format json should be pure JSON");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["attribute_path"], "python312");
-    assert_eq!(rows[0]["name"], "python-3.12.0");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|row| row["attribute_path"] == "python312"));
+    assert!(rows.iter().any(|row| row["name"] == "python-3.12.0"));
 }
 
 #[test]

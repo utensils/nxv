@@ -183,8 +183,9 @@ impl Backend {
 
     /// Search packages by name, using either an exact match or a prefix match.
     ///
-    /// If `exact` is `true`, only packages whose attribute path exactly equals `name` are returned.
-    /// If `exact` is `false`, packages whose names start with `name` are returned.
+    /// If `exact` is `true`, only packages whose derivation `name` exactly matches are returned.
+    /// If `exact` is `false`, packages whose derivation names start with `name` are returned.
+    /// Use [`Self::get_package`] for an exact installable attribute-path lookup.
     ///
     /// # Returns
     ///
@@ -195,8 +196,8 @@ impl Backend {
     /// ```
     /// // Search for packages whose name starts with "libfoo"
     /// let results = backend.search_by_name("libfoo", false).unwrap();
-    /// // Search for the package whose attribute path is exactly "libfoo/pkg"
-    /// let exact = backend.search_by_name("libfoo/pkg", true).unwrap();
+    /// // Search for packages whose derivation name is exactly "libfoo"
+    /// let exact = backend.search_by_name("libfoo", true).unwrap();
     /// ```
     #[allow(dead_code)]
     pub fn search_by_name(&self, name: &str, exact: bool) -> Result<Vec<PackageVersion>> {
