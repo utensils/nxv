@@ -143,7 +143,7 @@ nxv search python312 --exact --format json | jq -r '.[0].platforms | join(", ")'
 nxv search hello --format json | jq -r '.[] | select(.known_vulnerabilities != null) | .attribute_path'
 ```
 
-> **Version note**: nxv **< 0.5.0** emitted these four fields as JSON-encoded *strings* (`"license": "[\"Python-2.0\"]"`), requiring a second `fromjson`. If you must support both, use `(.license | if type == "string" then fromjson else . end)`.
+> **Version note**: older nxv releases emitted these four fields as JSON-encoded *strings* (`"license": "[\"Python-2.0\"]"`), requiring a second `fromjson`. If you must support both, use `(.license | if type == "string" then fromjson else . end)`.
 
 ## Info
 
@@ -180,7 +180,7 @@ Version timeline — when each version first appeared and when it was last seen:
 ```bash
 nxv history python311                    # All versions of python311
 nxv history python311 3.11.4             # Just one version's window
-nxv history python311 --full             # Add commits, license, homepage, etc.
+nxv history ripgrep --full               # Add commits, license, homepage, etc.
 nxv history python311 --format json
 ```
 
@@ -195,7 +195,7 @@ nxv history python311 --format json
 }
 ```
 
-Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`.
+Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`. Caveat: bare `--full` resolves the package by the upstream derivation `name`, so it only returns rows when `name` equals the attribute path (e.g. `ripgrep`); for versioned interpreters (`python311`, `nodejs_20`) and nested package-set members (`python311Packages.*`), name a version or use `nxv search <attr> --full` instead.
 
 ## Using a Found Version
 
@@ -383,6 +383,7 @@ Most users never need these — they consume a pre-built published index via `nx
 | `NXV_HOST`           | `nxv serve` bind host                                                  |
 | `NXV_PORT`           | `nxv serve` listen port                                                |
 | `NXV_RATE_LIMIT`     | `nxv serve` per-IP rate limit (req/sec)                                |
+| `NXV_RATE_LIMIT_BURST` | `nxv serve` per-IP rate-limit burst size (default: 2x rate_limit)    |
 | `NXV_FRONTEND_DIR`   | `nxv serve` reads frontend assets from disk on every request (dev mode)|
 | `NO_COLOR`           | Disable ANSI colors                                                    |
 
@@ -445,7 +446,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Bloom filter gives instant negatives**: a search for a nonsense package name returns in <1 ms because the bloom filter rejects it before SQLite is touched. False positives are possible but rare.
 - **Coverage starts in September 2016**: nixpkgs commits before then are not indexed. Anything older needs raw git spelunking.
 - **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv update` rejects the signature.
-- **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump — `license`/`maintainers`/`platforms`/`known_vulnerabilities` changed from stringified JSON to real arrays in 0.5.0.
+- **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump — `license`/`maintainers`/`platforms`/`known_vulnerabilities` changed from stringified JSON to real arrays in a recent release.
 - **Install with `attribute_path`, never `name`**: they differ often (`"name": "python3"` vs `"attribute_path": "python312"`). `name` is the upstream derivation name and is not a valid flake attribute on its own.
 - **`/api/v1` data responses always wrap in `{data, meta}` (or `{data}` for single items)**: do `jq '.data'` first. Exceptions: the operational `/health` and `/metrics` endpoints are unwrapped.
 

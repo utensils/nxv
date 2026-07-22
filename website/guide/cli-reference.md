@@ -210,6 +210,10 @@ nxv serve [options]
 | `--rate-limit <N>`         | Rate limiting per IP (req/sec)    |
 | `--rate-limit-burst <N>`   | Burst size for rate limiting      |
 
+`--host`, `--port`, `--rate-limit`, and `--rate-limit-burst` are also settable
+via `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT`, and `NXV_RATE_LIMIT_BURST` — see
+[Configuration](/guide/configuration).
+
 **Examples:**
 
 ```bash
@@ -292,13 +296,14 @@ nxv publish [options]
 
 **Options:**
 
-| Flag                 | Description                                                                      |
-| -------------------- | -------------------------------------------------------------------------------- |
-| `-o, --output <DIR>` | Output directory for generated artifacts (default: ./publish)                    |
-| `--url-prefix <URL>` | Base URL prefix for manifest URLs                                                |
-| `--sign`             | Sign the manifest with a minisign secret key                                     |
-| `--secret-key <KEY>` | Secret key for signing (file path or raw key; also `NXV_SECRET_KEY` env)         |
-| `--min-version <N>`  | Minimum schema version required to read this index (default: the schema version) |
+| Flag                              | Description                                                                                                                                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-o, --output <DIR>`              | Output directory for generated artifacts (default: ./publish)                                                                                                              |
+| `--url-prefix <URL>`              | Base URL prefix for manifest URLs                                                                                                                                          |
+| `--artifact-name-prefix <PREFIX>` | Prefix added to index/bloom artifact filenames in the manifest (useful when uploading immutable, run-specific artifact names while manifest.json stays the stable pointer) |
+| `--sign`                          | Sign the manifest with a minisign secret key                                                                                                                               |
+| `--secret-key <KEY>`              | Secret key for signing (file path or raw key; also `NXV_SECRET_KEY` env)                                                                                                   |
+| `--min-version <N>`               | Minimum schema version required to read this index (default: the schema version)                                                                                           |
 
 ### keygen
 
@@ -408,7 +413,7 @@ python311        3.11.3    def5678   2023-04-05   High-level dynamically-typed p
 
 ### json
 
-Machine-readable JSON:
+Machine-readable JSON (abbreviated below):
 
 ```json
 [
@@ -420,6 +425,10 @@ Machine-readable JSON:
   }
 ]
 ```
+
+Each row also carries `id`, `name`, `last_commit_hash`, `last_commit_date`,
+`description`, `license`, `homepage`, `maintainers`, `platforms`, `source_path`,
+and `known_vulnerabilities` (array or null where applicable).
 
 ### plain
 

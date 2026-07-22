@@ -100,7 +100,12 @@ curl "http://localhost:8080/api/v1/search?q=python&version=3.11&limit=5"
       "name": "python311",
       "version": "3.11.4",
       "description": "A high-level dynamically-typed programming language",
-      "license": "Python-2.0",
+      "license": ["Python-2.0"],
+      "homepage": "https://www.python.org",
+      "maintainers": ["Fabian Affolter"],
+      "platforms": ["x86_64-linux", "aarch64-darwin"],
+      "source_path": "pkgs/development/interpreters/python/cpython/default.nix",
+      "known_vulnerabilities": null,
       "first_commit_hash": "abc123...",
       "first_commit_date": "2023-06-15T00:00:00Z",
       "last_commit_hash": "def456...",
@@ -166,7 +171,9 @@ GET /api/v1/packages/{attr}/versions/{version}/first
 GET /api/v1/packages/{attr}/versions/{version}/last
 ```
 
-Get all records, the first occurrence, or last occurrence of a specific version.
+Get the most recent occurrence (the base endpoint behaves the same as `/last`),
+the first occurrence, or the last occurrence of a specific version. All three
+return a single object, not an array.
 
 **Example:**
 
@@ -256,7 +263,7 @@ GET /api/v1/health
 ```json
 {
   "status": "ok",
-  "version": "0.3.0",
+  "version": "<nxv version>",
   "index_commit": "abc123..."
 }
 ```
@@ -289,13 +296,15 @@ All errors return a JSON object:
 
 **HTTP Status Codes:**
 
-| Code | Description                      |
-| ---- | -------------------------------- |
-| 200  | Success                          |
-| 400  | Bad request (invalid parameters) |
-| 404  | Not found                        |
-| 429  | Rate limited                     |
-| 500  | Internal server error            |
+| Code | Description                                                   |
+| ---- | ------------------------------------------------------------- |
+| 200  | Success                                                       |
+| 400  | Bad request (invalid parameters)                              |
+| 404  | Not found                                                     |
+| 429  | Rate limited                                                  |
+| 500  | Internal server error                                         |
+| 503  | Service unavailable (no/corrupt index, or server at capacity) |
+| 504  | Gateway timeout (DB operation exceeded `NXV_DB_TIMEOUT_SECS`) |
 
 ## OpenAPI Documentation
 
@@ -319,10 +328,13 @@ nxv serve --cors
 nxv serve --cors-origins "https://example.com,https://app.example.com"
 ```
 
-## Request Headers
+## Response Headers
 
-| Header         | Description                                                 |
-| -------------- | ----------------------------------------------------------- |
-| `X-Request-ID` | Correlation ID for tracing (auto-generated if not provided) |
+When rate limiting is enabled (`--rate-limit`), the server adds standard
+`X-RateLimit-*` headers to responses:
 
-The server echoes back the request ID in responses for distributed tracing.
+| Header                  | Description                                            |
+| ----------------------- | ------------------------------------------------------ |
+| `X-RateLimit-Limit`     | The configured per-IP request limit                    |
+| `X-RateLimit-Remaining` | Requests remaining in the current window               |
+| `X-RateLimit-After`     | Seconds to wait before retrying (present when limited) |

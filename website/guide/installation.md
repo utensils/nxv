@@ -21,7 +21,14 @@ One-liner install that downloads a static binary:
 curl -fsSL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 ```
 
-This installs to `~/.local/bin/nxv` (or `/usr/local/bin` with sudo).
+This installs to `/usr/local/bin` if that directory is writable, otherwise to
+`~/.local/bin`.
+
+**Installer options** (environment variables):
+
+- `NXV_INSTALL_DIR` — override the installation directory.
+- `NXV_VERSION` — pin a specific release instead of the latest.
+- `NXV_VERIFY` — set to `1` to verify the download against `SHA256SUMS.txt`.
 
 ## Nix Flakes
 

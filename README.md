@@ -71,7 +71,7 @@ Users download a pre-built compressed index (~220MB) and query it locally or via
 curl -sSfL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 ```
 
-This installs a pre-built binary to `~/.local/bin`. For extra safety, download and review the script first. Set `NXV_VERIFY=1` to enforce checksum verification against GitHub Releases.
+This installs a pre-built binary to `/usr/local/bin` (if writable) or `~/.local/bin` otherwise; set `NXV_INSTALL_DIR` to override. For extra safety, download and review the script first. Set `NXV_VERIFY=1` to enforce checksum verification against GitHub Releases.
 
 ### Cargo
 
@@ -560,7 +560,16 @@ The `manifest.json` format:
 | `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
 | `NXV_NO_SELF_UPDATE` | Skip the binary self-update check in `nxv update` |
 | `NO_COLOR` | Disable colored output |
-| `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `~/.local/bin`) |
+| `NXV_HOST` | `nxv serve` bind address (default: `127.0.0.1`) |
+| `NXV_PORT` | `nxv serve` port (default: `8080`) |
+| `NXV_RATE_LIMIT` | `nxv serve` max requests per second per IP |
+| `NXV_RATE_LIMIT_BURST` | `nxv serve` rate-limit burst size |
+| `NXV_MAX_DB_CONNECTIONS` | `nxv serve` max concurrent DB operations (default: 32) |
+| `NXV_DB_TIMEOUT_SECS` | `nxv serve` DB operation timeout in seconds (default: 30) |
+| `NXV_LOG_FORMAT` | `nxv serve` log format, `text` or `json` |
+| `NXV_RELEASES_URL` | Override the releases.nixos.org S3 endpoint for `nxv index` |
+| `NXV_VERIFY` | Set to `1` to verify curl-installer download against `SHA256SUMS.txt` |
+| `NXV_INSTALL_DIR` | Custom install directory for curl installer (default: `/usr/local/bin` if writable, else `~/.local/bin`) |
 | `NXV_VERSION` | Specific version for curl installer (default: latest) |
 
 ## Development
@@ -590,6 +599,8 @@ src/
 ├── bloom.rs         # Bloom filter
 ├── search.rs        # Search/filter/sort logic
 ├── self_update.rs   # Binary self-update (part of nxv update)
+├── skill/           # Agent skill install/list/uninstall (nxv skill ...)
+├── version.rs       # Version/long-version string helpers
 ├── paths.rs         # Platform-specific paths
 ├── error.rs         # Error types
 └── index/           # Indexer (feature-gated)
