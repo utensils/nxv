@@ -1137,7 +1137,7 @@ fn cmd_history(cli: &Cli, args: &cli::HistoryArgs) -> Result<()> {
         }
     } else if args.full {
         // Show full details for all versions
-        let packages = backend.search_by_name(&args.package, true)?;
+        let packages = backend.get_package(&args.package)?;
 
         if packages.is_empty() {
             match args.format {
