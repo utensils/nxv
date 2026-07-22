@@ -80,7 +80,6 @@ impl Backend {
     ///     assert_eq!(pv.attribute_path, "example/package");
     /// }
     /// ```
-    #[allow(dead_code)]
     pub fn get_package(&self, attr: &str) -> Result<Vec<PackageVersion>> {
         match self {
             Backend::Local(db) => queries::search_by_attr_exact(db.connection(), attr),
@@ -199,6 +198,7 @@ impl Backend {
     /// // Search for the package whose attribute path is exactly "libfoo/pkg"
     /// let exact = backend.search_by_name("libfoo/pkg", true).unwrap();
     /// ```
+    #[allow(dead_code)]
     pub fn search_by_name(&self, name: &str, exact: bool) -> Result<Vec<PackageVersion>> {
         match self {
             Backend::Local(db) => queries::search_by_name(db.connection(), name, exact),

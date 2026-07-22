@@ -814,6 +814,36 @@ fn test_history_full_json_format() {
 }
 
 #[test]
+fn test_history_full_resolves_exact_attribute_path() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    create_test_db(&db_path);
+
+    // Regression for #55 and #64: the installable attribute path can differ
+    // from the upstream derivation name. `--full` must accept the same
+    // attribute-path identifier as the compact history view.
+    let output = nxv()
+        .args([
+            "--db-path",
+            db_path.to_str().unwrap(),
+            "history",
+            "python312",
+            "--full",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&stdout).expect("--full --format json should be pure JSON");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["attribute_path"], "python312");
+    assert_eq!(rows[0]["name"], "python-3.12.0");
+}
+
+#[test]
 fn test_history_specific_version_json() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");

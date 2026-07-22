@@ -195,7 +195,7 @@ nxv history python311 --format json
 }
 ```
 
-Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`. Caveat: bare `--full` resolves the package by the upstream derivation `name`, so it only returns rows when `name` equals the attribute path (e.g. `ripgrep`); for versioned interpreters (`python311`, `nodejs_20`) and nested package-set members (`python311Packages.*`), name a version or use `nxv search <attr> --full` instead.
+Note the field names differ from search (`first_seen`/`last_seen`, not `first_commit_date`/`last_commit_date`), and there are no commit hashes. Adding `--full`, or naming a version (`nxv history python311 3.11.4`), switches the output to the full search row shape documented above — use one of those when you need a commit hash to feed to `nix shell`. Like the compact timeline, bare `--full` resolves the package by its exact installable `attribute_path`.
 
 ## Using a Found Version
 
