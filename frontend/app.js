@@ -591,7 +591,7 @@
     const firstSeen = r.first ? fmtDate(r.first) : '—';
     const lastSeen = r.last ? fmtDate(r.last) : '—';
     return `
-      <article data-row="${escapeHtml(key)}" class="panel card group anim-in" style="animation-delay:${i * 18}ms" tabindex="0">
+      <article data-row="${escapeHtml(key)}" class="card group anim-in" style="animation-delay:${i * 18}ms" tabindex="0">
         <header class="card-head">
           <div class="card-head__title min-w-0">
             <h3 class="card-name mono"${nameTitleAttr}>${nameHtml}</h3>
@@ -661,33 +661,37 @@
     const verShort = verFull.length > 20 ? verFull.slice(0, 10) + '…' : verFull;
     const verHtml = escapeHtml(verShort);
     const verTitleAttr = verShort === verFull ? '' : ` title="${escapeHtml(verFull)}"`;
+    const verToneClass = r.insecure
+      ? 'card-ver--danger'
+      : isLegacy
+        ? 'card-ver--warn'
+        : 'card-ver--brand';
 
     return `
-      <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 items-center px-4 py-3 cursor-pointer transition anim-in hover:bg-[var(--color-ink-2)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--color-ink-2);">
+      <div data-row="${escapeHtml(key)}" class="group grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_100px_100px_150px] gap-4 items-center px-5 py-3.5 cursor-pointer transition-colors anim-in hover:bg-[var(--color-ink-1)]" style="animation-delay:${i * 12}ms; border-bottom: 1px solid var(--border-subtle);">
         <div class="min-w-0">
-          <div class="flex items-center gap-2">
-            <span class="mono text-[13.5px] text-[var(--color-fog-0)] font-medium truncate">${nameHtml}</span>
-            <span class="mono text-[11px] text-[var(--color-fog-4)]">·</span>
+          <div class="flex items-baseline gap-2 min-w-0">
+            <span class="mono text-[13px] text-[var(--color-fog-0)] font-medium truncate">${nameHtml}</span>
             <span class="mono text-[11px] text-[var(--color-nix-400)] truncate">${attrHtml}</span>
           </div>
-          <div class="mono text-[10.5px] text-[var(--color-fog-4)] mt-0.5 flex items-center gap-1.5">
+          <div class="mono text-[11px] text-[var(--color-fog-4)] mt-1 flex items-center gap-1.5 min-w-0">
             <span class="truncate" style="max-width: 180px;">${licenseHtml}</span>
-            <span class="text-[var(--color-ink-4)]">·</span>
+            <span class="text-[var(--color-ink-5)]" aria-hidden="true">·</span>
             <span class="mono">#${shortHash(r.hash || r.lastHash)}</span>
           </div>
         </div>
-        <div>
-          <span class="mono text-[13px] ${r.insecure ? 'text-[var(--color-red-glow)]' : 'text-[var(--color-fog-0)]'} tabular-nums"${verTitleAttr}>${verHtml}</span>
+        <div class="min-w-0">
+          <span class="ver-badge ${verToneClass} tabular-nums"${verTitleAttr}>${verHtml}</span>
         </div>
         <div class="hidden md:block min-w-0">
           <div class="text-[13px] text-[var(--color-fog-2)] truncate">${descHtml || '<span class="text-[var(--color-fog-4)]">—</span>'}</div>
-          <div class="mt-1 flex flex-wrap gap-1">
+          <div class="mt-1.5 flex flex-wrap gap-1">
             ${flags.join('')}${platformsHtml}
           </div>
         </div>
-        <div class="mono text-[11.5px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.first)}</div>
-        <div class="mono text-[11.5px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.last)}</div>
-        <div class="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100 transition">
+        <div class="mono text-[12px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.first)}</div>
+        <div class="mono text-[12px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(r.last)}</div>
+        <div class="flex items-center justify-end gap-1.5">
           <button class="btn btn-ghost" data-action="copy-flake" data-key="${escapeHtml(key)}" title="copy flake ref">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             copy
@@ -752,7 +756,7 @@
               ? ' text-[var(--color-amber-glow)]'
               : ' text-[var(--color-fog-0)]';
           return `
-            <li class="grid grid-cols-[minmax(90px,auto)_1fr_auto] items-center gap-4 px-3 py-2 rounded-[2px] hover:bg-[var(--color-ink-2)] transition">
+            <li class="grid grid-cols-[minmax(90px,auto)_1fr_auto] items-center gap-4 px-3 py-2 rounded-[7px] hover:bg-[var(--color-ink-2)] transition">
               <span class="mono text-[12.5px]${tag} tabular-nums">${escapeHtml(v.version)}</span>
               <span class="mono text-[11px] text-[var(--color-fog-3)] tabular-nums">${fmtDate(v.first_seen)}<span class="text-[var(--color-ink-4)] mx-2">→</span>${fmtDate(v.last_seen)}</span>
               <span class="flex items-center gap-2">
@@ -968,42 +972,38 @@
   function renderHeaderStrip() {
     const stats = STATE.stats;
     const health = STATE.health;
-    const strip = document.querySelector('header .h-6');
-    if (!strip) return;
 
     const operational = !!health;
-    const dot = operational
-      ? '<span class="inline-block w-1.5 h-1.5 rounded-full" style="background: var(--color-green-glow); box-shadow: 0 0 6px oklch(0.74 0.15 150 / 0.6);"></span>'
-      : '<span class="inline-block w-1.5 h-1.5 rounded-full" style="background: var(--color-red-glow); box-shadow: 0 0 6px oklch(0.66 0.19 25 / 0.6);"></span>';
-    const opTxt = operational ? 'api operational' : 'api unreachable';
+    const pill = document.getElementById('statusPill');
+    if (pill) {
+      const dotStyle = operational
+        ? ''
+        : ' style="background: var(--color-red-glow); box-shadow: 0 0 7px oklch(0.66 0.19 25 / 0.7);"';
+      pill.innerHTML = `<span class="pill-dot"${dotStyle}></span><span id="headerStatus">${operational ? 'api operational' : 'api unreachable'}</span>`;
+    }
 
-    const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
-    const commit = health?.index_commit || stats?.last_indexed_commit || '';
-    const oldest = stats?.oldest_commit_date
-      ? new Date(stats.oldest_commit_date).toISOString().slice(0, 7)
-      : '—';
-    const newest = stats?.newest_commit_date
-      ? new Date(stats.newest_commit_date).toISOString().slice(0, 7)
-      : '—';
+    const strip = document.getElementById('statusStrip');
+    if (strip) {
+      const lastDate = stats?.last_indexed_date ? fmtDate(stats.last_indexed_date) : '—';
+      const commit = health?.index_commit || stats?.last_indexed_commit || '';
+      const oldest = stats?.oldest_commit_date
+        ? new Date(stats.oldest_commit_date).toISOString().slice(0, 7)
+        : '—';
+      const newest = stats?.newest_commit_date
+        ? new Date(stats.newest_commit_date).toISOString().slice(0, 7)
+        : '—';
+      strip.innerHTML = `
+        <span>index · <span class="text-[var(--color-fog-2)]">${lastDate}</span>${commit ? ` · commit <span class="text-[var(--color-fog-2)]">${shortHash(commit)}</span>` : ''}</span>
+        <span class="text-[var(--color-ink-5)]" aria-hidden="true">│</span>
+        <span>nixpkgs · <span class="text-[var(--color-fog-2)]">${oldest} → ${newest}</span></span>
+        <span class="flex-1"></span>
+        <span>press <span class="kbd">/</span> to focus</span>`;
+    }
 
-    strip.innerHTML = `
-      <span id="headerStatus" class="flex items-center gap-1.5">
-        ${dot}
-        ${opTxt}
-      </span>
-      <span class="text-[var(--color-ink-4)]">│</span>
-      <span>index · <span class="text-[var(--color-fog-2)]">${lastDate}</span>${commit ? ` · commit <span class="text-[var(--color-fog-2)]">${shortHash(commit)}</span>` : ''}</span>
-      <span class="text-[var(--color-ink-4)]">│</span>
-      <span>nixpkgs · <span class="text-[var(--color-fog-2)]">${oldest} → ${newest}</span></span>
-      <span class="flex-1"></span>
-      <span class="hidden md:inline">press <span class="kbd">/</span> to focus</span>`;
-
-    // version tag in hero line — find by its original text
-    const heroVer = [...document.querySelectorAll('main .mono')].find((el) =>
-      el.textContent.includes('NIX VERSION INDEX')
-    );
+    // version tag in the hero eyebrow line
+    const heroVer = document.getElementById('heroEyebrow');
     if (heroVer && health?.version) {
-      heroVer.innerHTML = `// NIX VERSION INDEX &nbsp;·&nbsp; v${escapeHtml(health.version)}`;
+      heroVer.innerHTML = `// nix version index &nbsp;·&nbsp; v${escapeHtml(health.version)}`;
     }
   }
 
@@ -1011,39 +1011,36 @@
     const el = document.getElementById('headerStatus');
     const p50 = metrics?.latency?.p50_ms;
     if (!el || p50 == null) return;
-    const dot = el.querySelector('span') || null;
-    const dotHtml = dot ? dot.outerHTML : '';
     const operational = STATE.health ? 'api operational' : 'api unreachable';
     const latencyTxt = metrics.latency.samples > 0 ? ` · p50 ${p50.toFixed(1)}ms` : '';
-    el.innerHTML = `${dotHtml} ${operational}${latencyTxt}`;
+    el.textContent = `${operational}${latencyTxt}`;
   }
 
   function renderHeroStats() {
     const s = STATE.stats;
-    const aside = document.querySelector('aside.mono.select-none');
-    if (!aside || !s) return;
+    const wrap = document.getElementById('heroMetrics');
+    if (!wrap || !s) return;
     const oldest = s.oldest_commit_date ? new Date(s.oldest_commit_date) : null;
     const newest = s.newest_commit_date ? new Date(s.newest_commit_date) : null;
     const years =
       oldest && newest ? Math.max(1, Math.round((newest - oldest) / (365.25 * 24 * 3600e3))) : null;
     const histTxt = years != null ? `${years}+ yrs` : '—';
-    aside.innerHTML = `
-      <div class="ascii-rule text-[10px] leading-none mb-2">┌─ INDEX STATS ──────────────────────┐</div>
-      <div class="grid grid-cols-2 gap-x-6 gap-y-1 px-3">
-        <span>packages</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">${fmtNum(s.unique_names)}</span>
-        <span>versions</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">${fmtNum(s.unique_versions)}</span>
-        <span>records</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">${fmtNum(s.total_ranges)}</span>
-        <span>latest</span><span class="text-right text-[var(--color-fog-0)] tabular-nums mono">${s.last_indexed_commit ? '#' + shortHash(s.last_indexed_commit) : '—'}</span>
-        <span>history</span><span class="text-right text-[var(--color-fog-0)] tabular-nums">${histTxt}</span>
-      </div>
-      <div class="ascii-rule text-[10px] leading-none mt-2">└────────────────────────────────────┘</div>`;
+    const tile = (value, label) => `
+      <div class="panel panel--rail metric">
+        <div class="metric-value mono tabular-nums">${value}</div>
+        <div class="metric-label mono">${label}</div>
+      </div>`;
+    wrap.innerHTML = [
+      tile(fmtNum(s.unique_names), 'packages'),
+      tile(fmtNum(s.unique_versions), 'versions'),
+      tile(fmtNum(s.total_ranges), 'records'),
+      tile(s.last_indexed_commit ? '#' + shortHash(s.last_indexed_commit) : '—', 'latest'),
+      tile(histTxt, 'of history'),
+    ].join('');
   }
 
   function renderLatencyCard(metrics) {
-    const panel = document.querySelectorAll('#stats .panel')[1];
-    if (!panel) return;
-    // The big three-number readout is the first .tabular-nums inside the panel.
-    const main = [...panel.querySelectorAll('.tabular-nums')][0];
+    const main = document.getElementById('latencyMain');
     const lat = metrics?.latency;
     if (main) {
       if (!lat || lat.samples === 0) {
@@ -1051,14 +1048,14 @@
       } else {
         const fmt = (v) => (v < 10 ? v.toFixed(1) : Math.round(v));
         main.innerHTML = `
-          ${fmt(lat.p50_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-          <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-          ${fmt(lat.p95_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-          <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-          ${fmt(lat.p99_ms)}<span class="text-[var(--color-fog-4)] text-[16px]">ms</span>`;
+          ${fmt(lat.p50_ms)}<span class="text-[var(--color-fog-4)] text-[15px]">ms</span>
+          <span class="mx-2 text-[var(--color-ink-5)] text-[15px]">/</span>
+          ${fmt(lat.p95_ms)}<span class="text-[var(--color-fog-4)] text-[15px]">ms</span>
+          <span class="mx-2 text-[var(--color-ink-5)] text-[15px]">/</span>
+          ${fmt(lat.p99_ms)}<span class="text-[var(--color-fog-4)] text-[15px]">ms</span>`;
       }
     }
-    const sub = panel.querySelector('.mt-5');
+    const sub = document.getElementById('latencySub');
     if (sub) {
       const s = STATE.stats;
       const sampleTxt =
@@ -1105,9 +1102,7 @@
   }
 
   function renderSelfhostCard() {
-    const panel = document.querySelectorAll('#stats .panel')[2];
-    if (!panel) return;
-    const link = panel.querySelector('a.btn');
+    const link = document.getElementById('selfhostLink');
     if (link) {
       link.href = 'https://utensils.io/nxv/';
       link.target = '_blank';
@@ -1286,7 +1281,7 @@
     cache('paletteList').innerHTML = paletteItems
       .map(
         (it, i) => `
-        <li data-idx="${i}" class="palette-item px-4 py-2 flex items-center gap-3 cursor-pointer mono text-[12.5px] ${i === 0 ? 'bg-[var(--color-ink-2)]' : ''}">
+        <li data-idx="${i}" class="palette-item px-3 py-2.5 rounded-[7px] flex items-center gap-3 cursor-pointer mono text-[13px] ${i === 0 ? 'bg-[var(--color-ink-3)]' : ''}">
           <span class="chip" style="min-width: 36px; justify-content: center;">${escapeHtml(it.cat)}</span>
           <span class="text-[var(--color-fog-0)]">${escapeHtml(it.label)}</span>
           <span class="text-[var(--color-fog-4)]">${escapeHtml(it.hint)}</span>
@@ -1309,7 +1304,7 @@
   }
   function highlightPalette() {
     $$('#paletteList .palette-item').forEach((el, i) => {
-      el.classList.toggle('bg-[var(--color-ink-2)]', i === paletteIndex);
+      el.classList.toggle('bg-[var(--color-ink-3)]', i === paletteIndex);
     });
   }
 
@@ -1360,14 +1355,7 @@
 
     $$('[data-view]').forEach((el) => {
       el.addEventListener('click', () => {
-        $$('[data-view]').forEach((o) => {
-          o.classList.remove('hairline');
-          o.classList.remove('text-[var(--color-fog-0)]');
-          o.classList.add('text-[var(--color-fog-4)]');
-        });
-        el.classList.add('hairline');
-        el.classList.add('text-[var(--color-fog-0)]');
-        el.classList.remove('text-[var(--color-fog-4)]');
+        $$('[data-view]').forEach((o) => o.classList.toggle('seg-btn--active', o === el));
         STATE.view = el.dataset.view;
         syncUrl();
         // re-render cached results in new view mode (no API call)
@@ -1418,10 +1406,7 @@
 
   function applyViewToggleStyles() {
     $$('[data-view]').forEach((o) => {
-      const active = o.dataset.view === STATE.view;
-      o.classList.toggle('hairline', active);
-      o.classList.toggle('text-[var(--color-fog-0)]', active);
-      o.classList.toggle('text-[var(--color-fog-4)]', !active);
+      o.classList.toggle('seg-btn--active', o.dataset.view === STATE.view);
     });
   }
 

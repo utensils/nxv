@@ -1,9 +1,13 @@
 <!doctype html>
-<html lang="en" class="dark" style="background: oklch(0.14 0.012 255)">
+<html lang="en" style="background: oklch(0.15 0.022 264)">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>nxv // nix version index</title>
+    <meta
+      name="description"
+      content="Find any version of any Nix package, instantly — search nixpkgs history for exact commits."
+    />
+    <title>nxv // Find any version of any Nix package, instantly.</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <!-- Local font declarations (@font-face for bundled fonts) -->
     <link href="/fonts.css" rel="stylesheet" />
@@ -13,8 +17,8 @@
       /* Minimal FOUC prevention — background + text color before CSS loads */
       html,
       body {
-        background: oklch(0.14 0.012 255);
-        color: oklch(0.88 0.01 255);
+        background: oklch(0.15 0.022 264);
+        color: oklch(0.8 0.03 264);
         margin: 0;
         padding: 0;
         min-height: 100vh;
@@ -23,212 +27,146 @@
   </head>
   <body class="min-h-screen">
     <a class="skip-link" href="#main">Skip to main content</a>
-    <!-- Top command bar -->
-    <header
-      class="hairline-b sticky top-0 z-30 backdrop-blur"
-      style="background: color-mix(in oklch, var(--color-ink-0) 92%, transparent)"
-    >
-      <div class="mx-auto max-w-[1320px] px-6 h-14 flex items-center gap-6">
-        <a href="https://github.com/utensils/nxv" class="flex items-center gap-2.5 group">
-          <!-- Monogram mark: nested brackets cradling the wordmark -->
-          <svg
-            width="38"
-            height="38"
-            viewBox="0 0 38 38"
-            class="text-[var(--color-nix-400)]"
-            aria-hidden="true"
-          >
-            <path
-              d="M4 6 L4 32 M4 6 L10 6 M4 32 L10 32"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="square"
-              fill="none"
-            />
-            <path
-              d="M34 6 L34 32 M34 6 L28 6 M34 32 L28 32"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="square"
-              fill="none"
-            />
-            <text
-              x="19"
-              y="23.5"
-              text-anchor="middle"
-              font-family="JetBrains Mono"
-              font-size="12.5"
-              font-weight="700"
-              fill="currentColor"
-              letter-spacing="-0.3"
-            >
+
+    <!-- Blueprint engineering grid — fixed layer under everything -->
+    <div class="grid-bg" aria-hidden="true"></div>
+
+    <div class="relative z-10">
+      <!-- Sticky glass header -->
+      <header class="header-glass sticky top-0 z-40">
+        <div class="mx-auto max-w-[1240px] px-5 md:px-10 h-16 flex items-center gap-4 md:gap-6">
+          <a href="/" class="flex items-center gap-[11px]">
+            <img src="/favicon.svg" width="26" height="26" alt="" />
+            <span class="mono font-bold text-[16px] tracking-[-0.02em] text-[var(--color-fog-0)]">
               nxv
-            </text>
-          </svg>
-          <span class="mono text-[13px] text-[var(--color-fog-2)] tracking-tight">
-            <span class="text-[var(--color-fog-0)] font-semibold">nxv</span>
-            <span class="text-[var(--color-fog-4)]">@</span>
-            <span>urandom.io</span>
-          </span>
-        </a>
-
-        <nav class="ml-4 hidden md:flex items-center gap-1 mono text-[12px]">
-          <a class="px-2.5 py-1.5 text-[var(--color-fog-0)] hairline rounded-[2px]" href="/">
-            search
+            </span>
           </a>
-          <a
-            class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]"
-            href="#stats"
-          >
-            stats
-          </a>
-          <a
-            class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]"
-            href="/docs"
-          >
-            api
-          </a>
-          <a
-            class="px-2.5 py-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)]"
-            href="https://utensils.io/nxv/"
-          >
-            cli
-          </a>
-        </nav>
 
-        <div class="flex-1"></div>
-
-        <button
-          id="paletteTrigger"
-          class="hidden sm:flex items-center gap-2 px-2.5 py-1.5 hairline rounded-[2px] mono text-[11px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
-        >
-          <svg
-            aria-hidden="true"
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5" />
-          </svg>
-          <span>jump to…</span>
-          <span class="kbd">⌘K</span>
-        </button>
-
-        <a
-          href="https://github.com/utensils/nxv"
-          target="_blank"
-          rel="noopener"
-          class="p-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
-          aria-label="nxv on GitHub"
-        >
-          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path
-              d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
-            />
-          </svg>
-        </a>
-      </div>
-      <!-- Status strip -->
-      <div
-        class="mx-auto max-w-[1320px] px-6 h-6 flex items-center gap-4 mono text-[10.5px] text-[var(--color-fog-4)] border-t"
-        style="border-color: var(--color-ink-2)"
-      >
-        <span class="flex items-center gap-1.5">
-          <span
-            class="inline-block w-1.5 h-1.5 rounded-full"
-            style="
-              background: var(--color-green-glow);
-              box-shadow: 0 0 6px oklch(0.74 0.15 150 / 0.6);
-            "
-          ></span>
-          api operational · p50 34ms
-        </span>
-        <span class="text-[var(--color-ink-4)]">│</span>
-        <span>
-          index ·
-          <span class="text-[var(--color-fog-2)]">2026-04-19</span>
-          · commit
-          <span class="text-[var(--color-fog-2)]">a7f2c91</span>
-        </span>
-        <span class="text-[var(--color-ink-4)]">│</span>
-        <span>
-          nixpkgs ·
-          <span class="text-[var(--color-fog-2)]">2017-01 → 2026-04</span>
-        </span>
-        <span class="flex-1"></span>
-        <span class="hidden md:inline">
-          press
-          <span class="kbd">/</span>
-          to focus
-        </span>
-      </div>
-    </header>
-
-    <main id="main" tabindex="-1" class="mx-auto max-w-[1320px] px-6 pb-32 relative">
-      <!-- Hero / search -->
-      <section class="pt-10 md:pt-14">
-        <div class="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-10 items-end">
-          <div>
-            <div class="mono text-[11px] text-[var(--color-fog-4)] mb-3 tracking-widest">
-              // NIX VERSION INDEX &nbsp;·&nbsp; v0.6.2
-            </div>
-            <h1
-              class="text-[44px] md:text-[60px] leading-[0.95] font-semibold tracking-[-0.03em] text-[var(--color-fog-0)]"
+          <nav class="hidden md:flex items-center gap-1 mono text-[13px]">
+            <a
+              class="px-3 py-[7px] rounded-[7px] text-[var(--color-fog-0)]"
+              style="background: var(--nix-wash)"
+              href="/"
             >
-              Every version of every
-              <br />
-              <span class="mono text-[var(--color-nix-400)] font-semibold">nix</span>
-              <span class="mono text-[var(--color-fog-0)] font-semibold">package</span>
-              ,
-              <br />
-              <span class="text-[var(--color-fog-2)]">indexed since 2017.</span>
-            </h1>
-            <p class="mt-5 text-[15px] text-[var(--color-fog-2)] max-w-[560px] leading-relaxed">
-              Find the exact
-              <span class="mono text-[var(--color-fog-0)]">nixpkgs</span>
-              commit for the version you need — Python 2.7 for that legacy project, or an obscure
-              patched Ruby from 2019. Query locally, via the CLI, or against
-              <span class="mono text-[var(--color-fog-0)]">nxv serve</span>
-              .
-            </p>
-          </div>
+              search
+            </a>
+            <a
+              class="px-3 py-[7px] rounded-[7px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
+              href="#stats"
+            >
+              stats
+            </a>
+            <a
+              class="px-3 py-[7px] rounded-[7px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
+              href="/docs"
+            >
+              api
+            </a>
+            <a
+              class="px-3 py-[7px] rounded-[7px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
+              href="https://utensils.io/nxv/"
+            >
+              cli
+            </a>
+          </nav>
 
-          <!-- Stats block, minimal -->
-          <aside class="mono text-[12px] text-[var(--color-fog-3)] leading-[1.8] select-none">
-            <div class="ascii-rule text-[10px] leading-none mb-2">
-              ┌─ INDEX STATS ──────────────────────┐
-            </div>
-            <div class="grid grid-cols-2 gap-x-6 gap-y-1 px-3">
-              <span>packages</span>
-              <span class="text-right text-[var(--color-fog-0)] tabular-nums">186,417</span>
-              <span>versions</span>
-              <span class="text-right text-[var(--color-fog-0)] tabular-nums">4,209,881</span>
-              <span>records</span>
-              <span class="text-right text-[var(--color-fog-0)] tabular-nums">12,384,502</span>
-              <span>commits</span>
-              <span class="text-right text-[var(--color-fog-0)] tabular-nums">98,317</span>
-              <span>history</span>
-              <span class="text-right text-[var(--color-fog-0)] tabular-nums">9+ yrs</span>
-            </div>
-            <div class="ascii-rule text-[10px] leading-none mt-2">
-              └────────────────────────────────────┘
-            </div>
-          </aside>
+          <span class="flex-1"></span>
+
+          <button
+            id="paletteTrigger"
+            class="hidden sm:flex items-center gap-2 px-[11px] py-[7px] rounded-[7px] mono text-[12px] text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition"
+            style="border: 1px solid var(--border)"
+          >
+            <svg
+              aria-hidden="true"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+            <span>jump to…</span>
+            <span class="kbd">⌘K</span>
+          </button>
+
+          <span id="statusPill" class="pill hidden lg:inline-flex">
+            <span class="pill-dot"></span>
+            api operational
+          </span>
+
+          <a
+            href="https://github.com/utensils/nxv"
+            target="_blank"
+            rel="noopener"
+            class="p-1.5 text-[var(--color-fog-3)] hover:text-[var(--color-fog-0)] transition flex"
+            aria-label="nxv on GitHub"
+          >
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path
+                d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.63-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58C20.56 21.8 24 17.3 24 12 24 5.37 18.63 0 12 0z"
+              />
+            </svg>
+          </a>
         </div>
 
-        <!-- Prompt-style search -->
-        <div class="mt-10 relative">
-          <div class="prompt-shell rounded-[2px] flex items-center h-14 px-4 gap-3">
-            <span class="mono text-[13px] text-[var(--color-nix-400)] select-none">
-              nxv
-              <span class="text-[var(--color-fog-4)]">:~</span>
-              <span class="text-[var(--color-fog-0)]">$</span>
+        <!-- Status strip — populated by app.js at boot -->
+        <div
+          id="statusStrip"
+          class="mx-auto max-w-[1240px] px-5 md:px-10 h-7 hidden md:flex items-center gap-4 mono text-[11px] text-[var(--color-fog-3)]"
+          style="border-top: 1px solid var(--border-subtle)"
+        >
+          <span>
+            index ·
+            <span class="text-[var(--color-fog-2)]">2026-04-19</span>
+            · commit
+            <span class="text-[var(--color-fog-2)]">a7f2c91</span>
+          </span>
+          <span class="text-[var(--color-ink-5)]" aria-hidden="true">│</span>
+          <span>
+            nixpkgs ·
+            <span class="text-[var(--color-fog-2)]">2017-01 → 2026-04</span>
+          </span>
+          <span class="flex-1"></span>
+          <span>
+            press
+            <span class="kbd">/</span>
+            to focus
+          </span>
+        </div>
+      </header>
+
+      <main id="main" tabindex="-1" class="mx-auto max-w-[1240px] px-5 md:px-10 pb-24">
+        <!-- Hero / search -->
+        <section class="pt-9 md:pt-[52px] pb-2">
+          <div
+            id="heroEyebrow"
+            class="mono text-[12px] tracking-[0.22em] uppercase text-[var(--color-nix-400)] mb-5"
+          >
+            // nix version index &nbsp;·&nbsp; v0.6.2
+          </div>
+          <h1
+            class="mono text-[30px] md:text-[46px] leading-[1.04] tracking-[-0.045em] font-bold text-[var(--color-fog-0)] max-w-[760px]"
+          >
+            Every version of every
+            <span class="text-[var(--color-nix-400)]">nix package</span>, indexed since 2017.
+          </h1>
+          <p class="mt-5 text-[15px] md:text-[17px] leading-[1.55] text-[var(--color-fog-2)] max-w-[620px]">
+            Find the exact
+            <span class="mono text-[var(--color-fog-0)]">nixpkgs</span>
+            commit for the version you need — query locally, via the CLI, or against
+            <span class="mono text-[var(--color-fog-0)]">nxv&nbsp;serve</span>.
+          </p>
+
+          <!-- Terminal prompt search bar -->
+          <div class="prompt-shell mt-7 h-[58px] px-5 gap-3">
+            <span class="mono text-[15px] text-[var(--color-nix-400)] select-none">
+              nxv<span class="text-[var(--color-fog-4)]">:~</span>$
             </span>
-            <span class="mono text-[13px] text-[var(--color-fog-3)] select-none hidden sm:inline">
+            <span class="mono text-[15px] text-[var(--color-fog-3)] select-none hidden sm:inline">
               search
             </span>
             <input
@@ -237,20 +175,16 @@
               autocomplete="off"
               autofocus
               aria-label="Search nixpkgs by package and version"
-              placeholder="python 2.7   •   nodejs 18   •   ruby 2.6   •   gcc 12.3"
-              class="mono flex-1 bg-transparent border-0 outline-none text-[15px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]"
+              placeholder="python 2.7"
+              class="mono flex-1 min-w-0 bg-transparent border-0 outline-none text-[15px] text-[var(--color-fog-0)] placeholder:text-[var(--color-fog-4)]"
             />
-            <span class="mono text-[15px] text-[var(--color-nix-400)] caret-blink">▌</span>
-            <span
-              class="hidden sm:inline-flex items-center gap-1 mono text-[10px] text-[var(--color-fog-4)]"
-            >
-              <span class="kbd">↵</span>
-              run
+            <span class="mono text-[17px] text-[var(--color-nix-400)] caret-blink select-none" aria-hidden="true">
+              ▌
             </span>
           </div>
 
           <!-- Filter strip -->
-          <div class="mt-3 flex flex-wrap items-center gap-2">
+          <div class="mt-3.5 flex flex-wrap items-center gap-2">
             <button data-filter="exact" class="chip">
               exact:
               <span class="ml-1 text-[var(--color-fog-0)]">off</span>
@@ -274,155 +208,170 @@
             <button data-filter="include-insecure" class="chip">include insecure</button>
             <button data-filter="sort" class="chip">
               sort:
-              <span class="ml-1 text-[var(--color-fog-0)]">date</span>
+              <span class="ml-1 text-[var(--color-fog-0)]">relevance</span>
             </button>
-            <div class="flex-1"></div>
-            <span class="mono text-[11px] text-[var(--color-fog-4)]">try:</span>
+            <span class="flex-1"></span>
+            <span class="mono text-[12px] text-[var(--color-fog-4)]">try:</span>
             <button class="chip example">python 2.7</button>
             <button class="chip example">nodejs 18</button>
             <button class="chip example">gcc 4.9</button>
             <button class="chip example">ffmpeg 5</button>
           </div>
-        </div>
-      </section>
 
-      <!-- Results pane -->
-      <section class="mt-10" id="resultsSection">
-        <!-- Result meta bar -->
-        <div class="flex items-center gap-4 mono text-[11.5px] text-[var(--color-fog-3)] h-8">
-          <span id="resultsCount" class="text-[var(--color-fog-1)]">results / —</span>
-          <span class="text-[var(--color-ink-4)]">│</span>
-          <span id="resultsTime">—</span>
-          <span class="flex-1"></span>
-          <span class="text-[var(--color-fog-4)]">view:</span>
-          <button
-            data-view="rows"
-            class="px-2 py-0.5 hairline rounded-[2px] text-[var(--color-fog-0)]"
-          >
-            rows
-          </button>
-          <button
-            data-view="cards"
-            class="px-2 py-0.5 text-[var(--color-fog-4)] hover:text-[var(--color-fog-1)]"
-          >
-            cards
-          </button>
-        </div>
+          <!-- Index metrics — populated by app.js at boot -->
+          <div id="heroMetrics" class="mt-10 grid grid-cols-2 lg:grid-cols-5 gap-3.5">
+            <div class="panel panel--rail metric">
+              <div class="metric-value mono tabular-nums">186,417</div>
+              <div class="metric-label mono">packages</div>
+            </div>
+            <div class="panel panel--rail metric">
+              <div class="metric-value mono tabular-nums">4,209,881</div>
+              <div class="metric-label mono">versions</div>
+            </div>
+            <div class="panel panel--rail metric">
+              <div class="metric-value mono tabular-nums">12,384,502</div>
+              <div class="metric-label mono">records</div>
+            </div>
+            <div class="panel panel--rail metric">
+              <div class="metric-value mono tabular-nums">#a7f2c91</div>
+              <div class="metric-label mono">latest</div>
+            </div>
+            <div class="panel panel--rail metric">
+              <div class="metric-value mono tabular-nums">9+ yrs</div>
+              <div class="metric-label mono">of history</div>
+            </div>
+          </div>
+        </section>
 
-        <div class="ascii-rule text-[10px] leading-none mt-1 mb-2">
-          ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        </div>
+        <!-- Results pane -->
+        <section class="mt-10" id="resultsSection">
+          <!-- Result meta bar -->
+          <div class="flex items-center gap-4 mono text-[12px] text-[var(--color-fog-3)] h-[34px]">
+            <span id="resultsCount" class="text-[var(--color-fog-1)]">results / —</span>
+            <span class="text-[var(--color-ink-5)]" aria-hidden="true">│</span>
+            <span id="resultsTime">—</span>
+            <span class="flex-1"></span>
+            <span class="text-[var(--color-fog-4)]">view:</span>
+            <div class="seg" role="group" aria-label="Results view">
+              <button data-view="rows" class="seg-btn seg-btn--active">rows</button>
+              <button data-view="cards" class="seg-btn">cards</button>
+            </div>
+          </div>
 
-        <!-- Rows view — dense terminal-ish -->
-        <div id="resultsRows" class="panel rounded-[2px] overflow-hidden">
-          <!-- Table header -->
+          <!-- Rows view -->
           <div
-            class="grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_120px_130px_90px] gap-3 px-4 py-2 mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]"
-            style="border-bottom: 1px solid var(--color-ink-4)"
+            id="resultsRows"
+            class="mt-2.5 rounded-[13px] overflow-hidden"
+            style="border: 1px solid var(--border); background: var(--surface-glass)"
           >
-            <span>package · attr</span>
-            <span>version</span>
-            <span class="hidden md:block">description</span>
-            <span>first seen</span>
-            <span>last seen</span>
-            <span class="text-right">actions</span>
+            <!-- Column header -->
+            <div
+              class="grid grid-cols-[minmax(180px,1.6fr)_100px_minmax(200px,2fr)_100px_100px_150px] gap-4 px-5 py-2 mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-fog-4)]"
+              style="border-bottom: 1px solid var(--border-strong)"
+            >
+              <span>package · attr</span>
+              <span>version</span>
+              <span class="hidden md:block">description</span>
+              <span>first seen</span>
+              <span>last seen</span>
+              <span class="text-right">actions</span>
+            </div>
+            <div id="resultsBody"></div>
           </div>
-          <div id="resultsBody"></div>
-        </div>
 
-        <!-- Cards view — responsive grid -->
-        <div id="resultsCards" class="hidden"></div>
+          <!-- Cards view -->
+          <div id="resultsCards" class="hidden mt-2.5"></div>
 
-        <!-- Pagination -->
-        <div
-          id="pagination"
-          class="mt-4 flex items-center justify-between mono text-[11px] text-[var(--color-fog-3)]"
-        >
-          <span>
-            page
-            <span class="text-[var(--color-fog-0)]">1</span>
-            /
-            <span class="text-[var(--color-fog-0)]">42</span>
-            · showing
-            <span class="text-[var(--color-fog-0)]">1–25</span>
-            of
-            <span class="text-[var(--color-fog-0)]">1,047</span>
-          </span>
-          <div class="flex items-center gap-1.5">
-            <button class="btn btn-ghost">← prev</button>
-            <button class="btn btn-ghost">next →</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Stats / about -->
-      <section id="stats" class="mt-24 grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div class="panel rounded-[2px] p-5 relative scanlines">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">
-            activity · 30m
-          </div>
-          <div id="activityBars" class="flex items-end gap-[3px] h-14 mt-3"></div>
-          <div class="mt-3 flex justify-between mono text-[10.5px] text-[var(--color-fog-3)]">
-            <span>30m ago</span>
-            <span id="activitySummary" class="text-[var(--color-green-glow)]">—</span>
-            <span>now</span>
-          </div>
-        </div>
-        <div class="panel rounded-[2px] p-5">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">
-            latency · p50 / p95 / p99
-          </div>
-          <div class="mt-3 mono text-[28px] leading-none text-[var(--color-fog-0)] tabular-nums">
-            34
-            <span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-            <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-            112
-            <span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-            <span class="mx-2 text-[var(--color-ink-4)] text-[16px]">/</span>
-            287
-            <span class="text-[var(--color-fog-4)] text-[16px]">ms</span>
-          </div>
-          <div class="mt-5 mono text-[10.5px] text-[var(--color-fog-3)]">
-            bloom filter hit rate ·
-            <span class="text-[var(--color-fog-0)]">97.2%</span>
-            <br />
-            fts5 queries ·
-            <span class="text-[var(--color-fog-0)]">124,918 / day</span>
-          </div>
-        </div>
-        <div class="panel rounded-[2px] p-5">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">
-            self-host
-          </div>
-          <pre
-            class="mt-3 mono text-[12px] text-[var(--color-fog-1)] leading-relaxed whitespace-pre-wrap select-all"
+          <!-- Pagination -->
+          <div
+            id="pagination"
+            class="mt-[18px] flex items-center justify-between mono text-[12px] text-[var(--color-fog-3)]"
           >
+            <span>
+              page
+              <span class="text-[var(--color-fog-0)]">1</span>
+              /
+              <span class="text-[var(--color-fog-0)]">1</span>
+              · showing
+              <span class="text-[var(--color-fog-0)]">—</span>
+              of
+              <span class="text-[var(--color-fog-0)]">—</span>
+            </span>
+            <div class="flex items-center gap-1.5">
+              <button class="btn btn-ghost" disabled>← prev</button>
+              <button class="btn btn-ghost" disabled>next →</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Stats / about -->
+        <section id="stats" class="mt-14 grid grid-cols-1 md:grid-cols-3 gap-3.5">
+          <div class="panel p-6">
+            <div class="mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fog-4)]">
+              activity · 30m
+            </div>
+            <div id="activityBars" class="flex items-end gap-[3px] h-14 mt-3.5"></div>
+            <div class="mt-3 flex justify-between mono text-[10.5px] text-[var(--color-fog-3)]">
+              <span>30m ago</span>
+              <span id="activitySummary" class="text-[var(--color-green-glow)]">—</span>
+              <span>now</span>
+            </div>
+          </div>
+          <div class="panel p-6">
+            <div class="mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fog-4)]">
+              latency · p50 / p95 / p99
+            </div>
+            <div
+              id="latencyMain"
+              class="mt-3.5 mono text-[28px] leading-none text-[var(--color-fog-0)] tabular-nums"
+            >
+              <span class="text-[var(--color-fog-4)] text-[18px]">waiting for samples…</span>
+            </div>
+            <div id="latencySub" class="mt-4 mono text-[10.5px] text-[var(--color-fog-3)] leading-[1.7]">
+              awaiting traffic
+            </div>
+          </div>
+          <div class="panel p-6">
+            <div class="mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-fog-4)]">
+              self-host
+            </div>
+            <pre
+              class="mt-3.5 mono text-[12.5px] text-[var(--color-fog-2)] leading-[1.7] whitespace-pre-wrap select-all"
+            >
 nix run github:utensils/nxv \
   -- serve --host 0.0.0.0</pre
-          >
-          <a
-            href="https://utensils.io/nxv/"
-            target="_blank"
-            rel="noopener"
-            class="mt-4 btn w-full justify-center"
-          >
-            read the guide →
-          </a>
-        </div>
-      </section>
+            >
+            <a
+              id="selfhostLink"
+              href="https://utensils.io/nxv/"
+              target="_blank"
+              rel="noopener"
+              class="btn btn-ghost w-full mt-4"
+            >
+              read the guide →
+            </a>
+          </div>
+        </section>
+      </main>
 
       <!-- Footer -->
       <footer
-        class="mt-24 pt-6 hairline-t mono text-[11px] text-[var(--color-fog-4)] flex flex-wrap items-center gap-x-4 gap-y-2"
+        class="mx-auto max-w-[1240px] px-5 md:px-10 pt-9 pb-14 flex flex-wrap items-center gap-x-4 gap-y-2 mono text-[12px] text-[var(--color-fog-3)]"
+        style="border-top: 1px solid var(--border-subtle)"
       >
+        <a href="/" class="flex items-center gap-2">
+          <img src="/favicon.svg" width="18" height="18" alt="" />
+          <span class="mono text-[13px] font-bold text-[var(--color-fog-1)]">nxv</span>
+        </a>
         <span>© 2026 utensils.io</span>
-        <span class="text-[var(--color-ink-4)]">│</span>
-        <a href="https://github.com/utensils/nxv" class="hover:text-[var(--color-fog-1)]">source</a>
-        <a href="/docs" class="hover:text-[var(--color-fog-1)]">/docs</a>
-        <a href="/openapi.json" class="hover:text-[var(--color-fog-1)]">/openapi.json</a>
+        <a href="https://github.com/utensils/nxv" class="hover:text-[var(--color-fog-0)] transition">
+          source
+        </a>
+        <a href="/docs" class="hover:text-[var(--color-fog-0)] transition">/docs</a>
+        <a href="/openapi.json" class="hover:text-[var(--color-fog-0)] transition">/openapi.json</a>
         <a
           href="https://github.com/utensils/nxv/blob/main/LICENSE"
-          class="hover:text-[var(--color-fog-1)]"
+          class="hover:text-[var(--color-fog-0)] transition"
         >
           mit license
         </a>
@@ -431,30 +380,34 @@ nix run github:utensils/nxv \
           built for the nix community by
           <a
             href="https://github.com/jamesbrink"
-            class="text-[var(--color-fog-2)] hover:text-[var(--color-fog-0)]"
+            class="text-[var(--color-fog-2)] hover:text-[var(--color-fog-0)] transition"
           >
             @jamesbrink
           </a>
         </span>
       </footer>
-    </main>
+    </div>
 
     <!-- Version history drawer (right-side) -->
-    <div id="drawerOverlay" class="fixed inset-0 z-40 hidden" aria-hidden="true">
+    <div id="drawerOverlay" class="fixed inset-0 z-[60] hidden justify-end" aria-hidden="true">
       <div class="absolute inset-0 overlay-dim" data-close></div>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="drawerTitle"
-        class="absolute right-0 top-0 h-full w-full max-w-[640px] border-l overflow-y-auto flex flex-col shadow-2xl"
-        style="background: var(--color-ink-2); border-color: var(--color-ink-4)"
+        class="relative w-full max-w-[560px] h-full overflow-y-auto flex flex-col"
+        style="
+          background: var(--surface-raised);
+          border-left: 1px solid var(--border-strong);
+          box-shadow: var(--shadow-lg);
+        "
       >
         <div
-          class="sticky top-0 z-10 px-6 py-4 hairline-b flex items-start gap-4"
-          style="background: var(--color-ink-2)"
+          class="sticky top-0 z-10 px-6 py-[18px] flex items-start gap-4"
+          style="background: var(--surface-raised); border-bottom: 1px solid var(--border-subtle)"
         >
           <div class="flex-1 min-w-0">
-            <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)]">
+            <div class="mono text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fog-4)]">
               version history
             </div>
             <h2
@@ -463,20 +416,22 @@ nix run github:utensils/nxv \
             >
               —
             </h2>
-            <div id="drawerSub" class="mono text-[11px] text-[var(--color-fog-3)] mt-0.5">—</div>
+            <div id="drawerSub" class="mono text-[11px] text-[var(--color-fog-3)] mt-1 truncate">
+              —
+            </div>
           </div>
           <button class="btn btn-ghost" data-close aria-label="Close version history">esc ✕</button>
         </div>
 
         <!-- Timeline visualization -->
-        <div class="px-6 py-5 hairline-b">
+        <div class="px-6 py-5" style="border-bottom: 1px solid var(--border-subtle)">
           <div
             id="timelineLabel"
-            class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3"
+            class="mono text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fog-4)] mb-3"
           >
             timeline
           </div>
-          <div id="timelineViz" class="relative h-[120px]"></div>
+          <div id="timelineViz" class="relative"></div>
           <div
             id="timelineTicks"
             class="mt-2 flex justify-between mono text-[10px] text-[var(--color-fog-4)] tabular-nums"
@@ -485,11 +440,11 @@ nix run github:utensils/nxv \
 
         <!-- Version list -->
         <div class="flex-1 px-6 py-5">
-          <div class="mono text-[10.5px] uppercase tracking-widest text-[var(--color-fog-4)] mb-3">
+          <div class="mono text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-fog-4)] mb-3">
             all versions
             <span id="drawerCount" class="text-[var(--color-fog-2)]"></span>
           </div>
-          <ul id="drawerList" class="space-y-1"></ul>
+          <ul id="drawerList" class="space-y-0.5"></ul>
         </div>
       </div>
     </div>
@@ -497,7 +452,7 @@ nix run github:utensils/nxv \
     <!-- Command palette -->
     <div
       id="palette"
-      class="fixed inset-0 z-50 hidden items-start justify-center pt-[12vh] px-4"
+      class="fixed inset-0 z-[70] hidden items-start justify-center pt-[12vh] px-4"
       aria-hidden="true"
     >
       <div class="absolute inset-0 overlay-dim" data-palette-close></div>
@@ -505,10 +460,18 @@ nix run github:utensils/nxv \
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        class="relative w-full max-w-[620px] panel rounded-[2px] overflow-hidden shadow-2xl"
+        class="relative w-full max-w-[600px] rounded-[13px] overflow-hidden"
+        style="
+          background: var(--surface-panel);
+          border: 1px solid var(--border-strong);
+          box-shadow: var(--shadow-pop);
+        "
       >
-        <div class="flex items-center gap-3 h-12 px-4 hairline-b">
-          <span class="mono text-[13px] text-[var(--color-nix-400)]">»</span>
+        <div
+          class="flex items-center gap-3 h-[50px] px-[18px]"
+          style="border-bottom: 1px solid var(--border-subtle)"
+        >
+          <span class="mono text-[14px] text-[var(--color-nix-400)]" aria-hidden="true">»</span>
           <input
             id="paletteInput"
             type="search"
@@ -518,9 +481,10 @@ nix run github:utensils/nxv \
           />
           <span class="kbd">esc</span>
         </div>
-        <ul id="paletteList" class="max-h-[50vh] overflow-y-auto py-1"></ul>
+        <ul id="paletteList" class="max-h-[50vh] overflow-y-auto p-1.5"></ul>
         <div
-          class="px-4 py-2 hairline-t flex items-center gap-3 mono text-[10.5px] text-[var(--color-fog-4)]"
+          class="px-4 py-2 flex items-center gap-3 mono text-[10.5px] text-[var(--color-fog-4)]"
+          style="border-top: 1px solid var(--border-subtle)"
         >
           <span>
             <span class="kbd">↑↓</span>
@@ -539,12 +503,11 @@ nix run github:utensils/nxv \
     <!-- Toast -->
     <div
       id="toast"
-      class="fixed bottom-6 right-6 z-50 opacity-0 translate-y-4 transition mono text-[12px] px-4 py-2.5 panel rounded-[2px] pointer-events-none"
+      class="toast fixed bottom-6 right-6 z-[80] opacity-0 translate-y-4 transition mono text-[12px] px-4 py-[11px] rounded-[9px] pointer-events-none"
     >
       copied.
     </div>
 
-    <!-- Hide Tailwind CDN missing-source warning -->
     <script src="./app.js" defer></script>
   </body>
 </html>
