@@ -5,7 +5,7 @@
 
 use crate::db::queries::{IndexStats, PackageVersion, VersionHistoryEntry};
 use crate::error::{NxvError, Result};
-use crate::search::{SearchOptions, SearchResult, SortOrder};
+use crate::search::{SearchOptions, SearchResolution, SearchResult, SortOrder};
 use chrono::{DateTime, Utc};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
@@ -26,6 +26,8 @@ struct PaginationMeta {
     #[allow(dead_code)]
     offset: usize,
     has_more: bool,
+    #[serde(default)]
+    resolution: Option<SearchResolution>,
 }
 
 /// Version history entry from API (for deserialization).
@@ -133,6 +135,9 @@ impl ApiClient {
         if opts.exact {
             url.push_str("&exact=true");
         }
+        if opts.all_depths {
+            url.push_str("&all_depths=true");
+        }
         if let Some(ref license) = opts.license {
             url.push_str(&format!("&license={}", urlencoding::encode(license)));
         }
@@ -162,9 +167,9 @@ impl ApiClient {
 
         let response: ApiResponse<Vec<PackageVersion>> = self.get(&url)?;
 
-        let (total, has_more, applied_limit) = match response.meta {
-            Some(meta) => (meta.total, meta.has_more, Some(meta.limit)),
-            None => (response.data.len(), false, None),
+        let (total, has_more, applied_limit, resolution) = match response.meta {
+            Some(meta) => (meta.total, meta.has_more, Some(meta.limit), meta.resolution),
+            None => (response.data.len(), false, None, None),
         };
 
         Ok(SearchResult {
@@ -172,6 +177,7 @@ impl ApiClient {
             total,
             has_more,
             applied_limit,
+            resolution,
         })
     }
 
@@ -634,6 +640,38 @@ mod tests {
                 }
                 _ => panic!("Expected ApiError"),
             }
+        }
+
+        #[test]
+        fn old_search_metadata_without_resolution_remains_compatible() {
+            let meta: PaginationMeta =
+                serde_json::from_str(r#"{"total":1,"limit":50,"offset":0,"has_more":false}"#)
+                    .unwrap();
+            assert!(meta.resolution.is_none());
+        }
+
+        #[test]
+        fn search_resolution_metadata_deserializes() {
+            let meta: PaginationMeta = serde_json::from_str(
+                r#"{
+                    "total":0,
+                    "limit":50,
+                    "offset":0,
+                    "has_more":false,
+                    "resolution":{
+                        "scope":"shallowest",
+                        "resolved_depth":0,
+                        "requested_version":"2.7.3",
+                        "version_matched":false,
+                        "deeper_matches_available":true,
+                        "suggestions":[{"attribute_path":"python","version":"2.7.12"}]
+                    }
+                }"#,
+            )
+            .unwrap();
+            let resolution = meta.resolution.unwrap();
+            assert_eq!(resolution.scope, crate::search::SearchScope::Shallowest);
+            assert_eq!(resolution.suggestions[0].attribute_path, "python");
         }
 
         #[test]

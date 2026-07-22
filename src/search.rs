@@ -8,7 +8,10 @@ use crate::error::Result;
 use clap::ValueEnum;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{cmp::Ordering, collections::HashSet};
+
+const SUGGESTION_LIMIT: usize = 5;
+const SUGGESTION_CANDIDATE_LIMIT: usize = 512;
 
 /// Sort order for search results.
 #[derive(
@@ -27,6 +30,40 @@ pub enum SortOrder {
     Name,
 }
 
+/// How a version-qualified attribute search resolved its package scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    /// Require one exact attribute path.
+    Exact,
+    /// Search only the shallowest attribute-path tier matching the prefix.
+    Shallowest,
+    /// Search every attribute-path depth matching the prefix.
+    AllDepths,
+}
+
+/// A nearby attribute/version pair offered after a version miss.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SearchSuggestion {
+    pub attribute_path: String,
+    pub version: String,
+}
+
+/// Machine-readable explanation of a version-qualified search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SearchResolution {
+    pub scope: SearchScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_depth: Option<usize>,
+    pub requested_version: String,
+    /// Whether the requested version existed before secondary filters.
+    pub version_matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deeper_matches_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<SearchSuggestion>,
+}
+
 /// Common search options shared between CLI and API.
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -36,6 +73,8 @@ pub struct SearchOptions {
     pub version: Option<String>,
     /// Perform exact name match only.
     pub exact: bool,
+    /// Include every matching attribute-path depth for version searches.
+    pub all_depths: bool,
     /// Search in package descriptions (FTS).
     pub desc: bool,
     /// Filter by license (case-insensitive contains).
@@ -84,6 +123,7 @@ impl Default for SearchOptions {
             query: String::new(),
             version: None,
             exact: false,
+            all_depths: false,
             desc: false,
             license: None,
             sort: SortOrder::Relevance,
@@ -108,6 +148,9 @@ pub struct SearchResult {
     /// Only set when using a remote API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_limit: Option<usize>,
+    /// Resolution details for version-qualified searches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<SearchResolution>,
 }
 
 /// Performs a package search using the provided options and returns paginated results.
@@ -131,25 +174,24 @@ pub struct SearchResult {
 /// ```
 pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchResult> {
     // Step 1: Query database
-    let results = if opts.desc {
+    let (results, resolution) = if opts.desc {
         // FTS search on description
-        queries::search_by_description(conn, &opts.query)?
+        (queries::search_by_description(conn, &opts.query)?, None)
     } else if let Some(ref version) = opts.version {
-        // Search by name and version. `--exact` composes with the version
-        // filter rather than being shadowed by it: the attribute path must
-        // match exactly, the version stays a prefix match.
         if opts.exact {
-            queries::search_by_attr_exact_version(conn, &opts.query, version)?
+            execute_exact_version_search(conn, opts, version)?
+        } else if opts.all_depths {
+            execute_all_depths_version_search(conn, opts, version)?
         } else {
-            queries::search_by_name_version(conn, &opts.query, version)?
+            execute_scoped_version_search(conn, opts, version)?
         }
     } else if opts.exact {
         // Exact match on attribute_path. Avoid the old prefix query + Rust
         // filter path, which materialized thousands of sibling attrs on v4 DBs.
-        queries::search_by_attr_exact(conn, &opts.query)?
+        (queries::search_by_attr_exact(conn, &opts.query)?, None)
     } else {
         // Prefix search on attribute_path
-        queries::search_by_attr(conn, &opts.query)?
+        (queries::search_by_attr(conn, &opts.query)?, None)
     };
 
     // Step 2: Apply license filter
@@ -175,7 +217,224 @@ pub fn execute_search(conn: &Connection, opts: &SearchOptions) -> Result<SearchR
         total,
         has_more,
         applied_limit: None, // Local searches don't cap limits
+        resolution,
     })
+}
+
+fn execute_exact_version_search(
+    conn: &Connection,
+    opts: &SearchOptions,
+    version: &str,
+) -> Result<(Vec<PackageVersion>, Option<SearchResolution>)> {
+    let results = queries::search_by_attr_exact_version(conn, &opts.query, version)?;
+    let version_matched = !results.is_empty();
+    let attr_exists = version_matched || queries::attribute_path_exists(conn, &opts.query)?;
+    let suggestions = if !version_matched && attr_exists {
+        rank_suggestions(
+            queries::search_by_attr_exact(conn, &opts.query)?,
+            &opts.query,
+            version,
+        )
+    } else {
+        Vec::new()
+    };
+
+    Ok((
+        results,
+        Some(SearchResolution {
+            scope: SearchScope::Exact,
+            resolved_depth: attr_exists.then(|| attribute_depth(&opts.query)),
+            requested_version: version.to_string(),
+            version_matched,
+            deeper_matches_available: None,
+            suggestions,
+        }),
+    ))
+}
+
+fn execute_scoped_version_search(
+    conn: &Connection,
+    opts: &SearchOptions,
+    version: &str,
+) -> Result<(Vec<PackageVersion>, Option<SearchResolution>)> {
+    let Some(depth) = queries::min_attribute_depth(conn, &opts.query)? else {
+        return Ok((
+            Vec::new(),
+            Some(SearchResolution {
+                scope: SearchScope::Shallowest,
+                resolved_depth: None,
+                requested_version: version.to_string(),
+                version_matched: false,
+                deeper_matches_available: Some(false),
+                suggestions: Vec::new(),
+            }),
+        ));
+    };
+
+    let results = queries::search_by_name_version_at_depth(conn, &opts.query, version, depth)?;
+    let version_matched = !results.is_empty();
+    let (deeper_matches_available, suggestions) = if version_matched {
+        (None, Vec::new())
+    } else {
+        let deeper = queries::deeper_version_match_exists(conn, &opts.query, version, depth)?;
+        let candidates = queries::search_version_suggestion_candidates(
+            conn,
+            &opts.query,
+            depth,
+            &preferred_version_prefix(version),
+            SUGGESTION_CANDIDATE_LIMIT,
+        )?;
+        (
+            Some(deeper),
+            rank_suggestions(candidates, &opts.query, version),
+        )
+    };
+
+    Ok((
+        results,
+        Some(SearchResolution {
+            scope: SearchScope::Shallowest,
+            resolved_depth: Some(depth),
+            requested_version: version.to_string(),
+            version_matched,
+            deeper_matches_available,
+            suggestions,
+        }),
+    ))
+}
+
+fn execute_all_depths_version_search(
+    conn: &Connection,
+    opts: &SearchOptions,
+    version: &str,
+) -> Result<(Vec<PackageVersion>, Option<SearchResolution>)> {
+    let results = queries::search_by_name_version(conn, &opts.query, version)?;
+    let version_matched = !results.is_empty();
+    let (resolved_depth, suggestions) = if version_matched {
+        (None, Vec::new())
+    } else if let Some(depth) = queries::min_attribute_depth(conn, &opts.query)? {
+        let candidates = queries::search_version_suggestion_candidates(
+            conn,
+            &opts.query,
+            depth,
+            &preferred_version_prefix(version),
+            SUGGESTION_CANDIDATE_LIMIT,
+        )?;
+        (
+            Some(depth),
+            rank_suggestions(candidates, &opts.query, version),
+        )
+    } else {
+        (None, Vec::new())
+    };
+
+    Ok((
+        results,
+        Some(SearchResolution {
+            scope: SearchScope::AllDepths,
+            resolved_depth,
+            requested_version: version.to_string(),
+            version_matched,
+            deeper_matches_available: None,
+            suggestions,
+        }),
+    ))
+}
+
+fn attribute_depth(attribute_path: &str) -> usize {
+    attribute_path.bytes().filter(|byte| *byte == b'.').count()
+}
+
+fn numeric_components(version: &str) -> Vec<u64> {
+    version
+        .split(['.', '-', '_', '+'])
+        .map(|part| {
+            part.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .take_while(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+fn preferred_version_prefix(version: &str) -> String {
+    let components = numeric_components(version);
+    if components.len() >= 2 {
+        format!("{}.{}", components[0], components[1])
+    } else if let Some(component) = components.first() {
+        component.to_string()
+    } else {
+        version
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .collect()
+    }
+}
+
+fn shared_prefix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a.eq_ignore_ascii_case(b))
+        .count()
+}
+
+fn compare_version_distance(left: &str, right: &str, requested: &str) -> Ordering {
+    let requested_numeric = numeric_components(requested);
+    let left_numeric = numeric_components(left);
+    let right_numeric = numeric_components(right);
+
+    if !requested_numeric.is_empty() && !left_numeric.is_empty() && !right_numeric.is_empty() {
+        let numeric_key = |candidate: &[u64]| {
+            let common = requested_numeric
+                .iter()
+                .zip(candidate)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let distance = requested_numeric
+                .iter()
+                .zip(candidate)
+                .find_map(|(a, b)| (a != b).then(|| a.abs_diff(*b)))
+                .unwrap_or_else(|| requested_numeric.len().abs_diff(candidate.len()) as u64);
+            (common, distance)
+        };
+        let (left_common, left_distance) = numeric_key(&left_numeric);
+        let (right_common, right_distance) = numeric_key(&right_numeric);
+        return right_common
+            .cmp(&left_common)
+            .then_with(|| left_distance.cmp(&right_distance));
+    }
+
+    shared_prefix_len(right, requested).cmp(&shared_prefix_len(left, requested))
+}
+
+fn rank_suggestions(
+    candidates: Vec<PackageVersion>,
+    query: &str,
+    requested_version: &str,
+) -> Vec<SearchSuggestion> {
+    let mut candidates = candidates;
+    candidates.sort_by(|left, right| {
+        compare_version_distance(&left.version, &right.version, requested_version)
+            .then_with(|| (left.attribute_path != query).cmp(&(right.attribute_path != query)))
+            .then_with(|| left.attribute_path.len().cmp(&right.attribute_path.len()))
+            .then_with(|| right.last_commit_date.cmp(&left.last_commit_date))
+            .then_with(|| left.attribute_path.cmp(&right.attribute_path))
+            .then_with(|| right.version.cmp(&left.version))
+    });
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            seen.insert((candidate.attribute_path.clone(), candidate.version.clone()))
+        })
+        .take(SUGGESTION_LIMIT)
+        .map(|candidate| SearchSuggestion {
+            attribute_path: candidate.attribute_path,
+            version: candidate.version,
+        })
+        .collect()
 }
 
 /// Filter package versions by license using a case-insensitive substring match.
@@ -474,6 +733,7 @@ mod tests {
         assert_eq!(opts.limit, 50);
         assert_eq!(opts.offset, 0);
         assert!(!opts.exact);
+        assert!(!opts.all_depths);
         assert!(!opts.desc);
         assert!(!opts.full);
         assert!(!opts.reverse);
@@ -570,15 +830,32 @@ mod exact_with_version_tests {
         );
     }
 
-    /// Guard the other half of the contract: without `--exact` the prefix
-    /// behavior is unchanged, so this failing means the fix over-reached.
+    /// The default non-exact search stays at the shallowest matching tier.
     #[test]
-    fn non_exact_with_version_filter_still_matches_prefix_siblings() {
+    fn non_exact_with_version_filter_uses_shallowest_prefix_tier() {
         let (_dir, db) = seeded_db();
 
         let res = execute_search(db.connection(), &opts("python", Some("2.7"), false)).unwrap();
 
-        assert_eq!(res.total, 3, "prefix search should keep all 2.7.x siblings");
+        assert_eq!(res.total, 1);
+        assert_eq!(res.data[0].attribute_path, "python2");
+        assert_eq!(res.resolution.unwrap().scope, SearchScope::Shallowest);
+    }
+
+    /// `--all-depths` preserves the legacy broad prefix search explicitly.
+    #[test]
+    fn all_depths_with_version_filter_keeps_prefix_siblings() {
+        let (_dir, db) = seeded_db();
+        let res = execute_search(
+            db.connection(),
+            &SearchOptions {
+                all_depths: true,
+                ..opts("python", Some("2.7"), false)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(res.total, 3);
         assert!(
             res.data
                 .iter()
@@ -601,10 +878,7 @@ mod exact_with_version_tests {
     }
 }
 
-/// Regression coverage for broad version searches such as `python 2.7`.
-/// The query layer returns shallow attribute paths before nested package sets;
-/// the default search pipeline must preserve that relevance ordering instead
-/// of replacing it with last-seen-date ordering.
+/// Regression coverage for scoped version searches such as `python 2.7.3`.
 #[cfg(test)]
 mod relevance_order_tests {
     use super::*;
@@ -617,8 +891,11 @@ mod relevance_order_tests {
              last_commit_hash, last_commit_date, attribute_path, description)
         VALUES
             ('python',   '2.7.18', 'h1', 100, 'l1', 200, 'python', 'interpreter'),
+            ('python',   '2.7.12', 'h4',  50, 'l4', 150, 'python', 'interpreter'),
             ('python',   '2.7.18', 'h2', 300, 'l2', 400, 'python27', 'interpreter alias'),
-            ('icontract','2.7.3',  'h3', 800, 'l3', 900, 'python314Packages.icontract', 'library');
+            ('python',   '3.11.4', 'h5', 700, 'l5', 800, 'python311', 'interpreter'),
+            ('icontract','2.7.3',  'h3', 800, 'l3', 900, 'python314Packages.icontract', 'library'),
+            ('anytree',  '2.7.3',  'h6', 500, 'l6', 600, 'python27Packages.anytree', 'library');
     "#;
 
     fn opts() -> SearchOptions {
@@ -631,7 +908,7 @@ mod relevance_order_tests {
     }
 
     #[test]
-    fn default_search_keeps_top_level_python_packages_before_recent_nested_libraries() {
+    fn default_search_returns_only_the_shallowest_matching_tier() {
         let dir = tempdir().unwrap();
         let db = Database::open(dir.path().join("test.db")).unwrap();
         db.connection().execute_batch(SEED).unwrap();
@@ -643,11 +920,12 @@ mod relevance_order_tests {
             .map(|package| package.attribute_path.as_str())
             .collect();
 
-        assert_eq!(attrs, ["python27", "python", "python314Packages.icontract"]);
+        assert_eq!(attrs, ["python27", "python", "python"]);
+        assert_eq!(result.resolution.unwrap().resolved_depth, Some(0));
     }
 
     #[test]
-    fn explicit_date_sort_still_puts_the_newest_nested_library_first() {
+    fn explicit_date_sort_stays_within_the_resolved_tier() {
         let dir = tempdir().unwrap();
         let db = Database::open(dir.path().join("test.db")).unwrap();
         db.connection().execute_batch(SEED).unwrap();
@@ -661,7 +939,92 @@ mod relevance_order_tests {
         )
         .unwrap();
 
-        assert_eq!(result.data[0].attribute_path, "python314Packages.icontract");
+        assert_eq!(result.data[0].attribute_path, "python27");
+        assert!(
+            result
+                .data
+                .iter()
+                .all(|package| !package.attribute_path.contains('.'))
+        );
+    }
+
+    #[test]
+    fn exact_repro_is_a_precise_miss_with_nearby_versions() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+
+        let result = execute_search(
+            db.connection(),
+            &SearchOptions {
+                version: Some("2.7.3".to_string()),
+                ..opts()
+            },
+        )
+        .unwrap();
+
+        assert!(result.data.is_empty());
+        let resolution = result.resolution.unwrap();
+        assert_eq!(resolution.scope, SearchScope::Shallowest);
+        assert_eq!(resolution.resolved_depth, Some(0));
+        assert!(!resolution.version_matched);
+        assert_eq!(resolution.deeper_matches_available, Some(true));
+        assert_eq!(
+            resolution.suggestions[0],
+            SearchSuggestion {
+                attribute_path: "python".to_string(),
+                version: "2.7.12".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn package_set_prefix_resolves_its_member_depth() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+
+        let result = execute_search(
+            db.connection(),
+            &SearchOptions {
+                query: "python27Packages".to_string(),
+                version: Some("2.7.3".to_string()),
+                limit: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.total, 1);
+        assert_eq!(result.data[0].attribute_path, "python27Packages.anytree");
+        assert_eq!(result.resolution.unwrap().resolved_depth, Some(1));
+    }
+
+    #[test]
+    fn all_depths_restores_nested_matches_for_the_repro() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+
+        let result = execute_search(
+            db.connection(),
+            &SearchOptions {
+                version: Some("2.7.3".to_string()),
+                all_depths: true,
+                ..opts()
+            },
+        )
+        .unwrap();
+
+        let attrs: Vec<_> = result
+            .data
+            .iter()
+            .map(|package| package.attribute_path.as_str())
+            .collect();
+        assert_eq!(
+            attrs,
+            ["python314Packages.icontract", "python27Packages.anytree"]
+        );
     }
 }
 

@@ -246,6 +246,10 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     use crate::output::{OutputFormat, TableOptions, print_results};
     use crate::search::SearchOptions;
 
+    if args.all_depths && args.get_version().is_none() {
+        anyhow::bail!("--all-depths requires a version filter");
+    }
+
     let verbosity = cli.verbosity();
 
     // Debug: show search parameters
@@ -254,6 +258,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         eprintln!("[debug]   package: {:?}", args.package);
         eprintln!("[debug]   version: {:?}", args.get_version());
         eprintln!("[debug]   exact: {}", args.exact);
+        eprintln!("[debug]   all_depths: {}", args.all_depths);
         eprintln!("[debug]   desc: {}", args.desc);
         eprintln!("[debug]   license: {:?}", args.license);
         if std::env::var("NXV_API_URL").is_ok() {
@@ -305,6 +310,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         query: args.package.clone(),
         version: args.get_version().map(|s| s.to_string()),
         exact: args.exact,
+        all_depths: args.all_depths,
         desc: args.desc,
         license: args.license.clone(),
         sort: args.sort,
@@ -334,13 +340,29 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Execute search using backend
     let result = backend.search(&opts)?;
 
+    if backend.is_remote()
+        && args.get_version().is_some()
+        && !args.exact
+        && !args.all_depths
+        && result.resolution.is_none()
+        && !cli.quiet
+    {
+        eprintln!(
+            "Warning: remote server uses legacy all-depth version search; upgrade it for scoped results."
+        );
+    }
+
     if verbosity >= Verbosity::Debug {
         eprintln!("[debug] Total results: {}", result.total);
     }
 
     if result.data.is_empty() {
         if !cli.quiet {
-            eprintln!("No packages found matching '{}'", args.package);
+            if let Some(ref resolution) = result.resolution {
+                print_version_search_miss(&args.package, resolution);
+            } else {
+                eprintln!("No packages found matching '{}'", args.package);
+            }
         }
         return Ok(());
     }
@@ -370,6 +392,44 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_version_search_miss(package: &str, resolution: &crate::search::SearchResolution) {
+    use crate::search::SearchScope;
+
+    if resolution.version_matched {
+        eprintln!(
+            "Packages matching '{}' at version prefix '{}' were excluded by active filters.",
+            package, resolution.requested_version
+        );
+        return;
+    }
+
+    match resolution.scope {
+        SearchScope::Exact => eprintln!(
+            "Attribute '{}' has no version matching prefix '{}'.",
+            package, resolution.requested_version
+        ),
+        SearchScope::Shallowest => eprintln!(
+            "No direct attribute matching '{}' has version prefix '{}'.",
+            package, resolution.requested_version
+        ),
+        SearchScope::AllDepths => eprintln!(
+            "No attribute matching '{}' has version prefix '{}'.",
+            package, resolution.requested_version
+        ),
+    }
+
+    if !resolution.suggestions.is_empty() {
+        eprintln!("Closest indexed versions:");
+        for suggestion in &resolution.suggestions {
+            eprintln!("  {} {}", suggestion.attribute_path, suggestion.version);
+        }
+    }
+
+    if resolution.deeper_matches_available == Some(true) {
+        eprintln!("Nested matches exist. Re-run with --all-depths to include them.");
+    }
 }
 
 /// Updates the local package index from the configured manifest or remote API.

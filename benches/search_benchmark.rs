@@ -304,6 +304,49 @@ fn bench_prefix_version_search(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new("scoped_covering_candidates", size),
+            size,
+            |b, _| {
+                b.iter(|| {
+                    let resolved_depth: i64 = conn
+                        .prepare_cached(&format!(
+                            "SELECT MIN({depth}) FROM package_attrs \
+                             WHERE attribute_path_lc >= ? AND attribute_path_lc < ?"
+                        ))
+                        .unwrap()
+                        .query_row(rusqlite::params!["python311", upper], |row| row.get(0))
+                        .unwrap();
+                    let sql = format!(
+                        "WITH candidates AS MATERIALIZED ( \
+                             SELECT id, first_commit_date AS rank_date \
+                               FROM package_versions \
+                              WHERE attribute_path LIKE ? ESCAPE '\\' \
+                                AND version LIKE ? ESCAPE '\\' \
+                                AND {depth} = ? \
+                              ORDER BY first_commit_date DESC, id ASC \
+                              LIMIT 5000 \
+                         ) \
+                         SELECT pv.attribute_path \
+                           FROM candidates c \
+                           JOIN package_versions pv ON pv.id = c.id \
+                          ORDER BY c.rank_date DESC, c.id ASC"
+                    );
+                    let rows: Vec<String> = conn
+                        .prepare_cached(&sql)
+                        .unwrap()
+                        .query_map(
+                            rusqlite::params!["python311%", "3.11%", resolved_depth],
+                            |row| row.get(0),
+                        )
+                        .unwrap()
+                        .filter_map(Result::ok)
+                        .collect();
+                    black_box(rows)
+                });
+            },
+        );
     }
 
     group.finish();

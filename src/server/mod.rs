@@ -866,6 +866,80 @@ mod tests {
         let data = json["data"].as_array().unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(data[0]["version"], "3.12.0");
+        assert_eq!(json["meta"]["resolution"]["scope"], "shallowest");
+        assert_eq!(json["meta"]["resolution"]["resolved_depth"], 0);
+        assert_eq!(json["meta"]["resolution"]["version_matched"], true);
+    }
+
+    #[tokio::test]
+    async fn test_version_search_miss_returns_scoped_suggestions() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO package_versions
+                (name, version, first_commit_hash, first_commit_date,
+                 last_commit_hash, last_commit_date, attribute_path, description, license)
+            VALUES
+                ('python', '2.7.12', 'oldpy', 100, 'oldpy2', 200, 'python', 'Python interpreter', 'PSF'),
+                ('itables', '2.7.3', 'nested1', 300, 'nested2', 400, 'python314Packages.itables', 'Library', 'MIT'),
+                ('anytree', '2.7.3', 'nested3', 300, 'nested4', 400, 'python27Packages.anytree', 'Library', 'MIT');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let app = build_router(Arc::new(AppState::new(db_path)), None, None);
+        let (status, json) = get_json(&app, "/api/v1/search?q=python&version=2.7.3").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["data"], serde_json::json!([]));
+        let resolution = &json["meta"]["resolution"];
+        assert_eq!(resolution["scope"], "shallowest");
+        assert_eq!(resolution["resolved_depth"], 0);
+        assert_eq!(resolution["version_matched"], false);
+        assert_eq!(resolution["deeper_matches_available"], true);
+        assert_eq!(resolution["suggestions"][0]["attribute_path"], "python");
+        assert_eq!(resolution["suggestions"][0]["version"], "2.7.12");
+
+        let (_, package_set) =
+            get_json(&app, "/api/v1/search?q=python27Packages&version=2.7.3").await;
+        assert_eq!(
+            package_set["data"][0]["attribute_path"],
+            "python27Packages.anytree"
+        );
+        assert_eq!(package_set["meta"]["resolution"]["resolved_depth"], 1);
+
+        let (_, all_depths) = get_json(
+            &app,
+            "/api/v1/search?q=python&version=2.7.3&all_depths=true",
+        )
+        .await;
+        assert_eq!(all_depths["meta"]["resolution"]["scope"], "all_depths");
+        assert_eq!(all_depths["meta"]["total"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_all_depths_parameter_validation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path);
+        let app = build_router(Arc::new(AppState::new(db_path)), None, None);
+
+        let (missing_version, json) =
+            get_json(&app, "/api/v1/search?q=python&all_depths=true").await;
+        assert_eq!(missing_version, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "BAD_REQUEST");
+
+        let (conflict, json) = get_json(
+            &app,
+            "/api/v1/search?q=python&version=2.7&exact=true&all_depths=true",
+        )
+        .await;
+        assert_eq!(conflict, StatusCode::BAD_REQUEST);
+        assert_eq!(json["code"], "BAD_REQUEST");
     }
 
     #[tokio::test]

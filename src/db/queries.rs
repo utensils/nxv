@@ -544,6 +544,154 @@ pub fn search_by_name_version(
     Ok(results)
 }
 
+/// Return the shallowest attribute-path depth for a literal prefix.
+///
+/// The derived `package_attrs` table avoids scanning every version row. Test
+/// fixtures and hand-built databases may not have refreshed that cache yet, so
+/// an empty cache result falls back to the covering package-version index.
+pub fn min_attribute_depth(conn: &rusqlite::Connection, package: &str) -> Result<Option<usize>> {
+    let package_lc = package.to_ascii_lowercase();
+    let upper = prefix_upper_bound(&package_lc);
+
+    let cached_result: rusqlite::Result<Option<i64>> = if let Some(ref upper) = upper {
+        conn.query_row(
+            &format!(
+                "SELECT MIN({ATTR_DEPTH_RANK}) FROM package_attrs \
+                 WHERE attribute_path_lc >= ? AND attribute_path_lc < ?"
+            ),
+            [&package_lc, upper],
+            |row| row.get(0),
+        )
+    } else {
+        Ok(None)
+    };
+    let cached = match cached_result {
+        Ok(depth) => depth,
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref message)))
+            if message.contains("no such table: package_attrs")
+                || message.contains("no such column: attribute_path_lc") =>
+        {
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Some(depth) = cached {
+        return Ok(Some(depth as usize));
+    }
+
+    let pattern = format!("{}%", escape_like_pattern(package));
+    let depth: Option<i64> = conn.query_row(
+        &format!(
+            "SELECT MIN({ATTR_DEPTH_RANK}) FROM package_versions \
+             WHERE attribute_path LIKE ? ESCAPE '\\'"
+        ),
+        [&pattern],
+        |row| row.get(0),
+    )?;
+    Ok(depth.map(|value| value as usize))
+}
+
+/// Search a package/version prefix only at one attribute-path depth.
+pub fn search_by_name_version_at_depth(
+    conn: &rusqlite::Connection,
+    package: &str,
+    version: &str,
+    depth: usize,
+) -> Result<Vec<PackageVersion>> {
+    let mut stmt = conn.prepare(&format!(
+        "WITH candidates AS MATERIALIZED ( \
+             SELECT id, first_commit_date AS rank_date \
+               FROM package_versions \
+              WHERE attribute_path LIKE ? ESCAPE '\\' \
+                AND version LIKE ? ESCAPE '\\' \
+                AND {ATTR_DEPTH_RANK} = ? \
+              ORDER BY first_commit_date DESC, id ASC \
+              LIMIT {SEARCH_SQL_CAP} \
+         ) \
+         SELECT pv.* \
+           FROM candidates c \
+           JOIN package_versions pv ON pv.id = c.id \
+          ORDER BY c.rank_date DESC, c.id ASC"
+    ))?;
+    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let version_pattern = format!("{}%", escape_like_pattern(version));
+    let rows = stmt.query_map(
+        rusqlite::params![package_pattern, version_pattern, depth as i64],
+        PackageVersion::from_row,
+    )?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Fetch a bounded pool of versions from one resolved attribute scope.
+///
+/// This is used only to build miss suggestions. Rows sharing the requested
+/// version family are selected first so an intentionally small candidate cap
+/// still contains useful historical versions.
+pub fn search_version_suggestion_candidates(
+    conn: &rusqlite::Connection,
+    package: &str,
+    depth: usize,
+    preferred_version_prefix: &str,
+    limit: usize,
+) -> Result<Vec<PackageVersion>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT * FROM package_versions \
+          WHERE attribute_path LIKE ? ESCAPE '\\' \
+            AND {ATTR_DEPTH_RANK} = ? \
+          ORDER BY CASE WHEN version LIKE ? ESCAPE '\\' THEN 0 ELSE 1 END, \
+                   CASE WHEN attribute_path = ? THEN 0 ELSE 1 END, \
+                   last_commit_date DESC, id ASC \
+          LIMIT ?"
+    ))?;
+    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let version_pattern = format!("{}%", escape_like_pattern(preferred_version_prefix));
+    let rows = stmt.query_map(
+        rusqlite::params![
+            package_pattern,
+            depth as i64,
+            version_pattern,
+            package,
+            limit as i64
+        ],
+        PackageVersion::from_row,
+    )?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Whether the requested version exists below the resolved attribute depth.
+pub fn deeper_version_match_exists(
+    conn: &rusqlite::Connection,
+    package: &str,
+    version: &str,
+    depth: usize,
+) -> Result<bool> {
+    let package_pattern = format!("{}%", escape_like_pattern(package));
+    let version_pattern = format!("{}%", escape_like_pattern(version));
+    let mut stmt = conn.prepare(&format!(
+        "SELECT 1 FROM package_versions \
+          WHERE attribute_path LIKE ? ESCAPE '\\' \
+            AND version LIKE ? ESCAPE '\\' \
+            AND {ATTR_DEPTH_RANK} > ? \
+          LIMIT 1"
+    ))?;
+    Ok(stmt.exists(rusqlite::params![
+        package_pattern,
+        version_pattern,
+        depth as i64
+    ])?)
+}
+
 /// Locate the earliest recorded entry for a package version.
 ///
 /// `package` is the package's attribute path to match; `version` is the version string to match exactly.
@@ -1404,6 +1552,59 @@ mod tests {
             plan.iter()
                 .any(|detail| detail.contains("COVERING INDEX idx_packages_search_nocase")),
             "expected covering prefix index in query plan, got: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn test_scoped_version_search_uses_attribute_and_package_covering_indexes() {
+        let (_dir, db) = create_test_db();
+        db.refresh_package_attrs().unwrap();
+
+        let mut attrs_stmt = db
+            .connection()
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT MIN({ATTR_DEPTH_RANK}) \
+                 FROM package_attrs \
+                 WHERE attribute_path_lc >= ? AND attribute_path_lc < ?"
+            ))
+            .unwrap();
+        let attrs_plan: Vec<String> = attrs_stmt
+            .query_map(["python", "pythoo"], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            attrs_plan
+                .iter()
+                .any(|detail| detail.contains("COVERING INDEX idx_package_attrs_lc")),
+            "expected attribute cache index in query plan, got: {attrs_plan:?}"
+        );
+
+        let sql = format!(
+            "EXPLAIN QUERY PLAN WITH candidates AS MATERIALIZED ( \
+                 SELECT id, first_commit_date AS rank_date \
+                   FROM package_versions \
+                  WHERE attribute_path LIKE ? ESCAPE '\\' \
+                    AND version LIKE ? ESCAPE '\\' \
+                    AND {ATTR_DEPTH_RANK} = ? \
+                  ORDER BY first_commit_date DESC, id ASC \
+                  LIMIT {SEARCH_SQL_CAP} \
+             ) \
+             SELECT pv.* FROM candidates c \
+             JOIN package_versions pv ON pv.id = c.id \
+             ORDER BY c.rank_date DESC, c.id ASC"
+        );
+        let mut packages_stmt = db.connection().prepare(&sql).unwrap();
+        let packages_plan: Vec<String> = packages_stmt
+            .query_map(rusqlite::params!["python%", "3.11%", 0], |row| row.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            packages_plan
+                .iter()
+                .any(|detail| detail.contains("COVERING INDEX idx_packages_search_nocase")),
+            "expected package covering index in query plan, got: {packages_plan:?}"
         );
     }
 

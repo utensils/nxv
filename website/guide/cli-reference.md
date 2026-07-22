@@ -26,19 +26,20 @@ nxv search <PACKAGE> [VERSION]
 
 **Options:**
 
-| Flag                      | Description                                   |
-| ------------------------- | --------------------------------------------- |
-| `-V, --version <VERSION>` | Filter by version (alternative to positional) |
-| `-e, --exact`             | Exact name match only                         |
-| `--desc`                  | Search in descriptions (full-text)            |
-| `--license <LICENSE>`     | Filter by license                             |
-| `--show-platforms`        | Show platforms column                         |
+| Flag                      | Description                                          |
+| ------------------------- | ---------------------------------------------------- |
+| `-V, --version <VERSION>` | Filter by version (alternative to positional)        |
+| `-e, --exact`             | Exact name match only                                |
+| `--all-depths`            | Include nested attribute depths in a version search  |
+| `--desc`                  | Search in descriptions (full-text)                   |
+| `--license <LICENSE>`     | Filter by license                                    |
+| `--show-platforms`        | Show platforms column                                |
 | `--sort <ORDER>`          | Sort order: relevance (default), date, version, name |
-| `-r, --reverse`           | Reverse sort order                            |
-| `-n, --limit <N>`         | Maximum results (default: 50, 0=unlimited)    |
-| `--full`                  | Show all commits (no deduplication)           |
-| `--ascii`                 | ASCII table borders                           |
-| `-f, --format <FORMAT>`   | Output format: table, json, plain             |
+| `-r, --reverse`           | Reverse sort order                                   |
+| `-n, --limit <N>`         | Maximum results (default: 50, 0=unlimited)           |
+| `--full`                  | Show all commits (no deduplication)                  |
+| `--ascii`                 | ASCII table borders                                  |
+| `-f, --format <FORMAT>`   | Output format: table, json, plain                    |
 
 **Examples:**
 
@@ -49,6 +50,9 @@ nxv search python
 # Find specific version
 nxv search python 3.11.4
 
+# Intentionally include nested package-set members with that version
+nxv search python 2.7.3 --all-depths
+
 # Search descriptions
 nxv search "web server" --desc
 
@@ -58,6 +62,19 @@ nxv search python --format json
 # Sort by date, newest first
 nxv search python --sort date
 ```
+
+**Version matching:** without `--exact`, nxv first resolves the shallowest
+attribute-path tier matching the package prefix and then applies the version
+prefix. This keeps `python 3.11` on interpreter attributes such as `python311`,
+and makes `python 2.7.3` a precise miss rather than returning libraries whose
+own version is 2.7.3. A package-set prefix such as `python27Packages 2.7.3`
+naturally resolves its member depth. Use `--all-depths` to request the legacy
+broad prefix behavior explicitly; it requires a version and cannot be combined
+with `--exact` or `--desc`.
+
+On a version miss, table/plain searches print nearby attribute/version
+suggestions and indicate when deeper matches are available. JSON stdout remains
+the stable array of package rows; diagnostics stay on stderr.
 
 ### info
 
@@ -74,18 +91,18 @@ nxv info <package> [version] [options]
 | `-V, --version <VERSION>` | Specific version (alternative to positional) |
 | `-f, --format <FORMAT>`   | Output format: table, json, plain            |
 
-**Matching:** `info` resolves `<package>` as an **exact attribute path** first, so it
-needs no `--exact` flag — `nxv info python311 3.11.4` returns `python311` only, never
-`python311Full` or `python311Packages.*`. If the package is known but never had the
-requested version, `info` reports not found rather than falling back to unrelated prefix
-matches.
+**Matching:** `info` resolves `<package>` as an **exact attribute path** first,
+so it needs no `--exact` flag — `nxv info python311 3.11.4` returns `python311`
+only, never `python311Full` or `python311Packages.*`. If the package is known
+but never had the requested version, `info` reports not found rather than
+falling back to unrelated prefix matches.
 
-An unknown attribute path is widened to a prefix search, but what gets prefix-matched
-differs by invocation: **with** a version it matches attribute paths, so
-`nxv info python311Packages.req 2.32` resolves; **without** a version it matches the
-package `name` field instead (values like `python-3.11.0`), so partial attribute paths
-generally do not resolve unversioned. Use [`search`](#search) for open-ended prefix
-matching.
+An unknown attribute path is widened to a prefix search, but what gets
+prefix-matched differs by invocation: **with** a version it matches attribute
+paths, so `nxv info python311Packages.req 2.32` resolves; **without** a version
+it matches the package `name` field instead (values like `python-3.11.0`), so
+partial attribute paths generally do not resolve unversioned. Use
+[`search`](#search) for open-ended prefix matching.
 
 **Examples:**
 

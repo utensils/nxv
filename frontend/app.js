@@ -40,6 +40,7 @@
     query: '',
     filters: {
       exact: false,
+      allDepths: false,
       version: '',
       arch: '',
       license: '',
@@ -58,6 +59,7 @@
     historyCache: new Map(),
     firstHashCache: new Map(),
     renderedRows: [], // cached for instant view-switch on toggle
+    resolution: null,
   };
 
   const els = {};
@@ -198,6 +200,7 @@
     const p = new URLSearchParams();
     if (STATE.query) p.set('q', STATE.query);
     if (STATE.filters.exact) p.set('exact', '1');
+    if (STATE.filters.allDepths) p.set('all_depths', '1');
     if (STATE.filters.version) p.set('version', STATE.filters.version);
     if (STATE.filters.arch) p.set('arch', STATE.filters.arch);
     if (STATE.filters.license) p.set('license', STATE.filters.license);
@@ -219,6 +222,8 @@
     const p = new URLSearchParams(window.location.search);
     STATE.query = p.get('q') || '';
     STATE.filters.exact = p.get('exact') === '1';
+    STATE.filters.allDepths = p.get('all_depths') === '1';
+    if (STATE.filters.exact) STATE.filters.allDepths = false;
     STATE.filters.version = p.get('version') || '';
     STATE.filters.arch = p.get('arch') || '';
     STATE.filters.license = p.get('license') || '';
@@ -240,6 +245,7 @@
   function cycleFilter(key) {
     const cycles = {
       exact: [false, true],
+      allDepths: [false, true],
       version: ['', '2.7', '3.11', '3.12', '18', '22'],
       arch: ['', 'x86_64-linux', 'aarch64-linux', 'x86_64-darwin', 'aarch64-darwin'],
       license: ['', 'MIT', 'GPL-3.0+', 'BSD-3-Clause', 'Apache-2.0', 'LGPL-2.1+'],
@@ -255,6 +261,7 @@
   function renderFilterChips() {
     const labels = {
       exact: () => (STATE.filters.exact ? 'on' : 'off'),
+      'all-depths': () => (STATE.filters.allDepths ? 'all' : 'closest'),
       version: () => STATE.filters.version || 'any',
       arch: () => (STATE.filters.arch ? archLabel(STATE.filters.arch) : 'any'),
       license: () => STATE.filters.license || 'any',
@@ -269,8 +276,9 @@
       } else {
         const label = el.textContent.split(':')[0].trim();
         el.innerHTML = `${label}: <span class="ml-1 text-[var(--color-fog-0)]">${labels[k]()}</span>`;
-        const v = STATE.filters[k];
-        const isActive = k === 'exact' ? STATE.filters.exact : k === 'sort' ? v !== 'relevance' : !!v;
+        const stateKey = k === 'all-depths' ? 'allDepths' : k;
+        const v = STATE.filters[stateKey];
+        const isActive = k === 'exact' ? STATE.filters.exact : k === 'all-depths' ? STATE.filters.allDepths : k === 'sort' ? v !== 'relevance' : !!v;
         el.classList.toggle('active', !!isActive);
       }
     });
@@ -297,6 +305,7 @@
     const ver = STATE.filters.version || parsed.ver || '';
     if (ver) params.set('version', ver);
     if (STATE.filters.exact) params.set('exact', 'true');
+    if (STATE.filters.allDepths && ver) params.set('all_depths', 'true');
     if (STATE.filters.license) params.set('license', STATE.filters.license);
     if (STATE.filters.sort) params.set('sort', STATE.filters.sort);
     if (clientFiltered) {
@@ -331,6 +340,7 @@
       STATE.lastLatencyMs = latency;
       const items = (json.data || []).map(toRow);
       const serverMeta = json.meta || { total: items.length, has_more: false };
+      STATE.resolution = serverMeta.resolution || null;
 
       // client-side filters the API doesn't support
       let filtered = items;
@@ -360,7 +370,7 @@
       STATE.total = total;
       STATE.hasMore = hasMore;
 
-      render(rows);
+      render(rows, STATE.resolution);
       setResultsStatus(
         `results / ${fmtNum(total)}${truncated ? '+' : ''}`,
         `${(latency / 1000).toFixed(3)}s · api`
@@ -381,6 +391,7 @@
     STATE.total = 0;
     STATE.hasMore = false;
     STATE.renderedRows = [];
+    STATE.resolution = null;
     const w = `
       <div class="px-6 py-16 text-center">
         <div class="mono text-[12px] text-[var(--color-fog-4)] leading-7">
@@ -421,18 +432,63 @@
     renderPagination({ total: 0, has_more: false });
   }
 
-  function render(rows) {
-    STATE.renderedRows = rows;
-    const isCards = STATE.view === 'cards';
-    const empt = `
-      <div class="px-6 py-16 text-center">
+  function renderEmptyState(resolution) {
+    if (!resolution) {
+      return `<div class="px-6 py-16 text-center">
         <div class="mono text-[12px] text-[var(--color-fog-4)]">no results — try loosening filters, or press <span class="kbd">⌘K</span> to browse.</div>
       </div>`;
+    }
+
+    const matched = resolution.version_matched;
+    const title = matched
+      ? 'matching versions were excluded by active filters'
+      : `no direct match for version ${escapeHtml(resolution.requested_version || '')}`;
+    const suggestions = (resolution.suggestions || [])
+      .map(
+        (suggestion) =>
+          `<button type="button" class="chip" data-suggestion-attr="${escapeHtml(suggestion.attribute_path)}" data-suggestion-version="${escapeHtml(suggestion.version)}">${escapeHtml(suggestion.attribute_path)} ${escapeHtml(suggestion.version)}</button>`
+      )
+      .join('');
+    const deeper = resolution.deeper_matches_available
+      ? '<button type="button" class="btn btn-ghost" data-search-all-depths>include deeper matches</button>'
+      : '';
+    return `<div class="px-6 py-14 text-center">
+      <div class="mono text-[12px] text-[var(--color-fog-3)]">${title}</div>
+      ${suggestions ? `<div class="mt-4 flex flex-wrap justify-center gap-2">${suggestions}</div>` : ''}
+      ${deeper ? `<div class="mt-4">${deeper}</div>` : ''}
+    </div>`;
+  }
+
+  function bindEmptyStateActions() {
+    $$('[data-suggestion-attr]').forEach((el) => {
+      el.addEventListener('click', () => {
+        STATE.query = el.dataset.suggestionAttr || '';
+        STATE.filters.version = el.dataset.suggestionVersion || '';
+        STATE.filters.allDepths = false;
+        cache('searchInput').value = STATE.query;
+        renderFilterChips();
+        runSearch();
+      });
+    });
+    $$('[data-search-all-depths]').forEach((el) => {
+      el.addEventListener('click', () => {
+        STATE.filters.exact = false;
+        STATE.filters.allDepths = true;
+        renderFilterChips();
+        runSearch();
+      });
+    });
+  }
+
+  function render(rows, resolution = STATE.resolution) {
+    STATE.renderedRows = rows;
+    const isCards = STATE.view === 'cards';
     if (!rows.length) {
-      cache('resultsBody').innerHTML = empt;
+      cache('resultsBody').innerHTML = renderEmptyState(resolution);
       cache('resultsCards').innerHTML = '';
       cache('resultsRows').classList.remove('hidden');
       cache('resultsCards').classList.add('hidden');
+      bindEmptyStateActions();
       return;
     }
     cache('resultsRows').classList.toggle('hidden', isCards);
@@ -1070,6 +1126,23 @@
       hint: 'filter',
       action: () => {
         cycleFilter('exact');
+        if (STATE.filters.exact) STATE.filters.allDepths = false;
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
+      label: 'search all attribute depths',
+      hint: 'version filter',
+      action: () => {
+        const parsed = parseQuery(STATE.query);
+        if (!(STATE.filters.version || parsed.ver)) {
+          showToast('all-depth search requires a version');
+          return;
+        }
+        STATE.filters.exact = false;
+        STATE.filters.allDepths = true;
         renderFilterChips();
         runSearch();
       },
@@ -1131,6 +1204,7 @@
       action: () => {
         STATE.filters = {
           exact: false,
+          allDepths: false,
           version: '',
           arch: '',
           license: '',
@@ -1261,7 +1335,17 @@
     $$('.chip[data-filter]').forEach((el) => {
       el.addEventListener('click', () => {
         const k = el.dataset.filter;
-        cycleFilter(k === 'include-insecure' ? 'includeInsecure' : k);
+        const stateKey = k === 'include-insecure' ? 'includeInsecure' : k === 'all-depths' ? 'allDepths' : k;
+        if (stateKey === 'allDepths') {
+          const parsed = parseQuery(STATE.query);
+          if (!(STATE.filters.version || parsed.ver)) {
+            showToast('all-depth search requires a version');
+            return;
+          }
+        }
+        cycleFilter(stateKey);
+        if (stateKey === 'exact' && STATE.filters.exact) STATE.filters.allDepths = false;
+        if (stateKey === 'allDepths' && STATE.filters.allDepths) STATE.filters.exact = false;
         renderFilterChips();
         runSearch();
       });
@@ -1347,6 +1431,7 @@
       f.license ||
       (f.sort && f.sort !== 'relevance') ||
       f.exact ||
+      f.allDepths ||
       f.includeInsecure ||
       STATE.page > 1
     );

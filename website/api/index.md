@@ -64,16 +64,17 @@ GET /api/v1/search
 
 **Query Parameters:**
 
-| Parameter | Type    | Description                              |
-| --------- | ------- | ---------------------------------------- |
-| `q`       | string  | Search query (required)                  |
-| `version` | string  | Version filter (prefix match)            |
-| `exact`   | boolean | Exact name match                         |
-| `license` | string  | License filter                           |
-| `sort`    | string  | Sort order: relevance (default), date, version, name |
-| `reverse` | boolean | Reverse sort                             |
-| `limit`   | integer | Max results (default: 50, capped at 100) |
-| `offset`  | integer | Results to skip (default: 0)             |
+| Parameter    | Type    | Description                                                                  |
+| ------------ | ------- | ---------------------------------------------------------------------------- |
+| `q`          | string  | Search query (required)                                                      |
+| `version`    | string  | Version filter (prefix match)                                                |
+| `exact`      | boolean | Exact name match                                                             |
+| `all_depths` | boolean | Include every attribute depth; requires `version` and conflicts with `exact` |
+| `license`    | string  | License filter                                                               |
+| `sort`       | string  | Sort order: relevance (default), date, version, name                         |
+| `reverse`    | boolean | Reverse sort                                                                 |
+| `limit`      | integer | Max results (default: 50, capped at 100)                                     |
+| `offset`     | integer | Results to skip (default: 0)                                                 |
 
 ::: tip Description Search
 
@@ -114,6 +115,34 @@ curl "http://localhost:8080/api/v1/search?q=python&version=3.11&limit=5"
   }
 }
 ```
+
+Version-qualified prefix searches resolve the shallowest matching attribute-path
+tier before applying `version`. Set `all_depths=true` to include nested tiers. A
+version miss remains a successful HTTP 200 response with an empty `data` array
+and an additive explanation in `meta.resolution`:
+
+```json
+{
+  "data": [],
+  "meta": {
+    "total": 0,
+    "limit": 50,
+    "offset": 0,
+    "has_more": false,
+    "resolution": {
+      "scope": "shallowest",
+      "resolved_depth": 0,
+      "requested_version": "2.7.3",
+      "version_matched": false,
+      "deeper_matches_available": true,
+      "suggestions": [{ "attribute_path": "python", "version": "2.7.12" }]
+    }
+  }
+}
+```
+
+`resolution` is omitted for unversioned and description searches. Existing
+clients may ignore it; the package-row and pagination shapes are unchanged.
 
 ### Get Package Versions
 

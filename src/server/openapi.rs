@@ -4,6 +4,7 @@ use utoipa::OpenApi;
 
 use super::handlers;
 use super::types::*;
+use crate::search::{SearchResolution, SearchScope, SearchSuggestion};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -40,6 +41,9 @@ use super::types::*;
         PackageVersionSchema,
         IndexStatsSchema,
         ChannelCoverageSchema,
+        SearchResolution,
+        SearchScope,
+        SearchSuggestion,
     )),
     tags(
         (name = "packages", description = "Package search and information"),
