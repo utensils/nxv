@@ -602,6 +602,7 @@
                   # handles the design-token checks instead. Also skip the
                   # `type="text/tailwindcss"` style-attribute complaint.
                   html5validator --root frontend --match "*.html" \
+                    --blacklist node_modules \
                     --ignore 'error: CSS:' \
                             'The only allowed value for the "type" attribute for the "style" element' \
                     "$@"
@@ -732,10 +733,11 @@
                     echo "Installing Tailwind CSS dependencies (first-time setup)…"
                     npm install --prefer-offline
                   fi
-                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \\
-                    -i tailwind.src.css \\
-                    -o tailwind.generated.css \\
-                    --content "index.html,app.js" \\
+                  # Content sources are pinned via @source directives in
+                  # tailwind.src.css (index.html + app.js only).
+                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \
+                    -i tailwind.src.css \
+                    -o tailwind.generated.css \
                     --minify
                   echo "✓ Generated frontend/tailwind.generated.css"
                 '';
@@ -750,10 +752,9 @@
                     echo "Installing Tailwind CSS dependencies (first-time setup)…"
                     npm install --prefer-offline
                   fi
-                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \\
-                    -i tailwind.src.css \\
-                    -o tailwind.generated.css \\
-                    --content "index.html,app.js" \\
+                  node "./node_modules/@tailwindcss/cli/dist/index.mjs" \
+                    -i tailwind.src.css \
+                    -o tailwind.generated.css \
                     --watch --minify
                 '';
               }
