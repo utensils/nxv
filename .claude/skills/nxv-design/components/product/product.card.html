@@ -1,0 +1,81 @@
+<!-- @dsCard group="Components" viewport="700x780" name="nxv product widgets" subtitle="SearchPrompt · Terminal · PackageRow · PackageCard · VersionBadge · VersionTimeline · ActivityBars" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+html,body{margin:0}
+body{background:var(--surface-page);color:var(--text);font-family:var(--font-sans);padding:26px;
+  background-image:var(--grid-image);background-size:var(--grid-cell) var(--grid-cell)}
+#root{max-width:648px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+.lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-subtle);margin-bottom:10px}
+.sec{border-top:1px solid var(--border-subtle);padding-top:16px}
+.list{border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;background:var(--surface-glass)}
+.head{display:grid;grid-template-columns:minmax(180px,1.6fr) 100px minmax(200px,2fr) 120px 90px;gap:16px;padding:9px 20px;border-bottom:1px solid var(--border-strong);font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--text-subtle)}
+a{color:var(--link)}a:hover{color:var(--link-hover)}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { SearchPrompt, Terminal, PackageRow, PackageCard, VersionBadge, VersionTimeline, ActivityBars } = window.NxvDesignSystem_0fa7ce;
+const Sec = ({label, children}) => (<div className="sec"><div className="lbl">{label}</div>{children}</div>);
+const py = {name:'python27', attr:'python27', version:'2.7.18', description:'High-level dynamically-typed programming language', license:'Python-2.0', hash:'e4a45f9c', first:'Jan 14, 2022', last:'May 03, 2022', platforms:['x86_64·linux','aarch64·linux'], insecure:true};
+const nd = {name:'nodejs_18', attr:'nodejs_18', version:'18.20.4', description:'Event-driven I/O framework for the V8 JavaScript engine', license:'MIT', hash:'b3f2a017', first:'Jul 2024', last:'now', platforms:['x86_64·linux']};
+const hist = [
+  {version:'2.7.18', first:'2020-05-01', last:'2022-05-03'},
+  {version:'2.7.17', first:'2019-10-15', last:'2020-04-28', insecure:true},
+  {version:'2.7.15', first:'2018-06-01', last:'2019-10-14'},
+  {version:'2.7.13', first:'2017-01-10', last:'2018-05-31'},
+];
+function Demo(){
+  const [q,setQ] = React.useState('python 2.7');
+  return (<>
+    <Sec label="SearchPrompt">
+      <SearchPrompt value={q} onChange={setQ} button />
+    </Sec>
+    <Sec label="Terminal">
+      <Terminal title="~/legacy-app — zsh">
+        <Terminal.Comment># which nixpkgs commit shipped python 2.7?{"\n"}</Terminal.Comment>
+        <Terminal.Prompt>$</Terminal.Prompt> <Terminal.Emph>nxv</Terminal.Emph> search python 2.7{"\n"}
+        <Terminal.Emph>python27</Terminal.Emph>  2.7.18  <Terminal.Hash>e4a45f9</Terminal.Hash>  2022-01-14{"\n"}
+        <Terminal.Prompt>$</Terminal.Prompt> nix shell nixpkgs/e4a45f9#python27
+      </Terminal>
+    </Sec>
+    <Sec label="PackageRow — VersionBadge tones inline">
+      <div className="list">
+        <div className="head"><span>package · attr</span><span>version</span><span>description</span><span>first seen</span><span style={{textAlign:'right'}}>actions</span></div>
+        <PackageRow pkg={py} />
+        <PackageRow pkg={nd} />
+      </div>
+    </Sec>
+    <Sec label="PackageCard">
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        <PackageCard pkg={py} />
+        <PackageCard pkg={nd} />
+      </div>
+    </Sec>
+    <Sec label="VersionTimeline / ActivityBars / VersionBadge">
+      <div style={{display:'grid',gridTemplateColumns:'1.6fr 1fr',gap:14,alignItems:'start'}}>
+        <VersionTimeline versions={hist} height={96} />
+        <div>
+          <ActivityBars data={[0,2,5,1,0,8,12,3,0,4,7,9,2,0,1,6]} />
+          <div style={{marginTop:12,display:'flex',gap:8}}>
+            <VersionBadge version="2.7.18" tone="brand" />
+            <VersionBadge version="1.0.2k" tone="warn" />
+            <VersionBadge version="1.0.1e" tone="danger" />
+          </div>
+        </div>
+      </div>
+    </Sec>
+  </>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

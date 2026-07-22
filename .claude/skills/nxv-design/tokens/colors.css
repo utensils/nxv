@@ -1,0 +1,75 @@
+/* nxv color system — "Blueprint": a deep, cool blue-navy dark theme.
+   Dark-only by design. All values in oklch for clean tonal steps.
+   Hue ~264 for surfaces (cool navy), ~258 for the Nix-blue accent. */
+:root {
+  /* ---- Ink scale — surfaces, deepest → lightest ---- */
+  --ink-900: oklch(0.12 0.018 264);   /* terminal / code well */
+  --ink-850: oklch(0.15 0.022 264);   /* page background */
+  --ink-800: oklch(0.18 0.028 264);   /* raised surface */
+  --ink-700: oklch(0.22 0.032 264);   /* solid panel */
+  --ink-600: oklch(0.30 0.040 264);   /* hover / active fill */
+  --ink-500: oklch(0.40 0.055 264);   /* strong border */
+  --ink-400: oklch(0.52 0.050 264);   /* muted line / disabled */
+
+  /* ---- Fog scale — text, brightest → dimmest ---- */
+  --fog-0: oklch(0.98 0.005 264);     /* pure headings */
+  --fog-1: oklch(0.96 0.006 264);     /* headings */
+  --fog-2: oklch(0.80 0.030 264);     /* body text */
+  --fog-3: oklch(0.66 0.040 264);     /* muted / secondary */
+  --fog-4: oklch(0.56 0.040 264);     /* very muted / captions */
+
+  /* ---- Nix blue — the brand accent ---- */
+  --nix-300: oklch(0.82 0.09 250);    /* bright tint (icons on dark) */
+  --nix-400: oklch(0.72 0.12 258);    /* default accent text */
+  --nix-500: oklch(0.63 0.16 262);    /* interactive / focus ring */
+  --nix-600: oklch(0.55 0.17 262);    /* primary button fill */
+  --nix-700: oklch(0.47 0.15 263);    /* pressed */
+
+  /* ---- Semantic status ---- */
+  --green: oklch(0.78 0.15 155);      /* ok / operational */
+  --amber: oklch(0.78 0.14 80);       /* warn / pre-flakes */
+  --red:   oklch(0.66 0.19 25);       /* danger / insecure */
+
+  /* ---- Transparent brand washes (fills, glows, selection) ---- */
+  --nix-wash: oklch(0.55 0.17 262 / 0.14);
+  --nix-wash-strong: oklch(0.55 0.17 262 / 0.28);
+  --green-wash: oklch(0.78 0.15 155 / 0.10);
+  --amber-wash: oklch(0.78 0.14 80 / 0.10);
+  --red-wash: oklch(0.66 0.19 25 / 0.10);
+  --selection: oklch(0.55 0.17 262 / 0.40);
+
+  /* ========================================================
+     Semantic aliases — reference THESE in components.
+     ======================================================== */
+  --surface-page: var(--ink-850);
+  --surface-raised: var(--ink-800);
+  --surface-panel: var(--ink-700);
+  --surface-hover: var(--ink-600);
+  --surface-code: var(--ink-900);
+  /* translucent panel used over the blueprint grid */
+  --surface-glass: oklch(0.19 0.030 264 / 0.55);
+
+  --border: oklch(0.40 0.055 264 / 0.60);
+  --border-strong: var(--ink-500);
+  --border-subtle: oklch(0.40 0.055 264 / 0.28);
+
+  --text: var(--fog-2);
+  --text-strong: var(--fog-1);
+  --text-heading: var(--fog-0);
+  --text-muted: var(--fog-3);
+  --text-subtle: var(--fog-4);
+
+  --accent: var(--nix-400);
+  --accent-solid: var(--nix-600);
+  --accent-hover: var(--nix-500);
+  --accent-pressed: var(--nix-700);
+  --accent-on: oklch(0.99 0.01 264);  /* text on a solid accent fill */
+
+  --ok: var(--green);
+  --warn: var(--amber);
+  --danger: var(--red);
+
+  --ring: var(--nix-500);
+  --link: var(--nix-400);
+  --link-hover: var(--nix-300);
+}

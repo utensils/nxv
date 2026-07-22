@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<!-- @template name="nxv Search Page" description="Package-search page — terminal search bar, index stats, and result rows, on the Blueprint canvas." -->
+<helmet><script src="./ds-base.js"></script></helmet>
+<div style="min-height:100vh;background:var(--surface-page);position:relative;font-family:var(--font-sans);color:var(--text)">
+  <div style="position:absolute;inset:0;background-image:var(--grid-image);background-size:var(--grid-cell) var(--grid-cell);-webkit-mask-image:radial-gradient(ellipse 100% 60% at 50% 0%,#000 30%,transparent 72%);mask-image:radial-gradient(ellipse 100% 60% at 50% 0%,#000 30%,transparent 72%);pointer-events:none"></div>
+  <div style="position:relative;max-width:960px;margin:0 auto;padding:56px 40px 96px">
+    <div style="font-family:var(--font-mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin-bottom:18px">// nix version index</div>
+    <h1 style="font-family:var(--font-mono);font-size:40px;line-height:1.05;letter-spacing:-.045em;font-weight:700;color:var(--text-heading);margin:0">Find any nix package version.</h1>
+    <div style="margin-top:26px">
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.SearchPrompt" value="{{ q }}" on-change="{{ setQ }}" button="{{ true }}" hint-size="100%,58px"></x-import>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:32px">
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.Metric" value="186,417" label="packages" hint-size="100%,92px"></x-import>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.Metric" value="4.2M" label="versions" hint-size="100%,92px"></x-import>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.Metric" value="98,317" label="commits" hint-size="100%,92px"></x-import>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.Metric" value="9+ yrs" label="of history" hint-size="100%,92px"></x-import>
+    </div>
+    <div style="margin-top:32px;border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;background:var(--surface-glass)">
+      <div style="display:grid;grid-template-columns:minmax(180px,1.6fr) 100px minmax(200px,2fr) 120px 90px;gap:16px;padding:9px 20px;border-bottom:1px solid var(--border-strong);font-family:var(--font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:var(--text-subtle)">
+        <span>package · attr</span><span>version</span><span>description</span><span>first seen</span><span style="text-align:right">actions</span>
+      </div>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.PackageRow" pkg="{{ py }}" hint-size="100%,64px"></x-import>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.PackageRow" pkg="{{ nd }}" hint-size="100%,64px"></x-import>
+      <x-import component-from-global-scope="NxvDesignSystem_0fa7ce.PackageRow" pkg="{{ go }}" hint-size="100%,64px"></x-import>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { q: 'python 2.7' };
+  renderVals() {
+    const py = { name: 'python27', attr: 'python27', version: '2.7.18', description: 'High-level dynamically-typed programming language', license: 'Python-2.0', hash: 'e4a45f9c', first: 'Jan 14, 2022', platforms: ['x86_64·linux', 'aarch64·linux'], insecure: true };
+    const nd = { name: 'nodejs_18', attr: 'nodejs_18', version: '18.20.4', description: 'Event-driven I/O framework for the V8 JavaScript engine', license: 'MIT', hash: 'b3f2a017', first: 'Jul 2024', platforms: ['x86_64·linux'] };
+    const go = { name: 'go', attr: 'go_1_21', version: '1.21.13', description: 'The Go Programming language', license: 'BSD-3-Clause', hash: 'e2d7c419', first: 'Aug 2023', platforms: ['x86_64·linux', 'aarch64·linux'] };
+    return { q: this.state.q, setQ: (v) => this.setState({ q: v }), py, nd, go };
+  }
+}
+</script>
+</body>
+</html>

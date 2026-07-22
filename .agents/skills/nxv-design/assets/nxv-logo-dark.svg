@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="38" height="38" viewBox="0 0 38 38" role="img" aria-label="nxv">
+  
+  <path class="stroke" d="M4 6 L4 32 M4 6 L10 6 M4 32 L10 32" stroke-width="1.75" stroke-linecap="square" fill="none"></path>
+  <path class="stroke" d="M34 6 L34 32 M34 6 L28 6 M34 32 L28 32" stroke-width="1.75" stroke-linecap="square" fill="none"></path>
+  <text class="wordmark fill" x="19" y="23.5" text-anchor="middle">nxv</text>
+</svg>

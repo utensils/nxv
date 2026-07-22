@@ -1,0 +1,39 @@
+/* nxv effects — shadows, brand glow, the blueprint grid, blur, motion.
+   Depth is quiet: thin hairlines + one accent glow do the work, not
+   heavy drop shadows. */
+:root {
+  /* Elevation shadows (dark UI — subtle, downward) */
+  --shadow-sm: 0 1px 0 oklch(0 0 0 / 0.20);
+  --shadow-md: 0 6px 18px -8px oklch(0 0 0 / 0.45), 0 1px 0 oklch(0 0 0 / 0.20);
+  --shadow-lg: 0 30px 80px -40px oklch(0 0 0 / 0.85);
+  --shadow-pop: 0 20px 60px -20px oklch(0 0 0 / 0.6);
+
+  /* Brand glow — used behind the snowflake and on primary buttons */
+  --glow-accent: 0 8px 24px -10px oklch(0.55 0.17 262 / 0.70);
+  --glow-snowflake: 0 0 70px oklch(0.55 0.17 262 / 0.55);
+  --glow-ok: 0 0 7px oklch(0.78 0.15 155 / 0.70);
+
+  /* Focus ring */
+  --ring-focus: 0 0 0 3px oklch(0.55 0.17 262 / 0.35);
+
+  /* Blur */
+  --blur-nav: blur(12px);          /* @kind other */
+  --blur-overlay: blur(3px) saturate(115%);  /* @kind other */
+
+  /* Blueprint grid — the signature background.
+     Apply as a background-image; mask so it fades where wanted. */
+  --grid-line: oklch(0.40 0.055 264 / 0.22);
+  --grid-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+
+  /* Motion */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);  /* @kind other */
+  --dur-fast: 120ms;               /* @kind other */
+  --dur: 160ms;                    /* @kind other */
+  --dur-slow: 220ms;               /* @kind other */
+  --transition: all var(--dur) var(--ease);
+
+  /* Overlay dim for modals/drawers */
+  --overlay: oklch(0.15 0.022 264 / 0.55);
+}
