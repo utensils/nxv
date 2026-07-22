@@ -208,6 +208,19 @@ this). When changing CLI flags, adding/removing subcommands, or altering
 JSON / API response shapes, also update the template so the skill stays
 accurate. The user-facing guide lives at `website/guide/skill.md`.
 
+## Design System Skill (`nxv-design`)
+
+The "Blueprint" design system — the UI design spec for the web frontend
+(`frontend/`) and the docs site (`website/`) — is installed as a project
+skill at `.claude/skills/nxv-design/` (Claude Code) and
+`.agents/skills/nxv-design/` (Codex). The two copies are identical mirrors;
+update both together. It is managed in Claude designs and re-exported as a
+zip — when a new export lands, replace both directories wholesale rather
+than hand-editing. Consult this skill (tokens, `README.md`, `ui_kits/`)
+before any visual change to the web frontend or docs site; all colour,
+type, spacing, and voice decisions must trace back to its tokens and
+guidelines. The look is dark-only — never add a light mode.
+
 ## Releasing
 
 Releases are automated with **release-plz** (`release-plz.toml` +

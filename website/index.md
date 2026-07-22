@@ -1,54 +1,77 @@
 ---
 layout: home
+title: nxv docs
+titleTemplate: ':title — Find any version of any Nix package, instantly.'
 hero:
   name: nxv
-  text: Nix Version Search
-  tagline: Find any version of any Nix package instantly
+  text: Any version. Any package. Instantly.
+  tagline: Find any version of any Nix package, instantly.
   image:
-    src: /demo.gif
-    alt: nxv demo
+    src: /nix-snowflake.svg
+    alt: Nix snowflake
   actions:
     - theme: brand
-      text: Try Demo
+      text: $ try it now
       link: https://nxv.urandom.io/
     - theme: alt
-      text: Get Started
+      text: 'read the guide →'
       link: /guide/
     - theme: alt
-      text: View on GitHub
+      text: source
       link: https://github.com/utensils/nxv
 features:
-  - icon: "\u26A1"
-    title: Fast
+  - icon:
+      src: /icons/zap.svg
+      alt: ''
+      width: 21
+      height: 21
+    title: Blazingly fast
     details:
-      Bloom filter + SQLite FTS5 for instant results across millions of package
-      versions
-  - icon: "\uD83D\uDCE6"
-    title: Complete
+      A Bloom filter returns instant "not found" responses; SQLite FTS5 powers
+      full-text search across millions of versions.
+  - icon:
+      src: /icons/grid.svg
+      alt: ''
+      width: 21
+      height: 21
+    title: Complete history
     details:
-      Every channel-released nixpkgs package version since 2016 \u2014 including
-      nested sets like python3Packages \u2014 at Hydra-built, cache-backed
-      commits
-  - icon: "\uD83D\uDD12"
+      Every channel-released nixpkgs version since 2016 — including nested sets
+      like <code>python3Packages</code> — at Hydra-built, cache-backed commits.
+  - icon:
+      src: /icons/shield.svg
+      alt: ''
+      width: 21
+      height: 21
     title: Offline-first
-    details: Download the index once, search locally without network requests
-  - icon: "\uD83D\uDEE1\uFE0F"
-    title: Security Aware
-    details: CVE warnings for vulnerable packages, insecure package indicators
+    details:
+      Download the ~220MB index once and query locally — no network required
+      after the initial sync.
+  - icon:
+      src: /icons/shield-alert.svg
+      alt: ''
+      width: 21
+      height: 21
+    title: Security aware
+    details:
+      Clear indicators for insecure packages and known CVEs, with an opt-in
+      toggle to include them.
 ---
 
-## Quick Example
+<div class="nxv-section-kicker">// quick example</div>
+
+## Stop spelunking through commits
 
 ```bash
-# Search for a package
-nxv search python
+# which nixpkgs commit shipped python 2.7?
+nxv search python 2.7
 
-# Find a specific version
+# find a specific version
 nxv search python --version 3.11
 
-# Get package history
+# get the full version timeline
 nxv history python311
 
-# Use in a flake
-nix shell nixpkgs/abc123#python311
+# pin it in one line
+nix shell nixpkgs/e4a45f9#python27
 ```

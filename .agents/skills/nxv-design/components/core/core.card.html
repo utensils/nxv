@@ -1,0 +1,89 @@
+<!-- @dsCard group="Components" viewport="700x900" name="Core primitives" subtitle="Button · Chip · Kbd · StatusPill · Panel · Metric · SegmentedToggle · Callout · Toast · CommandPalette · Pagination" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+html,body{margin:0}
+body{background:var(--surface-page);color:var(--text);font-family:var(--font-sans);padding:26px;
+  background-image:var(--grid-image);background-size:var(--grid-cell) var(--grid-cell)}
+#root{max-width:648px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+.grp{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.lbl{font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-subtle);margin-bottom:10px}
+.sec{border-top:1px solid var(--border-subtle);padding-top:16px}
+a{color:var(--link)}a:hover{color:var(--link-hover)}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Button, Chip, Kbd, StatusPill, Panel, Metric, SegmentedToggle, Callout, Toast, CommandPalette, Pagination } = window.NxvDesignSystem_0fa7ce;
+const Sec = ({label, children}) => (
+  <div className="sec"><div className="lbl">{label}</div>{children}</div>
+);
+function Demo(){
+  const [view, setView] = React.useState('rows');
+  return (<>
+    <Sec label="Button">
+      <div className="grp">
+        <Button variant="primary" prompt>try it now</Button>
+        <Button variant="default">docs</Button>
+        <Button variant="ghost">read the guide →</Button>
+        <Button variant="primary" size="sm">sm</Button>
+        <Button variant="ghost" size="lg">lg</Button>
+        <Button variant="default" disabled>disabled</Button>
+      </div>
+    </Sec>
+    <Sec label="Chip / StatusPill / Kbd">
+      <div className="grp">
+        <Chip>x86_64·linux</Chip>
+        <Chip tone="active">sort: date</Chip>
+        <Chip tone="ok">operational</Chip>
+        <Chip tone="warn">pre-flakes</Chip>
+        <Chip tone="danger">insecure</Chip>
+        <StatusPill tone="ok">api operational · p50 34ms</StatusPill>
+        <span style={{fontFamily:'var(--font-mono)',fontSize:12,color:'var(--text-muted)'}}>press <Kbd>⌘K</Kbd> <Kbd>/</Kbd> <Kbd>esc</Kbd></span>
+      </div>
+    </Sec>
+    <Sec label="SegmentedToggle">
+      <SegmentedToggle options={[{value:'rows',label:'rows'},{value:'cards',label:'cards'}]} value={view} onChange={setView} />
+    </Sec>
+    <Sec label="Metric">
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12}}>
+        <Metric value="186,417" label="packages" />
+        <Metric value="4.2M" label="versions" />
+        <Metric value="98,317" label="commits" />
+        <Metric value="9+ yrs" label="history" />
+      </div>
+    </Sec>
+    <Sec label="Panel / Callout / Toast">
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,alignItems:'start'}}>
+        <Panel rail pad="md" radius="lg">
+          <div style={{color:'var(--text-heading)',fontWeight:600,marginBottom:6}}>Blazingly fast</div>
+          <div style={{fontSize:13,color:'var(--text-muted)'}}>Bloom filter + SQLite FTS5.</div>
+        </Panel>
+        <Callout tone="tip">Try nxv.urandom.io — no install required.</Callout>
+      </div>
+      <div style={{marginTop:12}}><Toast open>copied · nix shell nixpkgs/e4a45f9#python27</Toast></div>
+    </Sec>
+    <Sec label="Pagination / CommandPalette">
+      <Pagination page={2} pageSize={50} total={1047} />
+      <div style={{marginTop:14,maxWidth:440}}>
+        <CommandPalette embedded items={[
+          {label:'python',hint:'popular package'},
+          {label:'toggle exact match',hint:'filter'},
+          {label:'clear filters',hint:'reset'},
+        ]} />
+      </div>
+    </Sec>
+  </>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>);
+</script>
+</body>
+</html>

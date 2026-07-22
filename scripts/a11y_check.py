@@ -445,7 +445,14 @@ def run(paths: Iterable[Path]) -> int:
         print(f"{BOLD}a11y check · {path}{RESET}")
         for check in MARKUP_CHECKS:
             check(soup, report)
-        audit_contrast(extract_color_tokens(html), report)
+        tokens = extract_color_tokens(html)
+        if not tokens:
+            # The @theme block lives in tailwind.src.css next to index.html —
+            # fall back to it so the contrast audit still bites.
+            css_sibling = path.parent / "tailwind.src.css"
+            if css_sibling.exists():
+                tokens = extract_color_tokens(css_sibling.read_text(encoding="utf-8"))
+        audit_contrast(tokens, report)
         report.print(use_color=sys.stdout.isatty())
         if report.has_errors():
             any_errors = True

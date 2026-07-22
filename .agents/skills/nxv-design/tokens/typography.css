@@ -1,0 +1,44 @@
+/* nxv typography — Inter for UI, JetBrains Mono for the terminal voice.
+   Mono carries the brand: eyebrows, headings-as-signature, code, data. */
+:root {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Type scale (px) */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 17px;
+  --text-xl: 19px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --text-4xl: 38px;
+  --text-5xl: 48px;
+  --text-display: 62px;   /* hero — always JetBrains Mono */
+
+  /* Weights */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Line heights */
+  --leading-none: 1.0;
+  --leading-tight: 1.12;
+  --leading-snug: 1.35;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.7;
+  --leading-code: 1.95;
+
+  /* Letter spacing */
+  --tracking-display: -0.045em;  /* big mono headings */
+  --tracking-tight: -0.03em;     /* section headings */
+  --tracking-normal: 0;
+  --tracking-eyebrow: 0.2em;     /* mono uppercase eyebrows */
+  --tracking-label: 0.1em;       /* mono uppercase labels */
+
+  /* Feature settings */
+  --mono-features: 'zero' 1, 'ss01' 1; /* @kind other */
+}

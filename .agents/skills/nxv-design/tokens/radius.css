@@ -1,0 +1,11 @@
+/* nxv corner radii — soft-but-technical. Controls sit at 7–9px,
+   containers at 13–16px. Never fully rounded except pills/dots. */
+:root {
+  --radius-xs: 5px;
+  --radius-sm: 7px;    /* chips, kbd, small buttons */
+  --radius-md: 9px;    /* buttons, inputs */
+  --radius-lg: 13px;   /* cards, metrics */
+  --radius-xl: 16px;   /* large panels, install blocks */
+  --radius-2xl: 20px;
+  --radius-full: 999px;
+}

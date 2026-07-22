@@ -1,0 +1,298 @@
+<!-- @dsCard group="Search App" viewport="1240x760" name="Search web app" subtitle="The nxv search interface — Blueprint redesign" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nxv // Find any version of any Nix package, instantly.</title>
+<link rel="icon" type="image/svg+xml" href="../../assets/nix-snowflake.svg">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+html,body{margin:0}
+body{background:var(--surface-page);color:var(--text);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+::selection{background:var(--selection);color:var(--fog-0)}
+a{color:var(--link)}a:hover{color:var(--link-hover)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--ink-600);border:2px solid var(--surface-page);border-radius:6px}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script>
+// Fake nixpkgs search data for the nxv search-app UI kit.
+// Shapes mirror the real /api/v1/search records (attr, version, dates, flags).
+window.NXV_DATA = {
+  stats: { packages: '186,417', versions: '4.2M', commits: '98,317', history: '9+ yrs' },
+  activity: [0, 1, 3, 2, 0, 5, 8, 4, 2, 0, 6, 11, 7, 3, 1, 0, 4, 9, 5, 2, 0, 3, 7, 12, 8, 4, 1, 0, 2, 6],
+  packages: [
+    { name: 'python27', attr: 'python27', version: '2.7.18', description: 'High-level dynamically-typed programming language', license: 'Python-2.0', hash: 'e4a45f9c', first: 'Jan 14, 2022', last: 'May 03, 2022', platforms: ['x86_64·linux', 'aarch64·linux', 'x86_64·macos'], insecure: true, sort: 1 },
+    { name: 'python27Full', attr: 'python27Full', version: '2.7.18', description: 'Python 2.7 with all optional modules enabled', license: 'Python-2.0', hash: 'e4a45f9c', first: 'Jan 14, 2022', last: 'May 03, 2022', platforms: ['x86_64·linux'], insecure: true, sort: 2 },
+    { name: 'python311', attr: 'python311', version: '3.11.9', description: 'High-level dynamically-typed programming language', license: 'Python-2.0', hash: '9d5f0d3a', first: 'Apr 02, 2024', last: 'now', platforms: ['x86_64·linux', 'aarch64·linux', 'x86_64·macos', 'aarch64·macos'], sort: 3 },
+    { name: 'nodejs_18', attr: 'nodejs_18', version: '18.20.4', description: 'Event-driven I/O framework for the V8 JavaScript engine', license: 'MIT', hash: 'b3f2a017', first: 'Jul 2024', last: 'now', platforms: ['x86_64·linux', 'aarch64·linux'], sort: 4 },
+    { name: 'ruby', attr: 'ruby_2_6', version: '2.6.10', description: 'Object-oriented language for quick and easy programming', license: 'Ruby / BSD-2-Clause', hash: 'a17c5d92', first: 'Mar 2019', last: 'Aug 2021', platforms: ['x86_64·linux', 'x86_64·macos'], legacy: true, sort: 5 },
+    { name: 'gcc', attr: 'gcc49', version: '4.9.4', description: 'GNU Compiler Collection, version 4.9.4', license: 'GPL-3.0+', hash: 'c1f8e2b4', first: 'Sep 2017', last: 'Feb 2019', platforms: ['x86_64·linux', 'i686·linux'], legacy: true, sort: 6 },
+    { name: 'ffmpeg', attr: 'ffmpeg_5', version: '5.1.4', description: 'Complete solution to record, convert and stream audio and video', license: 'GPL-3.0+', hash: 'd4b7a3f1', first: 'Aug 2022', last: 'Nov 2023', platforms: ['x86_64·linux', 'aarch64·linux', 'x86_64·macos'], sort: 7 },
+    { name: 'openssl', attr: 'openssl_1_0_2', version: '1.0.2u', description: 'Cryptographic library that implements SSL and TLS', license: 'OpenSSL', hash: 'f0a1c8d5', first: 'Dec 2018', last: 'Jan 2020', platforms: ['x86_64·linux'], insecure: true, legacy: true, sort: 8 },
+    { name: 'postgresql', attr: 'postgresql_14', version: '14.11', description: 'Powerful, open source object-relational database system', license: 'PostgreSQL', hash: 'ab29e7f0', first: 'Feb 2024', last: 'now', platforms: ['x86_64·linux', 'aarch64·linux', 'x86_64·macos'], sort: 9 },
+    { name: 'go', attr: 'go_1_21', version: '1.21.13', description: 'The Go Programming language', license: 'BSD-3-Clause', hash: 'e2d7c419', first: 'Aug 2023', last: 'now', platforms: ['x86_64·linux', 'aarch64·linux', 'x86_64·macos', 'aarch64·macos'], sort: 10 },
+    { name: 'rustc', attr: 'rustc', version: '1.79.0', description: 'A safe, concurrent, practical language', license: 'MIT / Apache-2.0', hash: 'c93a5f28', first: 'Jun 2024', last: 'now', platforms: ['x86_64·linux', 'aarch64·linux'], sort: 11 },
+    { name: 'nodejs_15', attr: 'nodejs_15', version: '15.14.0', description: 'Event-driven I/O framework for the V8 JavaScript engine', license: 'MIT', hash: 'd719f8c0', first: 'Mar 2021', last: 'Jul 2021', platforms: ['x86_64·linux'], legacy: true, sort: 12 },
+  ],
+  history: {
+    python27: [
+      { version: '2.7.18', first: '2020-05-01', last: '2022-05-03' },
+      { version: '2.7.17', first: '2019-10-15', last: '2020-04-30', insecure: true },
+      { version: '2.7.16', first: '2019-03-01', last: '2019-10-14' },
+      { version: '2.7.15', first: '2018-06-01', last: '2019-02-28' },
+      { version: '2.7.13', first: '2017-01-10', last: '2018-05-31' },
+    ],
+    _default: [
+      { version: '3.11.9', first: '2024-04-02', last: '2024-12-01' },
+      { version: '3.11.6', first: '2023-10-01', last: '2024-04-01' },
+      { version: '3.11.4', first: '2023-06-15', last: '2023-09-30' },
+      { version: '3.11.0', first: '2022-10-24', last: '2023-06-14' },
+    ],
+  },
+};
+
+</script>
+</head>
+<body>
+<div id="root" data-nxv-kit="search-app"></div>
+<script type="text/babel">
+/* nxv search web app — UI kit recreation in the Blueprint design.
+   Composes the design-system components; no primitive is re-implemented. */
+const NX = window.NxvDesignSystem_0fa7ce;
+const { Button, Chip, Kbd, StatusPill, Panel, Metric, SegmentedToggle,
+        SearchPrompt, Terminal, PackageRow, PackageCard, VersionTimeline,
+        ActivityBars, Toast, CommandPalette, Pagination } = NX;
+const DATA = window.NXV_DATA;
+
+const IC = {
+  search: <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>,
+  gh: <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.63-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58C20.56 21.8 24 17.3 24 12 24 5.37 18.63 0 12 0z"/></svg>,
+};
+
+function Header({ onPalette }) {
+  const link = { fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-muted)', padding: '7px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer' };
+  const active = { ...link, color: 'var(--text-heading)', background: 'var(--nix-wash)' };
+  return (
+    <header style={{ position: 'sticky', top: 0, zIndex: 40, backdropFilter: 'var(--blur-nav)', background: 'oklch(0.15 0.022 264 / 0.72)', borderBottom: '1px solid var(--border-subtle)' }}>
+      <div style={{ maxWidth: 1240, margin: '0 auto', padding: '0 40px', height: 64, display: 'flex', alignItems: 'center', gap: 24 }}>
+        <a style={{ display: 'flex', alignItems: 'center', gap: 11, textDecoration: 'none' }} href="#">
+          <img src="../../assets/nix-snowflake.svg" width="26" height="26" alt="" />
+          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 16, letterSpacing: '-.02em', color: 'var(--text-heading)' }}>nxv</span>
+        </a>
+        <nav style={{ display: 'flex', gap: 4 }}>
+          <a style={active}>search</a><a style={link}>stats</a><a style={link}>api</a><a style={link}>cli</a>
+        </nav>
+        <span style={{ flex: 1 }} />
+        <button onClick={onPalette} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '7px 11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12, cursor: 'pointer' }}>
+          {IC.search}<span>jump to…</span><Kbd>⌘K</Kbd>
+        </button>
+        <StatusPill tone="ok">api operational · p50 34ms</StatusPill>
+        <a href="https://github.com/utensils/nxv" style={{ color: 'var(--text-muted)', display: 'flex' }} aria-label="GitHub">{IC.gh}</a>
+      </div>
+    </header>
+  );
+}
+
+function Hero({ q, setQ, run, filters, cycle, examples }) {
+  return (
+    <section style={{ paddingTop: 52, paddingBottom: 8 }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, letterSpacing: '.22em', textTransform: 'uppercase', color: 'var(--accent)', marginBottom: 20 }}>// nix version index &nbsp;·&nbsp; v0.6.2</div>
+      <h1 style={{ fontFamily: 'var(--font-mono)', fontSize: 46, lineHeight: 1.04, letterSpacing: '-.045em', fontWeight: 700, color: 'var(--text-heading)', margin: 0, maxWidth: 760 }}>
+        Every version of every <span style={{ color: 'var(--accent)' }}>nix package</span>, indexed since 2017.
+      </h1>
+      <p style={{ marginTop: 20, fontSize: 17, lineHeight: 1.55, color: 'var(--text)', maxWidth: 620 }}>
+        Find the exact <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-heading)' }}>nixpkgs</span> commit for the version you need — query locally, via the CLI, or against <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-heading)' }}>nxv&nbsp;serve</span>.
+      </p>
+      <div style={{ marginTop: 28 }}>
+        <SearchPrompt value={q} onChange={setQ} onSubmit={run} button />
+      </div>
+      <div style={{ marginTop: 14, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+        <Chip tone={filters.exact ? 'active' : 'default'} onClick={() => cycle('exact')}>exact: {filters.exact ? 'on' : 'off'}</Chip>
+        <Chip tone={filters.sort !== 'relevance' ? 'active' : 'default'} onClick={() => cycle('sort')}>sort: {filters.sort}</Chip>
+        <Chip tone={filters.insecure ? 'active' : 'default'} onClick={() => cycle('insecure')}>include insecure: {filters.insecure ? 'yes' : 'no'}</Chip>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-subtle)' }}>try:</span>
+        {examples.map((e) => <Chip key={e} onClick={() => run(e)}>{e}</Chip>)}
+      </div>
+      <div style={{ marginTop: 40, display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14 }}>
+        <Metric value={DATA.stats.packages} label="packages" />
+        <Metric value={DATA.stats.versions} label="versions" />
+        <Metric value={DATA.stats.commits} label="commits" />
+        <Metric value={DATA.stats.history} label="of history" />
+      </div>
+    </section>
+  );
+}
+
+function Results({ rows, view, setView, onCopy, onHistory, latency }) {
+  return (
+    <section style={{ marginTop: 40 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, height: 34, fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)' }}>
+        <span style={{ color: 'var(--text-strong)' }}>results / {rows.length}</span>
+        <span style={{ color: 'var(--ink-500)' }}>│</span>
+        <span>{latency}s · local</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ color: 'var(--text-subtle)' }}>view:</span>
+        <SegmentedToggle options={[{ value: 'rows', label: 'rows' }, { value: 'cards', label: 'cards' }]} value={view} onChange={setView} />
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ padding: '64px 0', textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-subtle)' }}>
+          no results — try loosening filters, or press <Kbd>⌘K</Kbd> to browse.
+        </div>
+      ) : view === 'rows' ? (
+        <div style={{ marginTop: 10, border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', background: 'var(--surface-glass)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px,1.6fr) 100px minmax(200px,2fr) 120px 90px', gap: 16, padding: '9px 20px', borderBottom: '1px solid var(--border-strong)', fontFamily: 'var(--font-mono)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)' }}>
+            <span>package · attr</span><span>version</span><span>description</span><span>first seen</span><span style={{ textAlign: 'right' }}>actions</span>
+          </div>
+          {rows.map((p) => <PackageRow key={p.attr} pkg={p} onCopy={onCopy} onHistory={onHistory} />)}
+        </div>
+      ) : (
+        <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 12 }}>
+          {rows.map((p) => <PackageCard key={p.attr} pkg={p} onCopyFlake={onCopy} onCopyRun={onCopy} onHistory={onHistory} />)}
+        </div>
+      )}
+      {rows.length > 0 && <div style={{ marginTop: 18 }}><Pagination page={1} pageSize={50} total={rows.length} /></div>}
+    </section>
+  );
+}
+
+function StatsRow() {
+  const cell = { fontFamily: 'var(--font-mono)', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.1em', color: 'var(--text-subtle)' };
+  return (
+    <section style={{ marginTop: 56, display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 14 }}>
+      <Panel pad="md" radius="lg">
+        <div style={cell}>activity · 30m</div>
+        <div style={{ marginTop: 14 }}><ActivityBars data={DATA.activity} /></div>
+        <div style={{ marginTop: 12, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--ok)' }}>uptime 6d 4h · 124,918 reqs</div>
+      </Panel>
+      <Panel pad="md" radius="lg">
+        <div style={cell}>latency · p50 / p95 / p99</div>
+        <div style={{ marginTop: 14, fontFamily: 'var(--font-mono)', fontSize: 28, color: 'var(--text-heading)', fontFeatureSettings: "'zero' 1" }}>
+          34<span style={{ color: 'var(--text-subtle)', fontSize: 15 }}>ms</span> <span style={{ color: 'var(--ink-500)', fontSize: 15 }}>/</span> 112<span style={{ color: 'var(--text-subtle)', fontSize: 15 }}>ms</span> <span style={{ color: 'var(--ink-500)', fontSize: 15 }}>/</span> 287<span style={{ color: 'var(--text-subtle)', fontSize: 15 }}>ms</span>
+        </div>
+        <div style={{ marginTop: 16, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: 'var(--text-muted)' }}>bloom hit rate · <span style={{ color: 'var(--text-heading)' }}>97.2%</span></div>
+      </Panel>
+      <Panel pad="md" radius="lg">
+        <div style={cell}>self-host</div>
+        <div style={{ marginTop: 14, fontFamily: 'var(--font-mono)', fontSize: 12.5, color: 'var(--text)', lineHeight: 1.7 }}>nix run github:utensils/nxv \<br />&nbsp;&nbsp;-- serve --host 0.0.0.0</div>
+        <div style={{ marginTop: 16 }}><Button variant="ghost" size="sm" style={{ width: '100%' }}>read the guide →</Button></div>
+      </Panel>
+    </section>
+  );
+}
+
+function Drawer({ pkg, onClose, onCopy }) {
+  if (!pkg) return null;
+  const versions = DATA.history[pkg.attr] || DATA.history._default;
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 60, display: 'flex', justifyContent: 'flex-end' }}>
+      <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'var(--overlay)', backdropFilter: 'var(--blur-overlay)' }} />
+      <div role="dialog" aria-modal="true" style={{ position: 'relative', width: '100%', maxWidth: 560, height: '100%', background: 'var(--surface-raised)', borderLeft: '1px solid var(--border-strong)', overflowY: 'auto', boxShadow: 'var(--shadow-lg)' }}>
+        <div style={{ position: 'sticky', top: 0, background: 'var(--surface-raised)', padding: '18px 26px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'flex-start', gap: 16 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)' }}>version history</div>
+            <h2 style={{ margin: '5px 0 0', fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 600, color: 'var(--text-heading)' }}>{pkg.name} · {pkg.attr}</h2>
+            <div style={{ marginTop: 3, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>{pkg.description}</div>
+          </div>
+          <Button size="sm" variant="ghost" onClick={onClose}>esc ✕</Button>
+        </div>
+        <div style={{ padding: '20px 26px', borderBottom: '1px solid var(--border-subtle)' }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)', marginBottom: 12 }}>timeline</div>
+          <VersionTimeline versions={versions} />
+        </div>
+        <div style={{ padding: '20px 26px' }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)', marginBottom: 12 }}>all versions <span style={{ color: 'var(--text-muted)' }}>({versions.length})</span></div>
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {versions.map((v) => (
+              <li key={v.version} style={{ display: 'grid', gridTemplateColumns: 'minmax(90px,auto) 1fr auto', gap: 16, alignItems: 'center', padding: '9px 12px', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: v.insecure ? 'var(--danger)' : 'var(--text-heading)', fontFeatureSettings: "'zero' 1" }}>{v.version}</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>{v.first} <span style={{ color: 'var(--ink-500)', margin: '0 8px' }}>→</span> {v.last}</span>
+                <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {v.insecure && <Chip tone="danger" size="sm">insecure</Chip>}
+                  <Button size="sm" variant="ghost" onClick={() => onCopy(pkg)}>copy</Button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Palette() { return null; } // superseded by NX.CommandPalette
+
+function App() {
+  const [q, setQ] = React.useState('python');
+  const [filters, setFilters] = React.useState({ exact: false, sort: 'relevance', insecure: true });
+  const [view, setView] = React.useState('rows');
+  const [drawer, setDrawer] = React.useState(null);
+  const [palette, setPalette] = React.useState(false);
+  const [toast, setToast] = React.useState('');
+
+  React.useEffect(() => {
+    const h = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setPalette(true); }
+      if (e.key === 'Escape') { setPalette(false); setDrawer(null); }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
+
+  const cycle = (key) => setFilters((f) => {
+    if (key === 'sort') { const o = ['relevance', 'date', 'name', 'version']; return { ...f, sort: o[(o.indexOf(f.sort) + 1) % o.length] }; }
+    return { ...f, [key]: !f[key] };
+  });
+
+  const run = (val) => { if (typeof val === 'string') setQ(val); };
+
+  const paletteItems = ['python', 'nodejs', 'ruby', 'gcc', 'postgresql', 'ffmpeg'].map((p) => ({ label: p, hint: 'popular package', icon: IC.search, onSelect: () => run(p) }));
+
+  const showToast = (pkg) => {
+    setToast(`copied · nix shell nixpkgs/${(pkg.hash || '').slice(0, 7)}#${pkg.attr}`);
+    clearTimeout(window._nxvT); window._nxvT = setTimeout(() => setToast(''), 1900);
+  };
+
+  const rows = React.useMemo(() => {
+    let r = DATA.packages;
+    const term = q.trim().toLowerCase();
+    if (term) r = r.filter((p) => (filters.exact ? p.attr.toLowerCase() === term || p.name.toLowerCase() === term : (p.name + ' ' + p.attr + ' ' + p.description).toLowerCase().includes(term)));
+    if (!filters.insecure) r = r.filter((p) => !p.insecure);
+    r = [...r];
+    if (filters.sort === 'name') r.sort((a, b) => a.name.localeCompare(b.name));
+    else if (filters.sort === 'version') r.sort((a, b) => b.version.localeCompare(a.version));
+    else r.sort((a, b) => a.sort - b.sort);
+    return r;
+  }, [q, filters]);
+
+  return (
+    <div style={{ minHeight: '100vh', position: 'relative' }}>
+      <div style={{ position: 'fixed', inset: 0, backgroundImage: 'var(--grid-image)', backgroundSize: 'var(--grid-cell) var(--grid-cell)', pointerEvents: 'none', zIndex: 0, WebkitMaskImage: 'radial-gradient(ellipse 100% 70% at 50% 0%, #000 30%, transparent 72%)', maskImage: 'radial-gradient(ellipse 100% 70% at 50% 0%, #000 30%, transparent 72%)' }} />
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        <Header onPalette={() => setPalette(true)} />
+        <main style={{ maxWidth: 1240, margin: '0 auto', padding: '0 40px 96px' }}>
+          <Hero q={q} setQ={setQ} run={run} filters={filters} cycle={cycle} examples={['python 2.7', 'nodejs 18', 'gcc 4.9', 'ffmpeg 5']} />
+          <Results rows={rows} view={view} setView={setView} onCopy={showToast} onHistory={setDrawer} latency={(0.008 + Math.random() * 0.02).toFixed(3)} />
+          <StatsRow />
+        </main>
+      </div>
+      <Drawer pkg={drawer} onClose={() => setDrawer(null)} onCopy={showToast} />
+      <CommandPalette open={palette} onClose={() => setPalette(false)} onSubmit={run} items={paletteItems} />
+      <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 80 }}><Toast open={!!toast}>{toast || ' '}</Toast></div>
+    </div>
+  );
+}
+
+const _root = document.getElementById('root');
+if (_root && _root.dataset.nxvKit === 'search-app' && !_root._nxvMounted) {
+  _root._nxvMounted = true;
+  ReactDOM.createRoot(_root).render(<App />);
+}
+
+</script>
+</body>
+</html>

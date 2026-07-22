@@ -1,0 +1,11 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic status" subtitle="ok · warn · danger, solid + wash" -->
+<!doctype html><html><head><meta charset="UTF-8"><link rel="stylesheet" href="../styles.css">
+<style>html,body{margin:0}body{background:var(--surface-page);font-family:var(--font-mono);padding:20px;display:flex;gap:12px}
+.col{flex:1;display:flex;flex-direction:column;gap:8px}
+.solid{height:52px;border-radius:var(--radius-md);display:flex;align-items:flex-end;padding:8px 10px;font-size:11px;color:#0b1020;font-weight:700}
+.wash{height:32px;border-radius:var(--radius-sm);display:flex;align-items:center;padding:0 10px;font-size:10.5px;border:1px solid}</style></head>
+<body>
+<div class="col"><div class="solid" style="background:var(--green)">--green</div><div class="wash" style="background:var(--green-wash);border-color:oklch(0.78 0.15 155/.45);color:var(--green)">ok · operational</div></div>
+<div class="col"><div class="solid" style="background:var(--amber)">--amber</div><div class="wash" style="background:var(--amber-wash);border-color:oklch(0.78 0.14 80/.5);color:var(--amber)">warn · pre-flakes</div></div>
+<div class="col"><div class="solid" style="background:var(--red)">--red</div><div class="wash" style="background:var(--red-wash);border-color:oklch(0.66 0.19 25/.55);color:var(--red)">danger · insecure</div></div>
+</body></html>

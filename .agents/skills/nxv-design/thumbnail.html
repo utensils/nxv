@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="styles.css">
+<style>
+html,body{margin:0}
+body{width:1280px;height:854px;display:flex;overflow:hidden;font-family:var(--font-mono)}
+.main{flex:1;background:var(--ink-850);position:relative;display:flex;align-items:center;justify-content:center}
+.main::before{content:'';position:absolute;inset:0;background-image:var(--grid-image);background-size:64px 64px;
+  -webkit-mask-image:radial-gradient(ellipse 80% 80% at 50% 50%,#000 25%,transparent 75%);mask-image:radial-gradient(ellipse 80% 80% at 50% 50%,#000 25%,transparent 75%)}
+.lock{position:relative;display:flex;flex-direction:column;align-items:center;gap:34px}
+.lock img{width:300px;filter:drop-shadow(0 0 90px oklch(0.55 0.17 262/.6))}
+.wm{font-size:150px;font-weight:700;letter-spacing:-.05em;color:var(--fog-0);line-height:1}
+.strip{width:150px;display:flex;flex-direction:column}
+.strip div{flex:1}
+</style>
+</head>
+<body>
+<div class="main"><div class="lock"><img src="assets/nix-snowflake.svg" alt=""><div class="wm">nxv</div></div></div>
+<div class="strip">
+  <div style="background:var(--nix-300)"></div>
+  <div style="background:var(--green)"></div>
+  <div style="background:var(--nix-500)"></div>
+  <div style="background:var(--nix-700)"></div>
+</div>
+</body>
+</html>

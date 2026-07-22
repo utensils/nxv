@@ -1,0 +1,234 @@
+<!-- @dsCard group="Docs Site" viewport="1280x760" name="Documentation site" subtitle="VitePress-style docs — Blueprint redesign" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nxv docs — Find any version of any Nix package, instantly.</title>
+<link rel="icon" type="image/svg+xml" href="../../assets/nix-snowflake.svg">
+<link rel="stylesheet" href="../../styles.css">
+<style>
+html,body{margin:0}
+body{background:var(--surface-page);color:var(--text);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+::selection{background:var(--selection);color:var(--fog-0)}
+a{color:var(--link)}a:hover{color:var(--link-hover)}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:var(--ink-600);border:2px solid var(--surface-page);border-radius:6px}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+</head>
+<body>
+<div id="root" data-nxv-kit="docs-site"></div>
+<script type="text/babel">
+/* nxv documentation site — UI kit recreation in the Blueprint design.
+   A VitePress-style docs shell (top nav + sidebar + article + on-this-page)
+   composing the design-system components. Content lifted from the real
+   utensils/nxv docs. */
+const NX = window.NxvDesignSystem_0fa7ce;
+const { Button, Chip, Kbd, StatusPill, Panel, Callout, Terminal } = NX;
+
+const SLOGAN = 'Find any version of any Nix package, instantly.';
+
+const IC = {
+  search: <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>,
+  gh: <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.33-1.76-1.33-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.81 5.63-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58C20.56 21.8 24 17.3 24 12 24 5.37 18.63 0 12 0z"/></svg>,
+};
+
+/* --- docs-kit-local layout pieces (not DS primitives) --- */
+function CodeBlock({ lang = 'bash', children }) {
+  return (
+    <div style={{ position: 'relative', margin: '18px 0', background: 'var(--surface-code)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)' }}>
+      <span style={{ position: 'absolute', top: 10, right: 14, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--text-subtle)' }}>{lang}</span>
+      <pre style={{ margin: 0, padding: '18px 20px', fontFamily: 'var(--font-mono)', fontSize: 13, lineHeight: 1.8, color: 'var(--text)', whiteSpace: 'pre-wrap', overflowX: 'auto' }}>{children}</pre>
+    </div>
+  );
+}
+const H2 = ({ children }) => <h2 style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--text-heading)', margin: '40px 0 14px', paddingtop: 8 }}>{children}</h2>;
+const H3 = ({ children }) => <h3 style={{ fontFamily: 'var(--font-mono)', fontSize: 16, fontWeight: 600, color: 'var(--text-heading)', margin: '28px 0 10px' }}>{children}</h3>;
+const P = ({ children }) => <p style={{ fontSize: 16, lineHeight: 1.7, color: 'var(--text)', margin: '0 0 14px', maxWidth: 720 }}>{children}</p>;
+const Code = ({ children }) => <code style={{ fontFamily: 'var(--font-mono)', fontSize: '.88em', color: 'var(--nix-300)', background: 'var(--nix-wash)', padding: '1px 6px', borderRadius: 5 }}>{children}</code>;
+function Table({ head, rows }) {
+  return (
+    <div style={{ margin: '18px 0', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: head.map(() => '1fr').join(' '), background: 'var(--surface-raised)', borderBottom: '1px solid var(--border-strong)' }}>
+        {head.map((h, i) => <div key={i} style={{ padding: '10px 16px', fontFamily: 'var(--font-mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.08em', color: 'var(--text-subtle)' }}>{h}</div>)}
+      </div>
+      {rows.map((r, ri) => (
+        <div key={ri} style={{ display: 'grid', gridTemplateColumns: head.map(() => '1fr').join(' '), borderBottom: ri < rows.length - 1 ? '1px solid var(--border-subtle)' : 0 }}>
+          {r.map((c, ci) => <div key={ci} style={{ padding: '11px 16px', fontSize: 13.5, color: ci === 0 ? 'var(--text-heading)' : 'var(--text-muted)', fontFamily: ci === 0 ? 'var(--font-mono)' : 'var(--font-sans)' }}>{c}</div>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* --- content model (from the real utensils/nxv docs) --- */
+const NAV = [
+  { group: 'Introduction', items: [{ id: 'start', label: 'Getting Started' }, { id: 'install', label: 'Installation' }] },
+  { group: 'Usage', items: [{ id: 'cli', label: 'CLI Reference' }] },
+  { group: 'Reference', items: [{ id: 'api', label: 'HTTP API' }] },
+];
+
+const PAGES = {
+  start: {
+    crumb: 'Guide', title: 'Getting Started', toc: ['Quick start', 'What you get', 'How it works'],
+    body: () => (<>
+      <P>nxv helps you find specific versions of Nix packages across nixpkgs history. Whether you need to pin a dependency to an older version or find when a package was introduced, nxv makes it fast and easy — <strong style={{ color: 'var(--text-heading)' }}>{SLOGAN}</strong></P>
+      <Callout tone="tip">Try without installing — use the public web interface at <Code>nxv.urandom.io</Code>, no installation required.</Callout>
+      <H2>Quick start</H2>
+      <H3>Run directly (no install)</H3>
+      <CodeBlock><span style={{ color: 'var(--text-muted)' }}># Run directly via Nix flakes — nothing persisted{'\n'}</span>nix run github:utensils/nxv -- search python</CodeBlock>
+      <H3>Install via shell script</H3>
+      <CodeBlock>curl -fsSL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh{'\n'}nxv update              <span style={{ color: 'var(--text-muted)' }}># downloads ~220MB index</span>{'\n'}nxv search python</CodeBlock>
+      <H2>What you get</H2>
+      <P>For each package version, nxv provides version history (when each version was first and last available), exact <Code>nixpkgs</Code> commit hashes for reproducibility, ready-to-run <Code>nix shell</Code> commands pinned to the right commit, and security info — CVE warnings and insecure-package markers.</P>
+      <H2>How it works</H2>
+      <P>nxv uses a pre-built SQLite index containing ~1.77 million version records across ~139,000 package attributes, package metadata, and a Bloom filter for instant "not found" responses. The index is downloaded once and searched locally, so queries are fast and work offline.</P>
+    </>),
+  },
+  install: {
+    crumb: 'Guide', title: 'Installation', toc: ['Quick install', 'Cargo', 'Nix', 'Pre-built binaries'],
+    body: () => (<>
+      <P>{SLOGAN} Pick the install path that fits your setup — all of them get you a working <Code>nxv</Code> binary.</P>
+      <H2>Quick install</H2>
+      <CodeBlock>curl -sSfL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh</CodeBlock>
+      <P>Installs a pre-built binary to <Code>~/.local/bin</Code>. Set <Code>NXV_VERIFY=1</Code> to enforce checksum verification against GitHub Releases.</P>
+      <H2>Cargo</H2>
+      <CodeBlock>cargo install nxv</CodeBlock>
+      <H2>Nix</H2>
+      <CodeBlock><span style={{ color: 'var(--text-muted)' }}># run directly{'\n'}</span>nix run github:utensils/nxv -- search python{'\n'}<span style={{ color: 'var(--text-muted)' }}># install to profile{'\n'}</span>nix profile install github:utensils/nxv</CodeBlock>
+      <Callout tone="warn" title="HEADS UP">The first <Code>nxv update</Code> downloads a ~220MB compressed index. Subsequent runs are incremental.</Callout>
+      <H2>Pre-built binaries</H2>
+      <Table head={['Platform', 'Binary']} rows={[['linux-x86_64', 'nxv-x86_64-linux-musl (static)'], ['linux-aarch64', 'nxv-aarch64-linux-musl (static)'], ['macos-x86_64', 'nxv-x86_64-apple-darwin'], ['macos-arm', 'nxv-aarch64-apple-darwin']]} />
+    </>),
+  },
+  cli: {
+    crumb: 'Usage', title: 'CLI Reference', toc: ['search', 'info', 'history', 'serve'],
+    body: () => (<>
+      <P>Complete documentation for the core nxv commands. {SLOGAN}</P>
+      <H2>search</H2>
+      <P>Search for packages by name, version, or description.</P>
+      <CodeBlock>nxv search python              <span style={{ color: 'var(--text-muted)' }}># all python packages</span>{'\n'}nxv search python 2.7          <span style={{ color: 'var(--text-muted)' }}># filter by version prefix</span>{'\n'}nxv search python --exact      <span style={{ color: 'var(--text-muted)' }}># exact name match</span>{'\n'}nxv search "json parser" --desc</CodeBlock>
+      <Table head={['Flag', 'Description']} rows={[['-e, --exact', 'Exact name match only'], ['--desc', 'Search descriptions (full-text)'], ['--sort <order>', 'relevance · date · version · name'], ['-f, --format', 'table · json · plain']]} />
+      <H2>info</H2>
+      <P>Show detailed information about a specific package version. Resolves the package as an exact attribute path first, so it needs no <Code>--exact</Code> flag.</P>
+      <CodeBlock>nxv info python311{'\n'}nxv info python311 3.11.4</CodeBlock>
+      <H2>history</H2>
+      <P>Show the version timeline for a package — when each version was first and last available.</P>
+      <CodeBlock>nxv history python311</CodeBlock>
+      <H2>serve</H2>
+      <P>Start the HTTP API server with a built-in web interface.</P>
+      <CodeBlock>nxv serve                                    <span style={{ color: 'var(--text-muted)' }}># localhost:8080</span>{'\n'}nxv serve --host 0.0.0.0 --port 3000 --cors</CodeBlock>
+    </>),
+  },
+  api: {
+    crumb: 'Reference', title: 'HTTP API', toc: ['Response wrapper', 'Search', 'Version history', 'Errors'],
+    body: () => (<>
+      <P>nxv includes a REST API server for programmatic access. A public instance is available at <Code>nxv.urandom.io/api/v1</Code>. {SLOGAN}</P>
+      <Callout tone="tip">Try it now — <Code>curl "https://nxv.urandom.io/api/v1/search?q=python&limit=5"</Code></Callout>
+      <H2>Response wrapper</H2>
+      <P>All list responses use a standard wrapper with a <Code>data</Code> array and a <Code>meta</Code> object.</P>
+      <CodeBlock lang="json">{`{ "data": [ ... ], "meta": { "total": 42, "limit": 50, "offset": 0, "has_more": false } }`}</CodeBlock>
+      <H2>Search</H2>
+      <Table head={['Endpoint', 'Description']} rows={[['GET /search', 'Search packages by name/version'], ['GET /search/description', 'Full-text description search'], ['GET /packages/{attr}', 'All version records'], ['GET /packages/{attr}/history', 'Version history']]} />
+      <H2>Version history</H2>
+      <CodeBlock lang="bash">curl "http://localhost:8080/api/v1/packages/python311/history"</CodeBlock>
+      <H2>Errors</H2>
+      <Table head={['Code', 'Meaning']} rows={[['200', 'Success'], ['400', 'Bad request'], ['404', 'Not found'], ['429', 'Rate limited']]} />
+    </>),
+  },
+};
+
+function TopBar({ page, setPage, dark, setDark }) {
+  const link = (id, label) => (
+    <span key={id} onClick={() => setPage(id)} style={{ fontSize: 14, fontWeight: 500, color: page === id ? 'var(--text-heading)' : 'var(--text-muted)', cursor: 'pointer', padding: '6px 2px' }}>{label}</span>
+  );
+  return (
+    <header style={{ position: 'sticky', top: 0, zIndex: 40, height: 60, backdropFilter: 'var(--blur-nav)', background: 'oklch(0.15 0.022 264 / 0.8)', borderBottom: '1px solid var(--border-subtle)' }}>
+      <div style={{ maxWidth: 1280, margin: '0 auto', padding: '0 32px', height: '100%', display: 'flex', alignItems: 'center', gap: 28 }}>
+        <a onClick={() => setPage('start')} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+          <img src="../../assets/nix-snowflake.svg" width="26" height="26" alt="" />
+          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 16, letterSpacing: '-.02em', color: 'var(--text-heading)' }}>nxv</span>
+        </a>
+        <nav style={{ display: 'flex', gap: 22 }}>{link('start', 'Guide')}{link('api', 'API')}{link('cli', 'Advanced')}</nav>
+        <span style={{ flex: 1 }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, height: 34, padding: '0 10px 0 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', color: 'var(--text-subtle)', fontFamily: 'var(--font-mono)', fontSize: 12.5, minWidth: 190 }}>
+          {IC.search}<span style={{ flex: 1 }}>Search docs…</span><Kbd>⌘K</Kbd>
+        </div>
+        <StatusPill tone="ok">v0.6.2</StatusPill>
+        <a href="https://github.com/utensils/nxv" style={{ color: 'var(--text-muted)', display: 'flex' }} aria-label="GitHub">{IC.gh}</a>
+      </div>
+    </header>
+  );
+}
+
+function Sidebar({ page, setPage }) {
+  return (
+    <aside style={{ width: 250, flex: 'none', borderRight: '1px solid var(--border-subtle)', padding: '32px 24px', position: 'sticky', top: 60, alignSelf: 'flex-start', height: 'calc(100vh - 60px)', overflowY: 'auto' }}>
+      {NAV.map((g) => (
+        <div key={g.group} style={{ marginBottom: 24 }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)', marginBottom: 10 }}>{g.group}</div>
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {g.items.map((it) => {
+              const active = page === it.id;
+              return (
+                <li key={it.id} onClick={() => setPage(it.id)} style={{ fontSize: 14, padding: '6px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer', color: active ? 'var(--nix-300)' : 'var(--text-muted)', background: active ? 'var(--nix-wash)' : 'transparent', borderLeft: active ? '2px solid var(--accent-solid)' : '2px solid transparent' }}>{it.label}</li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+    </aside>
+  );
+}
+
+function Toc({ items }) {
+  return (
+    <aside style={{ width: 200, flex: 'none', padding: '40px 24px', position: 'sticky', top: 60, alignSelf: 'flex-start', height: 'calc(100vh - 60px)' }}>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.12em', color: 'var(--text-subtle)', marginBottom: 12 }}>On this page</div>
+      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 8, borderLeft: '1px solid var(--border-subtle)' }}>
+        {items.map((t, i) => <li key={t} style={{ fontSize: 13, paddingLeft: 14, color: i === 0 ? 'var(--nix-300)' : 'var(--text-muted)', borderLeft: i === 0 ? '1px solid var(--accent-solid)' : 'none', marginLeft: -1, cursor: 'pointer' }}>{t}</li>)}
+      </ul>
+    </aside>
+  );
+}
+
+function App() {
+  const [page, setPage] = React.useState('start');
+  const ids = Object.keys(PAGES);
+  const idx = ids.indexOf(page);
+  const p = PAGES[page];
+  return (
+    <div style={{ minHeight: '100vh', position: 'relative' }}>
+      <div style={{ position: 'fixed', inset: 0, backgroundImage: 'var(--grid-image)', backgroundSize: 'var(--grid-cell) var(--grid-cell)', pointerEvents: 'none', zIndex: 0, WebkitMaskImage: 'radial-gradient(ellipse 90% 40% at 30% 0%, #000 20%, transparent 70%)', maskImage: 'radial-gradient(ellipse 90% 40% at 30% 0%, #000 20%, transparent 70%)' }} />
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        <TopBar page={page} setPage={setPage} />
+        <div style={{ maxWidth: 1280, margin: '0 auto', display: 'flex' }}>
+          <Sidebar page={page} setPage={setPage} />
+          <main style={{ flex: 1, minWidth: 0, padding: '40px 48px 80px' }}>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, letterSpacing: '.14em', textTransform: 'uppercase', color: 'var(--accent)', marginBottom: 12 }}>// {p.crumb}</div>
+            <h1 style={{ fontSize: 42, fontWeight: 700, letterSpacing: '-.03em', color: 'var(--text-heading)', margin: '0 0 20px' }}>{p.title}</h1>
+            {p.body()}
+            <div style={{ marginTop: 48, paddingTop: 24, borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between' }}>
+              <div>{idx > 0 && <Button variant="ghost" onClick={() => setPage(ids[idx - 1])}>← {PAGES[ids[idx - 1]].title}</Button>}</div>
+              <div>{idx < ids.length - 1 && <Button variant="ghost" onClick={() => setPage(ids[idx + 1])}>{PAGES[ids[idx + 1]].title} →</Button>}</div>
+            </div>
+          </main>
+          <Toc items={p.toc} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const _root = document.getElementById('root');
+if (_root && _root.dataset.nxvKit === 'docs-site' && !_root._nxvMounted) {
+  _root._nxvMounted = true;
+  ReactDOM.createRoot(_root).render(<App />);
+}
+
+</script>
+</body>
+</html>
