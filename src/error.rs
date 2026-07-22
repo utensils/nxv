@@ -9,10 +9,10 @@ pub enum NxvError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
-    #[error("No index found. Run 'nxv update' to download the package index.")]
+    #[error("No index found. Run 'nxv sync' to download the package index.")]
     NoIndex,
 
-    #[error("Index is corrupted: {0}. Run 'nxv update --force' to re-download.")]
+    #[error("Index is corrupted: {0}. Run 'nxv sync --force' to re-download.")]
     CorruptIndex(String),
 
     #[error("Incompatible index: {0}")]
@@ -73,7 +73,7 @@ mod tests {
     fn test_no_index_error_message() {
         let err = NxvError::NoIndex;
         let msg = err.to_string();
-        assert!(msg.contains("nxv update"));
+        assert!(msg.contains("nxv sync"));
         assert!(msg.contains("No index found"));
     }
 

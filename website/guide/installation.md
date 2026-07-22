@@ -127,7 +127,7 @@ cargo build --release
 After installation, download the package index:
 
 ```bash
-nxv update
+nxv sync
 ```
 
 This downloads ~220MB of compressed data to your local data directory:
@@ -135,11 +135,10 @@ This downloads ~220MB of compressed data to your local data directory:
 - **Linux**: `~/.local/share/nxv/`
 - **macOS**: `~/Library/Application Support/nxv/`
 
-The index is republished every 6 hours. Run `nxv update` periodically to get the
+The index is republished every 6 hours. Run `nxv sync` periodically to get the
 latest packages.
 
-After refreshing the index, `nxv update` also checks GitHub for a newer nxv
-release. Local installs (install.sh, manual download) are upgraded in place
-after SHA-256 verification; managed installs (Nix, cargo, Homebrew) just get the
-matching upgrade command printed. Pass `--no-self-update` to skip the binary
-check.
+Run `nxv update` separately to update the application. Local installs
+(install.sh, manual download) are upgraded in place after SHA-256 verification;
+managed installs (Nix, cargo, Homebrew) receive the matching upgrade command.
+Neither command implicitly runs the other.

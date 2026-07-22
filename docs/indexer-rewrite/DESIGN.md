@@ -178,7 +178,7 @@ CREATE INDEX idx_packages_search_nocase ON package_versions(
 - **meta**: `schema_version=4`. The indexer **keeps writing**
   `last_indexed_commit` (= newest ingested release commit) and
   `last_indexed_date` — they are load-bearing for `manifest.latest_commit`,
-  the `nxv update` UpToDate check, `/health`, `/api/v1/stats`, and the
+  the `nxv sync` UpToDate check, `/health`, `/api/v1/stats`, and the
   frontend stats panel. Planning watermarks derive from `releases`.
 - **Migration v3→v4 (local DBs)**: `dedupe_ranges()` (production DB has
   1,073 duplicate (attr,version) groups; without dedupe the new upsert fails
@@ -354,7 +354,7 @@ hidden no-op with a deprecation warning for one release cycle.
    `min_version` to SCHEMA_VERSION and refuses to publish a schema-4 DB
    with min_version unset or < 4** (today the doc claims this default but
    the code passes None — publishing v4 ungated would let every old
-   client's `nxv update` overwrite its working v3 index and then fail to
+   client's `nxv sync` overwrite its working v3 index and then fail to
    open it: verified landmine L1).
 2. **cmd_update fix**: on IncompatibleIndex, still run the self-update
    check before propagating, so old local-install binaries are told to (and

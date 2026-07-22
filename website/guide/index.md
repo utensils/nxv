@@ -26,8 +26,8 @@ nix run github:utensils/nxv -- search python
 # One-liner install (downloads static binary)
 curl -fsSL https://raw.githubusercontent.com/utensils/nxv/main/install.sh | sh
 
-# Update the package index (downloads ~220MB)
-nxv update
+# Download the package index (downloads ~220MB)
+nxv sync
 
 # Search for a package
 nxv search python

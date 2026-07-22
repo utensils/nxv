@@ -429,7 +429,7 @@ pub fn perform_update<P: AsRef<Path>>(
     )?;
 
     match &status {
-        // No output here: cmd_update reports the UpToDate status to the
+        // No output here: cmd_sync reports the UpToDate status to the
         // user (printing it here too produced a duplicate line).
         UpdateStatus::UpToDate { .. } => {}
         UpdateStatus::NoLocalIndex { .. } | UpdateStatus::FullDownloadNeeded { .. } => {

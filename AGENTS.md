@@ -50,7 +50,7 @@ nix run .#nxv-indexer            # Run with indexer feature
 
 ### Data Flow
 
-1. **Index Download** (`remote/`): User runs `nxv update` → downloads compressed SQLite DB + bloom filter from remote manifest
+1. **Index Download** (`remote/`): User runs `nxv sync` → downloads compressed SQLite DB + bloom filter from remote manifest
 2. **Search** (`db/queries.rs`): Queries go through bloom filter first (fast negative lookup), then SQLite with FTS5
 3. **Output** (`output/`): Results formatted as table (default), JSON, or plain text
 
@@ -60,7 +60,7 @@ The CLI transparently runs against either a local index or a remote `nxv serve` 
 
 ### Self-Update (`self_update.rs`)
 
-There is no standalone `self-update` subcommand — `nxv update` refreshes the index first, then checks GitHub for a newer nxv release. On local installs (install.sh, manual download) the binary is replaced atomically after SHA-256 verification against the release's SHA256SUMS.txt; on managed installs (Nix, cargo, Homebrew — detected from the executable path) it only prints the matching upgrade command. If the index refresh fails with an incompatible-index (schema too new) error, the self-update check still runs before exiting so users can recover. Skip with `--no-self-update` or `NXV_NO_SELF_UPDATE`. Note: `NXV_VERSION` is read only by `install.sh` to pin the installer download — the binary's self-update always targets the latest release.
+`nxv update` only checks for and installs the latest nxv application release. On local installs (install.sh, manual download) the binary is replaced atomically after SHA-256 verification against the release's SHA256SUMS.txt; on managed installs (Nix, cargo, Homebrew — detected from the executable path) it only prints the matching upgrade command. `nxv sync` independently downloads or refreshes the package index and never updates the application. An incompatible index tells users to update the application and retry the sync. Note: `NXV_VERSION` is read only by `install.sh` to pin the installer download — the binary's application update always targets the latest release.
 
 ### API Server (`server/`)
 
@@ -118,10 +118,9 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_API_URL` — point the CLI at a remote `nxv serve` instead of the local DB
 - `NXV_API_TIMEOUT` — HTTP client timeout in seconds (default 30)
 - `NXV_DB_PATH` — override local SQLite path
-- `NXV_MANIFEST_URL` — override the manifest URL for `nxv update`
+- `NXV_MANIFEST_URL` — override the manifest URL for `nxv sync`
 - `NXV_SKIP_VERIFY` — skip minisign verification of the manifest
 - `NXV_PUBLIC_KEY` — override the embedded minisign public key
-- `NXV_NO_SELF_UPDATE` — make `nxv update` only refresh the index, skipping the binary check
 - `NXV_VERSION` — pin the version `install.sh` downloads (not read by the binary itself)
 - `NXV_HOST`, `NXV_PORT`, `NXV_RATE_LIMIT`, `NXV_RATE_LIMIT_BURST` — `nxv serve` bind/host/rate-limit
 - `NXV_MAX_DB_CONNECTIONS`, `NXV_DB_TIMEOUT_SECS` — `nxv serve` DB concurrency cap (default 32) and per-operation timeout (default 30s)

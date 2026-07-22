@@ -251,36 +251,25 @@ pub fn cmd_install(cli: &Cli, args: &SkillInstallArgs) -> Result<()> {
 
     let agents: Vec<Agent> = if !args.agents.is_empty() {
         args.agents.clone()
+    } else if args.detected {
+        let home = dirs::home_dir().ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not determine the home directory needed for --detected; name agents explicitly instead"
+            )
+        })?;
+        let detected: Vec<Agent> = AGENTS
+            .iter()
+            .map(|spec| spec.agent)
+            .filter(|agent| *agent != Agent::Agents && agent.is_detected(&home))
+            .collect();
+        if detected.is_empty() {
+            anyhow::bail!("no supported agents were detected; name agents explicitly or use --all");
+        }
+        detected
     } else if args.all {
         AGENTS.iter().map(|s| s.agent).collect()
     } else {
-        match &scope {
-            Scope::User(home) => {
-                let detected: Vec<Agent> = AGENTS
-                    .iter()
-                    .map(|s| s.agent)
-                    .filter(|a| *a != Agent::Agents && a.is_detected(home))
-                    .collect();
-                if detected.is_empty() {
-                    if !cli.quiet {
-                        eprintln!(
-                            "No agents detected; installing to the generic ~/.agents/skills \
-                             directory. Pass agent names or --all to target specific agents."
-                        );
-                    }
-                    vec![Agent::Agents]
-                } else {
-                    detected
-                }
-            }
-            // The pair covers every supported agent at project level: the
-            // table above holds each agent's PRIMARY directory, but Copilot
-            // also reads .claude/skills and .agents/skills in a repository
-            // (docs.github.com "about-agent-skills") and Pi also reads
-            // .agents/skills (pi-mono docs/skills.md); everything else
-            // already points at .claude or .agents.
-            Scope::Project(_) => vec![Agent::Claude, Agent::Agents],
-        }
+        anyhow::bail!("name at least one agent, or pass --detected or --all");
     };
 
     let targets = dedupe_targets(&scope, &agents);

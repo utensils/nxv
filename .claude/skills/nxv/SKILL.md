@@ -21,11 +21,13 @@ nxv info python311 3.11.4                # Detailed info for specific version
 nxv history python311                    # Version timeline (first/last seen)
 nxv history python311 3.11.4             # When was 3.11.4 available?
 nxv stats                                # Index statistics
-nxv update                               # Refresh index + check for newer nxv binary
-nxv update --no-self-update              # Refresh index only (CI / systemd timers)
+nxv update                               # Update nxv itself to the latest release
+nxv sync                                 # Download or refresh the local package index
+nxv sync --force                         # Force a full index re-download
 nxv serve --host 0.0.0.0 --port 8080     # Start HTTP API + web UI
 nxv completions zsh                      # Generate shell completions
-nxv skill install                        # Install this skill for detected AI agents
+nxv skill install codex                  # Install this skill for one explicit agent
+nxv skill install --detected             # Install for detected AI agents
 nxv skill list                           # Agents, skill paths, install status
 ```
 
@@ -33,7 +35,7 @@ nxv skill list                           # Agents, skill paths, install status
 
 Parse `$ARGUMENTS` to determine the action:
 
-- If arguments look like a **subcommand** (`search`, `info`, `history`, `stats`, `update`, `serve`, `completions`, `skill`, and indexer-only `index`, `dedupe`, `publish`, `keygen`), run that subcommand.
+- If arguments look like a **subcommand** (`search`, `info`, `history`, `stats`, `update`, `sync`, `serve`, `completions`, `skill`, and indexer-only `index`, `dedupe`, `publish`, `keygen`), run that subcommand.
 - If arguments look like a **package name** (e.g. `python`, `nodejs 15`, `ruby 2.6`), default to `nxv search`.
 - If arguments look like a **question** ("when was X added", "which commit has Y"), pick `search` or `history` accordingly.
 - If no arguments, run `nxv stats` to give the user a quick health check of their index.
@@ -66,7 +68,7 @@ export NXV_API_URL=http://gpu-host:8080
 nxv search rust 1.70
 ```
 
-If `NXV_API_URL` is unset, the CLI uses the local index at `~/Library/Application Support/nxv/index.db` (macOS) or `~/.local/share/nxv/index.db` (Linux). Run `nxv update` to download the latest published index on first use.
+If `NXV_API_URL` is unset, the CLI uses the local index at `~/Library/Application Support/nxv/index.db` (macOS) or `~/.local/share/nxv/index.db` (Linux). Run `nxv sync` to download the latest published index on first use.
 
 ## Search
 
@@ -214,24 +216,27 @@ inputs.nixpkgs-python27.url = "github:NixOS/nixpkgs/<commit>";
 
 Pick `first_commit_hash` for the canonical "introduced in" commit; pick `last_commit_hash` if you want the most recent commit that still shipped that version.
 
-## Index Management
+## Application and Index Management
 
 ```bash
-nxv update                               # Refresh index + check for newer nxv binary
-nxv update --force                       # Force full re-download of the index
-nxv update --no-self-update              # Only refresh the index, leave binary alone
-nxv update --skip-verify                 # Skip minisign signature check (INSECURE)
-nxv update --public-key /path/key.pub    # Use a custom public key (self-hosted index)
-nxv update --manifest-url <URL>          # Use a custom manifest (self-hosted index)
+nxv update                               # Update the nxv application only
+nxv sync                                 # Download or refresh the package index only
+nxv sync --force                         # Force full re-download of the index
+nxv sync --skip-verify                   # Skip minisign signature check (INSECURE)
+nxv sync --public-key /path/key.pub      # Use a custom public key (self-hosted index)
+nxv sync --manifest-url <URL>            # Use a custom manifest (self-hosted index)
 nxv stats                                # Index size, commit range, last update
 ```
 
-`nxv update` always refreshes the package index first. Then it checks GitHub for a newer nxv release:
+`nxv update` only checks GitHub for the latest nxv release:
 
 - **Local install** (install.sh / manual download): downloads the platform binary, verifies SHA-256, atomically swaps the running executable.
 - **Nix / cargo / Homebrew**: prints the matching upgrade hint (e.g. `brew upgrade nxv`) and exits successfully.
 
-Set `NXV_NO_SELF_UPDATE=1` for CI/systemd timers that should only refresh the index.
+`nxv sync` independently refreshes the SQLite index and bloom filter. It never
+checks for or replaces the application. If a published index requires a newer
+schema, run `nxv update` (or the printed package-manager command) and retry
+`nxv sync`.
 
 ## API Server
 
@@ -300,8 +305,10 @@ This metadata is additive; package rows and the CLI JSON array are unchanged.
 nxv can install this very skill for any major AI coding agent — the binary embeds the SKILL.md and writes it where each agent looks, per the [Agent Skills standard](https://agentskills.io):
 
 ```bash
-nxv skill install                        # Install user-wide for detected agents
-nxv skill install --project              # Install into the current project (.claude + .agents)
+nxv skill install codex                  # Install user-wide for one agent
+nxv skill install --detected             # Explicitly install for detected agents
+nxv skill install codex --project        # Install for Codex in the current project
+nxv skill install --detected --project   # Map detected agents to project paths
 nxv skill install claude codex           # Install for specific agents only
 nxv skill install --all                  # Install for every supported agent
 nxv skill install copilot --dir ~/repo   # Project install into another directory
@@ -329,7 +336,12 @@ The table shows each agent's primary directory — the one `nxv skill install <a
 
 Semantics:
 
-- With no agent arguments, a user-wide install targets the agents detected on the machine (their config dir exists), falling back to the generic `agents` directory if none are found. A project install (`--project` / `--dir`) defaults to the `.claude` + `.agents` pair — per the read paths above, every supported agent picks up one of the two.
+- Installation requires one explicit target mode: one or more agent names,
+  `--detected`, or `--all`. With no target, nxv exits without writing anything.
+- `--detected` checks user configuration directories. With `--project` / `--dir`,
+  those detected agents are mapped to their corresponding project paths. No
+  detected agents is an error; use the explicit `agents` target for the generic
+  Agent Skills directory.
 - Agents sharing a directory (e.g. codex/cursor/gemini at project level) are deduplicated into a single write.
 - Install overwrites `skills/nxv/SKILL.md` unconditionally and never touches other files; uninstall removes only that file (and the `nxv/` directory if it is then empty).
 
@@ -365,7 +377,7 @@ Every recorded commit is a real, Hydra-built channel commit — `nix shell` comm
 
 Retired commands: `nxv backfill` and `nxv reset` are gone — snapshots carry complete metadata (source_path, homepage, known_vulnerabilities), and there is no checkout to reset.
 
-Most users never need these — they consume a pre-built published index via `nxv update`. Only run these when self-hosting an index. Use `--artifact-name-prefix` for mutable stores such as GitHub Releases so payload assets can be uploaded under immutable names before replacing `manifest.json`.
+Most users never need these — they consume a pre-built published index via `nxv sync`. Only run these when self-hosting an index. Use `--artifact-name-prefix` for mutable stores such as GitHub Releases so payload assets can be uploaded under immutable names before replacing `manifest.json`.
 
 ## Key Environment Variables
 
@@ -374,11 +386,10 @@ Most users never need these — they consume a pre-built published index via `nx
 | `NXV_API_URL`        | Point CLI at a remote `nxv serve` instead of the local DB              |
 | `NXV_DB_PATH`        | Override local SQLite path                                             |
 | `NXV_API_TIMEOUT`    | HTTP client timeout in seconds (default 30)                            |
-| `NXV_MANIFEST_URL`   | Override the manifest URL used by `nxv update`                         |
+| `NXV_MANIFEST_URL`   | Override the manifest URL used by `nxv sync`                           |
 | `NXV_PUBLIC_KEY`     | Public key for manifest verification (path or raw key)                 |
 | `NXV_SECRET_KEY`     | Secret key for `nxv publish --sign` (path or raw content)              |
 | `NXV_SKIP_VERIFY`    | Skip minisign signature check (INSECURE — dev/testing only)            |
-| `NXV_NO_SELF_UPDATE` | Skip the binary self-update check during `nxv update`                  |
 | `NXV_VERSION`        | Pin the version installed by `install.sh` (self-update targets latest) |
 | `NXV_HOST`           | `nxv serve` bind host                                                  |
 | `NXV_PORT`           | `nxv serve` listen port                                                |
@@ -399,7 +410,7 @@ Files:
 - `index.db` — SQLite database with package versions
 - `bloom.bin` — Bloom filter sibling for fast negative lookups (loaded at search time)
 
-Safe to delete; `nxv update` will rebuild from the published manifest.
+Safe to delete; `nxv sync` will rebuild from the published manifest.
 
 ## Agent Patterns
 
@@ -445,7 +456,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Version searches use the closest attribute tier**: nested package-set members do not fill a direct-package miss. Inspect API `meta.resolution` or CLI stderr for suggestions, query the package-set prefix directly, or opt into `--all-depths` / `all_depths=true`.
 - **Bloom filter gives instant negatives**: a search for a nonsense package name returns in <1 ms because the bloom filter rejects it before SQLite is touched. False positives are possible but rare.
 - **Coverage starts in September 2016**: nixpkgs commits before then are not indexed. Anything older needs raw git spelunking.
-- **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv update` rejects the signature.
+- **Self-hosted indexes need a public key**: pass `--public-key` or set `NXV_PUBLIC_KEY` when consuming a manifest you signed yourself, otherwise `nxv sync` rejects the signature.
 - **`--format json` shape is stable**: safe to pipe to `jq`. Breaking shape changes would be a semver bump — `license`/`maintainers`/`platforms`/`known_vulnerabilities` changed from stringified JSON to real arrays in a recent release.
 - **Install with `attribute_path`, never `name`**: they differ often (`"name": "python3"` vs `"attribute_path": "python312"`). `name` is the upstream derivation name and is not a valid flake attribute on its own.
 - **`/api/v1` data responses always wrap in `{data, meta}` (or `{data}` for single items)**: do `jq '.data'` first. Exceptions: the operational `/health` and `/metrics` endpoints are unwrapped.
@@ -456,17 +467,18 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 - **Use `--exact`** when one exact attribute is required. Default version searches stay within the shallowest matching tier; use `--all-depths` only when nested variants are intentional.
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
 - **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~220MB index download entirely if you only need occasional lookups.
-- **Update regularly**: the public index is republished every 6 hours (`publish-index.yml`); `nxv update` pulls the latest.
-- **For CI**: pin to `NXV_NO_SELF_UPDATE=1 nxv update` so the runner refreshes the index but never tries to swap its own binary.
+- **Sync regularly**: the public index is republished every 6 hours (`publish-index.yml`); `nxv sync` pulls the latest.
+- **For CI**: run `nxv sync`; it never checks for or replaces the application.
 
 ## Updating This Skill
 
 This skill is generated by the nxv binary itself. To refresh it after upgrading nxv:
 
 ```bash
-nxv update                               # Get the latest nxv (also refreshes the index)
-nxv skill install                        # Rewrite user-wide installs from the new binary
-nxv skill install --project              # ...or refresh a project-level install
+nxv update                               # Get the latest nxv application
+nxv skill install codex                  # Rewrite one user-wide install
+nxv skill install --detected             # ...or explicitly refresh detected agents
+nxv skill install codex --project        # Refresh one project-level install
 ```
 
 Without an nxv binary on hand, fetch the canonical copy from the repository:
