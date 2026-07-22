@@ -29,7 +29,7 @@ cargo test db::                  # Run tests in a specific module
 cargo clippy --features indexer -- -D warnings   # Lint (matches CI; CI also runs the featureless variant)
 cargo fmt                        # Format code
 cargo bench                      # Run benchmarks (bloom, search, indexer)
-nix flake check                  # Run all Nix checks (build, clippy, fmt, tests)
+nix flake check                  # Run all Nix checks (build, clippy, fmt, tests, a11y)
 ```
 
 The devshell provides shortcuts for all of these (`build`, `clippy`, `fmt-check`, `run-tests`, `coverage`, ...). `ci-local` runs the exact CI sequence: fmt-check, clippy, test — all with `--features indexer`.
@@ -56,7 +56,7 @@ nix run .#nxv-indexer            # Run with indexer feature
 
 ### Backend Abstraction (`backend.rs`, `client.rs`)
 
-The CLI transparently runs against either a local index or a remote `nxv serve` instance. `main.rs` branches on `NXV_API_URL` — if set, `ApiClient` (HTTP) is used; otherwise the local SQLite/bloom backend is used. Both implement the same backend trait, so command handlers are backend-agnostic. `search.rs` holds the search logic shared by the CLI commands and the API server handlers.
+The CLI transparently runs against either a local index or a remote `nxv serve` instance. `main.rs` branches on `NXV_API_URL` — if set, `ApiClient` (HTTP) is used; otherwise the local SQLite/bloom backend is used. Both are handled through a single `Backend` enum (`Local(Database)` | `Remote(ApiClient)`) with matching methods, so command handlers are backend-agnostic. `search.rs` holds the search logic shared by the CLI commands and the API server handlers.
 
 ### Self-Update (`self_update.rs`)
 
@@ -128,6 +128,7 @@ Most are also exposed as CLI flags (see `src/cli.rs`); env vars are useful for t
 - `NXV_LOG_FORMAT` — set to `json` for structured `nxv serve` logs (combine with `RUST_LOG`)
 - `NXV_SECRET_KEY` — minisign secret key (path or contents) for `nxv publish` signing
 - `NXV_RELEASES_URL` — override the releases.nixos.org S3 endpoint for `nxv index` (tests, mirrors)
+- `NXV_GITHUB_API_BASE` — override the GitHub API base URL used by `nxv update`'s self-update check (tests, mirrors)
 - `NXV_FRONTEND_DIR` — serve `index.html`/`app.js`/`favicon.svg` from this directory on every request instead of the embedded copy, and disable the 24h `Cache-Control` for those routes. Used by the devshell `dev` command for live frontend reload (edit → browser refresh, no rebuild; `dev` also runs cargo-watch so `src/` changes rebuild and restart the server). Unset in production.
 - `NXV_GIT_REV` — set by the Nix flake build to embed the git rev in `--version`
 
@@ -141,7 +142,7 @@ The database and bloom filter are stored in platform-specific data directories:
 Files:
 
 - `index.db` - SQLite database with package versions
-- `bloom.bin` - Bloom filter for fast negative lookups
+- `index.bloom` - Bloom filter for fast negative lookups (derived from the db filename; the distributed release artifact is separately named `bloom.bin`)
 
 ## Testing
 
@@ -189,7 +190,7 @@ A NixOS module is provided for running nxv as a systemd service:
   services.nxv = {
     enable = true;
     port = 8080;
-    # indexPath = "/path/to/index.db";  # Optional custom path
+    # dataDir = "/var/lib/nxv";  # Optional custom data directory (holds index.db + bloom filter)
   };
 }
 ```
