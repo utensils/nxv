@@ -16,8 +16,10 @@ use std::collections::HashSet;
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
-    /// Sort by date (newest first).
+    /// Preserve query relevance (exact/shallow attribute paths before nested sets).
     #[default]
+    Relevance,
+    /// Sort by date (newest first).
     Date,
     /// Sort by version (semver-aware).
     Version,
@@ -59,7 +61,7 @@ impl Default for SearchOptions {
     /// - `exact`: `false`
     /// - `desc`: `false`
     /// - `license`: `None`
-    /// - `sort`: `SortOrder::Date`
+    /// - `sort`: `SortOrder::Relevance`
     /// - `reverse`: `false`
     /// - `full`: `false`
     /// - `limit`: `50`
@@ -73,7 +75,7 @@ impl Default for SearchOptions {
     /// assert!(opts.version.is_none());
     /// assert!(!opts.exact && !opts.desc && !opts.reverse && !opts.full);
     /// assert!(opts.license.is_none());
-    /// assert_eq!(opts.sort, crate::search::SortOrder::Date);
+    /// assert_eq!(opts.sort, crate::search::SortOrder::Relevance);
     /// assert_eq!(opts.limit, 50);
     /// assert_eq!(opts.offset, 0);
     /// ```
@@ -84,7 +86,7 @@ impl Default for SearchOptions {
             exact: false,
             desc: false,
             license: None,
-            sort: SortOrder::Date,
+            sort: SortOrder::Relevance,
             reverse: false,
             full: false,
             limit: 50,
@@ -214,6 +216,9 @@ pub fn filter_by_license(
 /// For `Version` sort, uses semver-aware comparison with fallback to string comparison.
 pub fn sort_results(results: &mut [PackageVersion], order: SortOrder, reverse: bool) {
     match order {
+        // The query layer has already produced deterministic relevance order
+        // using the covering search index. Preserve it without another sort.
+        SortOrder::Relevance => {}
         SortOrder::Date => {
             results.sort_by_key(|r| std::cmp::Reverse(r.last_commit_date));
         }
@@ -472,7 +477,7 @@ mod tests {
         assert!(!opts.desc);
         assert!(!opts.full);
         assert!(!opts.reverse);
-        assert_eq!(opts.sort, SortOrder::Date);
+        assert_eq!(opts.sort, SortOrder::Relevance);
     }
 }
 
@@ -596,6 +601,70 @@ mod exact_with_version_tests {
     }
 }
 
+/// Regression coverage for broad version searches such as `python 2.7`.
+/// The query layer returns shallow attribute paths before nested package sets;
+/// the default search pipeline must preserve that relevance ordering instead
+/// of replacing it with last-seen-date ordering.
+#[cfg(test)]
+mod relevance_order_tests {
+    use super::*;
+    use crate::db::Database;
+    use tempfile::tempdir;
+
+    const SEED: &str = r#"
+        INSERT INTO package_versions
+            (name, version, first_commit_hash, first_commit_date,
+             last_commit_hash, last_commit_date, attribute_path, description)
+        VALUES
+            ('python',   '2.7.18', 'h1', 100, 'l1', 200, 'python', 'interpreter'),
+            ('python',   '2.7.18', 'h2', 300, 'l2', 400, 'python27', 'interpreter alias'),
+            ('icontract','2.7.3',  'h3', 800, 'l3', 900, 'python314Packages.icontract', 'library');
+    "#;
+
+    fn opts() -> SearchOptions {
+        SearchOptions {
+            query: "python".to_string(),
+            version: Some("2.7".to_string()),
+            limit: 0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_search_keeps_top_level_python_packages_before_recent_nested_libraries() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+
+        let result = execute_search(db.connection(), &opts()).unwrap();
+        let attrs: Vec<_> = result
+            .data
+            .iter()
+            .map(|package| package.attribute_path.as_str())
+            .collect();
+
+        assert_eq!(attrs, ["python27", "python", "python314Packages.icontract"]);
+    }
+
+    #[test]
+    fn explicit_date_sort_still_puts_the_newest_nested_library_first() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("test.db")).unwrap();
+        db.connection().execute_batch(SEED).unwrap();
+
+        let result = execute_search(
+            db.connection(),
+            &SearchOptions {
+                sort: SortOrder::Date,
+                ..opts()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.data[0].attribute_path, "python314Packages.icontract");
+    }
+}
+
 #[cfg(test)]
 mod proptests {
     use super::*;
@@ -640,6 +709,7 @@ mod proptests {
         fn sort_never_panics(
             packages in prop::collection::vec(arb_package_version(), 0..100),
             order in prop_oneof![
+                Just(SortOrder::Relevance),
                 Just(SortOrder::Date),
                 Just(SortOrder::Version),
                 Just(SortOrder::Name),
@@ -694,6 +764,7 @@ mod proptests {
         fn sort_is_deterministic(
             packages in prop::collection::vec(arb_package_version(), 1..20),
             order in prop_oneof![
+                Just(SortOrder::Relevance),
                 Just(SortOrder::Date),
                 Just(SortOrder::Version),
                 Just(SortOrder::Name),
@@ -832,7 +903,12 @@ mod indexed_parity_tests {
                 ..base("parity")
             },
         ];
-        for sort in [SortOrder::Date, SortOrder::Version, SortOrder::Name] {
+        for sort in [
+            SortOrder::Relevance,
+            SortOrder::Date,
+            SortOrder::Version,
+            SortOrder::Name,
+        ] {
             for reverse in [false, true] {
                 matrix.push(SearchOptions {
                     sort,

@@ -97,7 +97,7 @@ pub struct SearchParams {
     /// Filter by license (case-insensitive contains).
     #[serde(default)]
     pub license: Option<String>,
-    /// Sort order: date, version, or name.
+    /// Sort order: relevance, date, version, or name.
     #[serde(default)]
     pub sort: SortOrder,
     /// Reverse sort order (default: false).

@@ -262,7 +262,7 @@ All paths are under `/api/v1`. Wrapped responses always look like `{ "data": ...
 | `version` | string  | Version filter (prefix match)        |
 | `exact`   | boolean | Exact attribute name match           |
 | `license` | string  | License filter                       |
-| `sort`    | string  | `date`, `version`, or `name`         |
+| `sort`    | string  | `relevance` (default), `date`, `version`, or `name` |
 | `reverse` | boolean | Reverse sort order                   |
 | `limit`   | integer | Max results (default 50)             |
 | `offset`  | integer | Results to skip (default 0)          |

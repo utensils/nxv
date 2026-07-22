@@ -107,19 +107,18 @@ where
 /// # Examples
 ///
 /// ```
-/// use std::sync::Arc;
-/// use axum::extract::Query;
-/// use crate::server::{AppState, SearchParams};
+/// use crate::search::SortOrder;
+/// use crate::server::SearchParams;
 /// // Construct query params (as if received from a request)
 /// let params = SearchParams {
 ///     q: "serde".to_string(),
 ///     version: None,
-///     exact: None,
+///     exact: false,
 ///     license: None,
-///     sort: None,
-///     reverse: None,
-///     limit: Some(10),
-///     offset: Some(0),
+///     sort: SortOrder::Relevance,
+///     reverse: false,
+///     limit: 10,
+///     offset: 0,
 /// };
 /// // In an application handler you'd call `search_packages(State(state), Query(params)).await`.
 /// // This example demonstrates the intended parameters; actual invocation requires an Axum runtime and AppState.
@@ -132,7 +131,7 @@ params(
 ("version" = Option<String>, Query, description = "Filter by version prefix"),
 ("exact" = Option<bool>, Query, description = "Exact match only"),
 ("license" = Option<String>, Query, description = "Filter by license"),
-("sort" = Option<String>, Query, description = "Sort order: date, version, or name"),
+("sort" = Option<String>, Query, description = "Sort order: relevance, date, version, or name"),
 ("reverse" = Option<bool>, Query, description = "Reverse sort order"),
 ("limit" = Option<usize>, Query, description = "Maximum results (default: 50)"),
 ("offset" = Option<usize>, Query, description = "Results to skip"),

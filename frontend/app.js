@@ -43,7 +43,7 @@
       version: '',
       arch: '',
       license: '',
-      sort: 'date',
+      sort: 'relevance',
       includeInsecure: false,
     },
     view: 'rows',
@@ -201,7 +201,7 @@
     if (STATE.filters.version) p.set('version', STATE.filters.version);
     if (STATE.filters.arch) p.set('arch', STATE.filters.arch);
     if (STATE.filters.license) p.set('license', STATE.filters.license);
-    if (STATE.filters.sort && STATE.filters.sort !== 'date') p.set('sort', STATE.filters.sort);
+    if (STATE.filters.sort && STATE.filters.sort !== 'relevance') p.set('sort', STATE.filters.sort);
     if (STATE.filters.includeInsecure) p.set('insecure', '1');
     if (STATE.view && STATE.view !== 'rows') p.set('view', STATE.view);
     if (STATE.page > 1) p.set('page', String(STATE.page));
@@ -222,7 +222,7 @@
     STATE.filters.version = p.get('version') || '';
     STATE.filters.arch = p.get('arch') || '';
     STATE.filters.license = p.get('license') || '';
-    STATE.filters.sort = p.get('sort') || 'date';
+    STATE.filters.sort = p.get('sort') || 'relevance';
     STATE.filters.includeInsecure = p.get('insecure') === '1';
     STATE.view = p.get('view') || 'rows';
     const pg = parseInt(p.get('page') || '1', 10);
@@ -243,7 +243,7 @@
       version: ['', '2.7', '3.11', '3.12', '18', '22'],
       arch: ['', 'x86_64-linux', 'aarch64-linux', 'x86_64-darwin', 'aarch64-darwin'],
       license: ['', 'MIT', 'GPL-3.0+', 'BSD-3-Clause', 'Apache-2.0', 'LGPL-2.1+'],
-      sort: ['date', 'name', 'version'],
+      sort: ['relevance', 'date', 'name', 'version'],
       includeInsecure: [false, true],
     };
     const cycle = cycles[key];
@@ -270,7 +270,7 @@
         const label = el.textContent.split(':')[0].trim();
         el.innerHTML = `${label}: <span class="ml-1 text-[var(--color-fog-0)]">${labels[k]()}</span>`;
         const v = STATE.filters[k];
-        const isActive = k === 'exact' ? STATE.filters.exact : k === 'sort' ? v !== 'date' : !!v;
+        const isActive = k === 'exact' ? STATE.filters.exact : k === 'sort' ? v !== 'relevance' : !!v;
         el.classList.toggle('active', !!isActive);
       }
     });
@@ -1086,6 +1086,16 @@
     },
     {
       cat: 'cmd',
+      label: 'sort by relevance',
+      hint: 'sort',
+      action: () => {
+        STATE.filters.sort = 'relevance';
+        renderFilterChips();
+        runSearch();
+      },
+    },
+    {
+      cat: 'cmd',
       label: 'sort by name',
       hint: 'sort',
       action: () => {
@@ -1124,7 +1134,7 @@
           version: '',
           arch: '',
           license: '',
-          sort: 'date',
+          sort: 'relevance',
           includeInsecure: false,
         };
         renderFilterChips();
@@ -1335,7 +1345,7 @@
       f.version ||
       f.arch ||
       f.license ||
-      (f.sort && f.sort !== 'date') ||
+      (f.sort && f.sort !== 'relevance') ||
       f.exact ||
       f.includeInsecure ||
       STATE.page > 1

@@ -33,7 +33,7 @@ nxv search <PACKAGE> [VERSION]
 | `--desc`                  | Search in descriptions (full-text)            |
 | `--license <LICENSE>`     | Filter by license                             |
 | `--show-platforms`        | Show platforms column                         |
-| `--sort <ORDER>`          | Sort order: date, version, name               |
+| `--sort <ORDER>`          | Sort order: relevance (default), date, version, name |
 | `-r, --reverse`           | Reverse sort order                            |
 | `-n, --limit <N>`         | Maximum results (default: 50, 0=unlimited)    |
 | `--full`                  | Show all commits (no deduplication)           |
