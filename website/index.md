@@ -1,5 +1,7 @@
 ---
 layout: home
+title: nxv docs
+titleTemplate: ':title — Find any version of any Nix package, instantly.'
 hero:
   name: nxv
   text: Any version. Any package. Instantly.

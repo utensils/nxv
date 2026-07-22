@@ -178,8 +178,10 @@
   --vp-font-family-base: var(--font-sans);
   --vp-font-family-mono: var(--font-mono);
 
-  /* Nav / sidebar */
-  --vp-nav-bg-color: transparent;
+  /* Nav / sidebar — the nav var carries the translucent ink so
+   * VitePress's own scoped rules (which beat our overrides on
+   * specificity) paint the intended band instead of transparent. */
+  --vp-nav-bg-color: oklch(0.15 0.022 264 / 0.8);
   --vp-nav-screen-bg-color: var(--surface-page);
   --vp-sidebar-bg-color: transparent;
 
@@ -326,7 +328,14 @@ pre,
 samp,
 .vp-code,
 .vp-doc :not(pre) > code,
-div[class*='language-'] code {
+div[class*='language-'] code,
+.VPHero .tagline,
+.VPNavBarTitle .title,
+.VPSidebarItem.level-0 > .item > .text,
+.vp-doc th,
+.vp-doc td:first-child,
+.VPFooter .message,
+.VPFooter .copyright {
   font-family: var(--font-mono);
   font-feature-settings: 'zero', 'ss01';
 }
@@ -349,9 +358,12 @@ div[class*='language-'] code {
 
 .VPNavBar {
   border-bottom: 1px solid var(--border-subtle);
-  background: oklch(0.15 0.022 264 / 0.8);
-  backdrop-filter: var(--blur-nav);
+  /* !important: at >=960px VitePress's scoped `.VPNavBar:not(.home)`
+   * rule sets background-color: transparent and out-specifies us;
+   * the band must stay painted or doc text bleeds through the nav. */
+  background: var(--vp-nav-bg-color) !important;
   -webkit-backdrop-filter: var(--blur-nav);
+  backdrop-filter: var(--blur-nav);
 }
 
 .VPNavBar .content-body,
@@ -388,8 +400,8 @@ div[class*='language-'] code {
 /* Mobile local nav (breadcrumb bar on doc pages) */
 .VPLocalNav {
   background: oklch(0.15 0.022 264 / 0.8);
-  backdrop-filter: var(--blur-nav);
   -webkit-backdrop-filter: var(--blur-nav);
+  backdrop-filter: var(--blur-nav);
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -608,7 +620,7 @@ div[class*='language-'] code {
 .nxv-section-kicker {
   font-family: var(--font-mono);
   font-size: 12px;
-  letter-spacing: 0.18em;
+  letter-spacing: var(--tracking-eyebrow);
   text-transform: uppercase;
   color: var(--nix-400);
   margin: 48px 0 -24px;
