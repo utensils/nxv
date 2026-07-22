@@ -333,8 +333,9 @@ nxv serve --cors-origins "https://example.com,https://app.example.com"
 When rate limiting is enabled (`--rate-limit`), the server adds standard
 `X-RateLimit-*` headers to responses:
 
-| Header                  | Description                                            |
-| ----------------------- | ------------------------------------------------------ |
-| `X-RateLimit-Limit`     | The configured per-IP request limit                    |
-| `X-RateLimit-Remaining` | Requests remaining in the current window               |
-| `X-RateLimit-After`     | Seconds to wait before retrying (present when limited) |
+| Header                  | Description                                              |
+| ----------------------- | -------------------------------------------------------- |
+| `X-RateLimit-Limit`     | The configured per-IP request limit                      |
+| `X-RateLimit-Remaining` | Requests remaining in the current window                 |
+| `X-RateLimit-After`     | Seconds to wait before retrying (present when limited)   |
+| `Retry-After`           | Same value as `X-RateLimit-After` (present when limited) |
