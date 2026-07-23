@@ -451,7 +451,7 @@ nxv search python 3.11.4 --exact --format json | \
 **Generate the `nix shell` invocation directly (CLI):**
 
 ```bash
-nxv search nodejs 15 --format json | \
+nxv search nodejs-15_x 15 --exact --format json | \
   jq -r '.[0] | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
 

@@ -144,7 +144,7 @@ curl -s "https://nxv.urandom.io/api/v1/packages/python/versions/2.7.18/first" | 
 Or via the CLI against any backend:
 
 ```bash
-nxv search nodejs 15 --format json | \
+nxv search nodejs-15_x 15 --exact --format json | \
   jq -r '.[0] | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
 
