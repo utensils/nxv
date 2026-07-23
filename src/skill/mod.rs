@@ -263,7 +263,9 @@ pub fn cmd_install(cli: &Cli, args: &SkillInstallArgs) -> Result<()> {
             .filter(|agent| *agent != Agent::Agents && agent.is_detected(&home))
             .collect();
         if detected.is_empty() {
-            anyhow::bail!("no supported agents were detected; name agents explicitly or use --all");
+            anyhow::bail!(
+                "no supported agents were detected; name agents explicitly, use `agents` for the generic Agent Skills directory, or use --all"
+            );
         }
         detected
     } else if args.all {

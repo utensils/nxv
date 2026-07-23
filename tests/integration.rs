@@ -2750,7 +2750,7 @@ fn test_temp_files_cleaned_up_on_failure() {
 /// 3. Apply delta sync
 /// 4. Verify search returns both old and new packages
 #[test]
-fn test_full_delta_update_workflow() {
+fn test_full_delta_sync_workflow() {
     use sha2::{Digest, Sha256};
 
     let dir = tempdir().unwrap();
@@ -4057,6 +4057,9 @@ fn test_skill_install_detected_with_no_agents_fails_without_writes() {
         .failure()
         .stderr(predicate::str::contains(
             "no supported agents were detected",
+        ))
+        .stderr(predicate::str::contains(
+            "use `agents` for the generic Agent Skills directory",
         ));
     assert!(!home.path().join(".agents").exists());
 }

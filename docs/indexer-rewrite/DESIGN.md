@@ -356,9 +356,9 @@ hidden no-op with a deprecation warning for one release cycle.
    the code passes None — publishing v4 ungated would let every old
    client's `nxv sync` overwrite its working v3 index and then fail to
    open it: verified landmine L1).
-2. **cmd_update fix**: on IncompatibleIndex, still run the self-update
-   check before propagating, so old local-install binaries are told to (and
-   can) upgrade in one step.
+2. **Sync compatibility guidance**: on IncompatibleIndex, `nxv sync`
+   directs users to run `nxv update` (or the printed package-manager command)
+   and then retry `nxv sync`; it never checks the release API itself.
 3. **Release the new binary first** (reads v3 and v4; index format
    unchanged at this point). Wait an adoption window (1–2 weeks).
 4. **Initial v4 full rebuild runs out-of-band** (locally — hours for the
