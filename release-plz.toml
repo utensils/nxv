@@ -20,3 +20,39 @@ features_always_increment_minor = true
 # nxv is a CLI; the library target is an implementation detail, not a semver
 # contract worth a cargo-semver-checks baseline build on every release PR.
 semver_check = false
+
+[changelog]
+trim = true
+
+# Squash merges put each branch commit in the body as a "* type: subject"
+# bullet; strip those so breaking-change bodies render as clean prose.
+# Setting commit_preprocessors REPLACES release-plz's defaults, so the
+# default PR-link processor must be re-declared (second entry).
+commit_preprocessors = [
+  { pattern = '(?m)^\* (?:build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(?:\([^)]*\))?!?: .*\n?', replace = "" },
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/utensils/nxv/pull/${1}))" },
+]
+
+# release-plz's default body template, extended so breaking commits carry
+# their details into the changelog: the BREAKING CHANGE footer when one
+# exists, otherwise the commit body — rendered as an indented continuation
+# of the list item. The default template drops both (v0.5.0's #56 lost its
+# migration note that way).
+body = """
+## [{{ version }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits %}
+{%- if commit.scope -%}
+- *({{commit.scope}})* {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}{%- if commit.links %} ({% for link in commit.links %}[{{link.text}}]({{link.href}}) {% endfor -%}){% endif %}
+{% else -%}
+- {% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endif -%}
+{%- if commit.breaking and commit.breaking_description and commit.breaking_description != commit.message -%}
+{{ "  " }}{{ commit.breaking_description | trim | indent(prefix="  ") }}
+{% elif commit.breaking and commit.body -%}
+{{ "  " }}{{ commit.body | trim | indent(prefix="  ") }}
+{% endif -%}
+{% endfor -%}
+{% endfor %}"""
