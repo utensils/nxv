@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(cli)* [**breaking**] split application update from index sync ([#67](https://github.com/utensils/nxv/pull/67))
-  Make skill installation require an explicit target mode and synchronize all user-facing documentation and generated skill templates.
+  `nxv update` now only updates the nxv application; the new `nxv sync` command
+  downloads or refreshes the package index. Old index-related `nxv update` flags
+  are rejected with migration guidance, and the retired `NXV_NO_SELF_UPDATE`
+  variable is rejected when set. `nxv skill install` now requires an explicit
+  target: agent names, `--detected`, or `--all`.
 
 ### Fixed
 
+- *(cli)* clarify sync and skill guidance ([#67](https://github.com/utensils/nxv/pull/67))
 - *(release)* keep blank line before new changelog sections ([#70](https://github.com/utensils/nxv/pull/70))
 
 ### Other
