@@ -25,9 +25,9 @@ Common issues and solutions when using nxv.
    nxv search "image editor" --desc
    ```
 
-4. **Update index**: Your index might be outdated
+4. **Sync index**: Your index might be outdated
    ```bash
-   nxv update
+   nxv sync
    ```
 
 ### Search is slow
@@ -38,18 +38,18 @@ searches are fast. If searches remain slow:
 1. Check disk I/O (SSD recommended)
 2. Check `NXV_DB_PATH` isn't on a network drive
 
-## Update Issues
+## Sync Issues
 
 ### Download fails
 
 1. **Check network**: Ensure GitHub is accessible
 2. **Retry**: Transient failures are common
    ```bash
-   nxv update
+   nxv sync
    ```
 3. **Force full download**: Skip delta updates
    ```bash
-   nxv update --force
+   nxv sync --force
    ```
 
 ### Signature verification failed
@@ -57,7 +57,7 @@ searches are fast. If searches remain slow:
 1. **Check clock**: Signature validation requires accurate time
 2. **Skip verification** (not recommended for production):
    ```bash
-   NXV_SKIP_VERIFY=1 nxv update
+   NXV_SKIP_VERIFY=1 nxv sync
    ```
 
 ### Incompatible index
@@ -66,17 +66,13 @@ searches are fast. If searches remain slow:
 Incompatible index: index requires schema version N but this build only supports up to M
 ```
 
-This means your nxv binary is too old for the published index. `nxv update`
-handles it automatically: on this error it runs the binary self-update check
-before exiting.
+This means your nxv application is too old for the published index. `nxv sync`
+stops without modifying either the existing index or the application.
 
-- **Local installs** (install.sh, manual download): the binary is replaced in
-  place after SHA-256 verification — re-run `nxv update` to fetch the index.
+- **Local installs** (install.sh, manual download): run `nxv update` to replace
+  the binary after SHA-256 verification, then re-run `nxv sync`.
 - **Managed installs** (Nix, cargo, Homebrew): the matching upgrade command is
-  printed instead; run it, then re-run `nxv update`.
-
-Pass `--no-self-update` (or set `NXV_NO_SELF_UPDATE`) to skip the binary check
-if updates are managed externally.
+  printed by `nxv update`; run it, then re-run `nxv sync`.
 
 ### Disk full
 

@@ -66,6 +66,7 @@ fn main() {
     let result = match &cli.command {
         Commands::Search(args) => cmd_search(&cli, args),
         Commands::Update(args) => cmd_update(&cli, args),
+        Commands::Sync(args) => cmd_sync(&cli, args),
         Commands::Info(args) => cmd_pkg_info(&cli, args),
         Commands::Stats => cmd_stats(&cli),
         Commands::History(args) => cmd_history(&cli, args),
@@ -191,18 +192,15 @@ fn get_backend_with_prompt(cli: &Cli) -> Result<backend::Backend> {
                 let input = input.trim().to_lowercase();
 
                 if input.is_empty() || input == "y" || input == "yes" {
-                    // Run the update command. Skip the binary self-update check —
-                    // the user invoked search/info/etc., not an explicit update,
-                    // and we don't want to surprise them by replacing the binary
-                    // mid-session.
-                    let update_args = cli::UpdateArgs {
+                    // Download only the index. A first-run search must never
+                    // replace the application binary as a side effect.
+                    let sync_args = cli::SyncArgs {
                         force: false,
                         manifest_url: None,
                         skip_verify: false,
                         public_key: None,
-                        no_self_update: true,
                     };
-                    cmd_update(cli, &update_args)?;
+                    cmd_sync(cli, &sync_args)?;
 
                     // Try to open the database again
                     let db = db::Database::open_readonly(&cli.db_path)?;
@@ -432,7 +430,40 @@ fn print_version_search_miss(package: &str, resolution: &crate::search::SearchRe
     }
 }
 
-/// Updates the local package index from the configured manifest or remote API.
+/// Update the nxv application to the latest release.
+fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
+    if args.has_legacy_index_options() {
+        anyhow::bail!(
+            "index synchronization moved to `nxv sync`; re-run this command with `nxv sync`"
+        );
+    }
+
+    if legacy_no_self_update_enabled() {
+        anyhow::bail!(
+            "NXV_NO_SELF_UPDATE is retired: use `nxv sync` to refresh the index, or unset it to update nxv"
+        );
+    }
+
+    self_update::run(self_update::SelfUpdateOptions {
+        check: false,
+        force: false,
+        version: None,
+        connect_timeout_secs: cli.api_timeout,
+        show_progress: !cli.quiet,
+        quiet: cli.quiet,
+    })
+}
+
+fn legacy_no_self_update_enabled() -> bool {
+    std::env::var("NXV_NO_SELF_UPDATE").is_ok_and(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
+}
+
+/// Updates the local package index from the configured manifest.
 ///
 /// Performs an update using the provided CLI context and update arguments, and prints
 /// user-facing progress and the final outcome (up-to-date, downloaded, delta applied,
@@ -446,16 +477,21 @@ fn print_version_search_miss(package: &str, resolution: &crate::search::SearchRe
 ///
 /// ```no_run
 /// # use anyhow::Result;
-/// # use crate::cli::{Cli, UpdateArgs};
+/// # use crate::cli::{Cli, SyncArgs};
 /// # fn example() -> Result<()> {
 /// // `cli` and `args` would typically come from CLI parsing.
 /// let cli = Cli::parse();
-/// let args = UpdateArgs { force: false, manifest_url: None };
-/// cmd_update(&cli, &args)?;
+/// let args = SyncArgs {
+///     force: false,
+///     manifest_url: None,
+///     skip_verify: false,
+///     public_key: None,
+/// };
+/// cmd_sync(&cli, &args)?;
 /// # Ok(())
 /// # }
 /// ```
-fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
+fn cmd_sync(cli: &Cli, args: &cli::SyncArgs) -> Result<()> {
     use crate::cli::Verbosity;
     use crate::remote::update::{UpdateStatus, perform_update};
 
@@ -488,33 +524,10 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
         Some(cli.api_timeout),
     ) {
         Ok(status) => status,
-        // An incompatible published index means this binary is too old. The
-        // self-update check is exactly what fixes that — run it before
-        // propagating, so old local installs can upgrade in one step
-        // instead of being told "please upgrade" with no way to do it.
         Err(e @ crate::error::NxvError::IncompatibleIndex(_)) => {
             eprintln!("{e}");
-            if !args.no_self_update {
-                eprintln!();
-                match self_update::run(self_update::SelfUpdateOptions {
-                    check: false,
-                    force: false,
-                    version: None,
-                    connect_timeout_secs: cli.api_timeout,
-                    show_progress,
-                    quiet: cli.quiet,
-                }) {
-                    Ok(()) => {
-                        eprintln!();
-                        eprintln!(
-                            "If the binary was updated, re-run `nxv update` to fetch the index."
-                        );
-                    }
-                    Err(update_err) => {
-                        eprintln!("Self-update failed: {update_err}");
-                        eprintln!("Upgrade nxv manually, then re-run `nxv update`.");
-                    }
-                }
+            if !cli.quiet {
+                eprintln!("Run `nxv update` to upgrade the application, then retry `nxv sync`.");
             }
             return Err(e.into());
         }
@@ -548,30 +561,6 @@ fn cmd_update(cli: &Cli, args: &cli::UpdateArgs) -> Result<()> {
             if verbosity >= Verbosity::Info {
                 eprintln!("Full commit hash: {}", commit);
             }
-        }
-    }
-
-    if !args.no_self_update {
-        if !cli.quiet {
-            eprintln!();
-        }
-        // Binary check is best-effort: a GitHub outage or rate limit should not
-        // fail the overall update (the index step already succeeded). Surface
-        // the error as a warning only.
-        let result = self_update::run(self_update::SelfUpdateOptions {
-            check: false,
-            force: false,
-            version: None,
-            // `api_timeout` is applied as a connect-timeout only; it does not
-            // bound the (potentially multi-MB) binary download.
-            connect_timeout_secs: cli.api_timeout,
-            show_progress,
-            quiet: cli.quiet,
-        });
-        if let Err(e) = result
-            && !cli.quiet
-        {
-            eprintln!("Skipping binary self-update check: {e}");
         }
     }
 
@@ -850,7 +839,7 @@ fn cmd_pkg_info(cli: &Cli, args: &cli::InfoArgs) -> Result<()> {
 /// index information (API endpoint or database path, index version, last indexed commit) and
 /// aggregate statistics (total version ranges, unique package names/versions, oldest/newest commit
 /// dates). If using a local backend, also prints the database file size and bloom filter status.
-/// If a local index is missing, prints guidance to run `nxv update` and returns without error.
+/// If a local index is missing, prints guidance to run `nxv sync` and returns without error.
 ///
 /// # Examples
 ///
@@ -872,7 +861,7 @@ fn cmd_stats(cli: &Cli) -> Result<()> {
                     .is_some_and(|e| matches!(e, error::NxvError::NoIndex))
             {
                 println!("No index found at {:?}", cli.db_path);
-                println!("Run 'nxv update' to download the package index.");
+                println!("Run 'nxv sync' to download the package index.");
                 return Ok(());
             }
             return Err(e);

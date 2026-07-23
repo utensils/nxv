@@ -9,7 +9,7 @@ snapshots. This is an advanced topic for users who want to:
 
 ::: tip Most Users
 
-If you just want to use nxv, run `nxv update` to download the pre-built index. A
+If you just want to use nxv, run `nxv sync` to download the pre-built index. A
 full rebuild from scratch streams ~15 GB of snapshots and takes a few hours.
 
 :::
@@ -173,7 +173,7 @@ Users can then configure their nxv to use your index:
 ```bash
 export NXV_MANIFEST_URL="https://example.com/nxv/manifest.json"
 export NXV_PUBLIC_KEY="RWTxxxxxxxx..."
-nxv update
+nxv sync
 ```
 
 ## Architecture Deep Dive
@@ -316,7 +316,7 @@ If the database becomes corrupted after a crash:
 rm ~/.local/share/nxv/index.db  # Linux
 rm ~/Library/Application\ Support/nxv/index.db  # macOS
 
-# Re-run indexing (or `nxv update` to re-download the pre-built index)
+# Re-run indexing (or `nxv sync` to re-download the pre-built index)
 nxv index
 ```
 

@@ -220,7 +220,7 @@ main() {
 
     printf '\n%bInstallation complete!%b\n' "$GREEN" "$NC"
     printf "Run '%bnxv --help%b' to get started.\n" "$BOLD" "$NC"
-    printf "Run '%bnxv update%b' to download the package index.\n\n" "$BOLD" "$NC"
+    printf "Run '%bnxv sync%b' to download the package index.\n\n" "$BOLD" "$NC"
 }
 
 main "$@"

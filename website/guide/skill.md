@@ -21,12 +21,14 @@ The `nxv skill` subcommand generates and installs the skill from a single
 embedded template:
 
 ```bash
-# Install user-wide for every agent detected on this machine
-nxv skill install
+# Install user-wide for one agent
+nxv skill install codex
 
-# Install into the current project (.claude/skills + .agents/skills,
-# which every supported agent reads at project level)
-nxv skill install --project
+# Explicitly install for agents detected on this machine
+nxv skill install --detected
+
+# Map detected agents to their project-level paths
+nxv skill install --detected --project
 
 # Install for specific agents only
 nxv skill install claude codex
@@ -38,8 +40,11 @@ nxv skill install --all
 nxv skill list
 ```
 
-A user-wide install (the default) targets agents whose config directory exists
-under your home directory. Per agent, the skill lands in
+Installation requires one explicit target mode: agent names, `--detected`, or
+`--all`. Supplying no target is an error and writes nothing. `--detected` checks
+agent configuration under your home directory; with `--project` or `--dir`,
+those agents are mapped to their project-level paths. No detected agents is an
+error rather than an implicit generic install. Per agent, the skill lands in
 `<skills dir>/nxv/SKILL.md`:
 
 | Agent      | User-wide                 | Project-level     |
@@ -56,15 +61,13 @@ under your home directory. Per agent, the skill lands in
 | `agents`   | `~/.agents/skills/`       | `.agents/skills/` |
 
 The `agents` target is the generic cross-agent directory from the Agent Skills
-standard — most tools read it, so it also serves as the fallback when no agents
-are detected.
+standard. Select it explicitly with `nxv skill install agents`.
 
 The table shows each agent's primary directory — the one
 `nxv skill install <agent>` writes to. Several agents read additional locations:
 Copilot reads `.github/skills/`, `.claude/skills/`, or `.agents/skills/` in a
-repository, and Pi reads `.agents/skills/` as well as `.pi/skills/`. That is why
-the default project install writes only the `.claude` + `.agents` pair: every
-supported agent picks up one of the two.
+repository, and Pi reads `.agents/skills/` as well as `.pi/skills/`. Agents that
+share a selected project path are deduplicated into one write.
 
 To remove installed skills:
 
@@ -151,8 +154,9 @@ The installed skill is byte-identical to the template embedded in your nxv
 binary, so refreshing it is just upgrading nxv and reinstalling:
 
 ```bash
-nxv update           # Get the latest nxv (also refreshes the index)
-nxv skill install    # Rewrite the installed skills from the new binary
+nxv update                  # Get the latest nxv application
+nxv skill install codex     # Rewrite one explicit installation
+nxv skill install --detected # Or explicitly refresh detected agents
 ```
 
 ## Skill source

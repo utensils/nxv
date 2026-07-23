@@ -188,7 +188,7 @@ impl From<crate::error::NxvError> for ApiError {
     /// Convert an `NxvError` into an `ApiError` suitable for HTTP responses.
     ///
     /// Maps specific `NxvError` variants to HTTP statuses and descriptive messages:
-    /// - `NxvError::NoIndex` -> 503 Service Unavailable with guidance to run `nxv update`.
+    /// - `NxvError::NoIndex` -> 503 Service Unavailable with guidance to run `nxv sync`.
     /// - `NxvError::CorruptIndex(msg)` -> 503 Service Unavailable with `Corrupt index: {msg}`.
     /// - `NxvError::PackageNotFound(name)` -> 404 Not Found with `Package '{name}' not found`.
     /// - all other variants -> 500 Internal Server Error with the error's `to_string()` as the message.
@@ -207,7 +207,7 @@ impl From<crate::error::NxvError> for ApiError {
         use crate::error::NxvError;
         match err {
             NxvError::NoIndex => {
-                ApiError::unavailable("No package index found. Run 'nxv update' first.")
+                ApiError::unavailable("No package index found. Run 'nxv sync' first.")
             }
             NxvError::CorruptIndex(msg) => ApiError::unavailable(format!("Corrupt index: {}", msg)),
             NxvError::PackageNotFound(name) => {

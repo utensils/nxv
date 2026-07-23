@@ -143,25 +143,12 @@ nxv history python311
 
 ### update
 
-Refresh the package index, then check for a newer nxv binary and update it (or
-print a hint for managed installs).
+Update the nxv application to the latest release. This command never downloads
+or modifies the package index.
 
 ```bash
-nxv update [options]
+nxv update
 ```
-
-**Options:**
-
-| Flag                 | Description                                               |
-| -------------------- | --------------------------------------------------------- |
-| `-f, --force`        | Force full re-download of the index                       |
-| `--skip-verify`      | Skip manifest signature verification                      |
-| `--public-key <KEY>` | Custom public key for verification                        |
-| `--no-self-update`   | Skip the binary self-update check; only refresh the index |
-
-`--no-self-update` also honours the `NXV_NO_SELF_UPDATE` environment variable,
-which is useful for CI or systemd timer units that should only refresh the
-index.
 
 **Binary-update behaviour by install method:**
 
@@ -174,22 +161,40 @@ index.
 
 Set `GITHUB_TOKEN` to avoid unauthenticated rate limits when calling the GitHub
 API. If GitHub rejects the token (401 — e.g. a stale token exported by a dev
-shell), the check is retried without it. If the binary check fails (e.g.,
-network or rate limit), `nxv update` prints a warning but still reports the
-index update as successful.
+shell), the check is retried without it. Release lookup, download, verification,
+or replacement failures cause the command to fail.
 
-**Examples:**
+Legacy index flags are rejected with guidance to use `nxv sync`. The retired
+`NXV_NO_SELF_UPDATE` variable is likewise rejected when truthy so an old
+configuration cannot unexpectedly replace the application.
+
+### sync
+
+Download or refresh the local package index without checking for application
+updates.
 
 ```bash
-# Refresh the index and update the binary (or print an upgrade hint)
-nxv update
-
-# Just refresh the index — don't touch the binary
-nxv update --no-self-update
-
-# Force full re-download of the index
-nxv update --force
+nxv sync [options]
 ```
+
+**Options:**
+
+| Flag                   | Description                          |
+| ---------------------- | ------------------------------------ |
+| `-f, --force`          | Force full re-download of the index  |
+| `--manifest-url <URL>` | Custom or self-hosted index manifest |
+| `--skip-verify`        | Skip manifest signature verification |
+| `--public-key <KEY>`   | Custom public key for verification   |
+
+```bash
+nxv sync
+nxv sync --force
+nxv sync --manifest-url https://example.com/manifest.json --public-key ./nxv.pub
+```
+
+`sync` is safe for CI and timers because it never updates the application. If
+the published index requires a newer nxv schema, run `nxv update` (or the
+printed managed-install command) and retry `nxv sync`.
 
 ### serve
 
@@ -375,6 +380,7 @@ agents (the generic cross-agent `.agents/skills` directory)
 | -------------- | --------------------------------------------------------- |
 | `--project`    | Use project-level skill directories under the current dir |
 | `--dir <PATH>` | Project directory to operate on (implies `--project`)     |
+| `--detected`   | Install for agents detected from user configuration       |
 | `--all`        | Install for all supported agents (install only)           |
 
 **List options:**
@@ -386,18 +392,21 @@ agents (the generic cross-agent `.agents/skills` directory)
 **Examples:**
 
 ```bash
-# Install user-wide for every agent detected on this machine
-nxv skill install
+# Install user-wide for one agent
+nxv skill install codex
 
-# Install into the current project (.claude/skills + .agents/skills)
-nxv skill install --project
+# Explicitly install for detected agents
+nxv skill install --detected
 
-# Install for specific agents
-nxv skill install claude codex
+# Map detected agents to their project paths
+nxv skill install --detected --project
 
 # See where the skill is (or would be) installed
 nxv skill list
 ```
+
+Install requires agent names, `--detected`, or `--all`; supplying no target is
+an error and writes nothing. Shared project paths are deduplicated.
 
 ## Output Formats
 

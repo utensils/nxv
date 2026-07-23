@@ -24,16 +24,14 @@ the index.
 
 ### Index Updates
 
-| Variable             | Description                                       | Default         |
-| -------------------- | ------------------------------------------------- | --------------- |
-| `NXV_MANIFEST_URL`   | Custom manifest URL for index downloads           | GitHub releases |
-| `NXV_PUBLIC_KEY`     | Custom public key for manifest verification       | Built-in key    |
-| `NXV_SKIP_VERIFY`    | Skip manifest signature verification              | `false`         |
-| `NXV_NO_SELF_UPDATE` | Skip the binary self-update check in `nxv update` | Not set         |
+| Variable           | Description                                 | Default         |
+| ------------------ | ------------------------------------------- | --------------- |
+| `NXV_MANIFEST_URL` | Custom manifest URL for index downloads     | GitHub releases |
+| `NXV_PUBLIC_KEY`   | Custom public key for manifest verification | Built-in key    |
+| `NXV_SKIP_VERIFY`  | Skip manifest signature verification        | `false`         |
 
-By default, `nxv update` checks GitHub for a newer nxv release after refreshing
-the index. Set `NXV_NO_SELF_UPDATE` (or pass `--no-self-update`) to only refresh
-the index.
+These index variables apply to `nxv sync`. `nxv update` only updates the
+application and does not read index configuration.
 
 ### Server
 
@@ -95,5 +93,5 @@ nxv search python --version 3.11
 
 ```bash
 export NXV_DB_PATH="/data/nxv/index.db"
-nxv update
+nxv sync
 ```

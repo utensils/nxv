@@ -5,7 +5,7 @@ use crate::paths;
 use crate::search::SortOrder;
 use crate::skill::Agent;
 use crate::version;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use std::path::PathBuf;
 
@@ -44,17 +44,19 @@ pub enum Commands {
     /// Search for package versions.
     Search(SearchArgs),
 
-    /// Update the package index, then check for a newer nxv release.
+    /// Update nxv to the latest application release.
     ///
-    /// This runs the index refresh first. Afterwards it checks GitHub
-    /// for a newer nxv binary. On a local install (install.sh, manual
-    /// download) the new binary is downloaded, its SHA-256 is verified
-    /// against SHA256SUMS.txt, and the running executable is replaced
-    /// atomically. On managed installs (Nix, cargo, Homebrew) the
-    /// binary is left alone and the matching upgrade command is
-    /// printed instead. Pass `--no-self-update` to skip the binary
-    /// check entirely and only refresh the index.
+    /// On a local install (install.sh, manual download), the latest binary
+    /// is downloaded, verified, and replaced atomically. Managed installs
+    /// (Nix, cargo, Homebrew) print the matching upgrade command instead.
+    /// Use `nxv sync` to download or refresh the package index.
     Update(UpdateArgs),
+
+    /// Download or refresh the local package index.
+    ///
+    /// Synchronizes the SQLite index and bloom filter from the configured
+    /// manifest. This command never checks for or installs nxv releases.
+    Sync(SyncArgs),
 
     /// Show detailed information about a package.
     ///
@@ -162,13 +164,11 @@ pub enum SkillCommands {
     /// List supported agents, their skill paths, and install status.
     List(SkillListArgs),
 
-    /// Install the nxv skill (user-wide by default, --project for project-level).
+    /// Install the nxv skill for explicitly selected agents.
     ///
-    /// With no agent arguments, a user-wide install targets the agents
-    /// detected on this machine (their config directory exists), falling
-    /// back to the generic `agents` directory when none are found. A
-    /// project install defaults to the `.claude` + `.agents` pair, which
-    /// every supported agent reads.
+    /// Name one or more agents, or explicitly pass `--detected` or `--all`.
+    /// Nothing is installed when no target mode is supplied. User-wide is
+    /// the default scope; use `--project` or `--dir` for project-level paths.
     Install(SkillInstallArgs),
 
     /// Remove installed nxv skills.
@@ -192,9 +192,14 @@ pub struct SkillListArgs {
 
 /// Arguments for `skill install`.
 #[derive(Parser, Debug)]
+#[command(group(
+    ArgGroup::new("targets")
+        .required(true)
+        .multiple(false)
+        .args(["agents", "detected", "all"])
+))]
 pub struct SkillInstallArgs {
-    /// Agents to install for (default: detected agents, or claude + agents
-    /// for project installs).
+    /// Agents to install for.
     #[arg(value_enum)]
     pub agents: Vec<Agent>,
 
@@ -207,8 +212,15 @@ pub struct SkillInstallArgs {
     #[arg(long, value_name = "PATH")]
     pub dir: Option<PathBuf>,
 
+    /// Install for agents detected from user configuration directories.
+    ///
+    /// With --project or --dir, detected agents are mapped to their
+    /// corresponding project-level skill paths.
+    #[arg(long)]
+    pub detected: bool,
+
     /// Install for all supported agents regardless of detection.
-    #[arg(long, conflicts_with = "agents")]
+    #[arg(long)]
     pub all: bool,
 }
 
@@ -307,15 +319,46 @@ impl SearchArgs {
     }
 }
 
-/// Arguments for the update command.
+/// Arguments retained only to give users of the former combined update
+/// command an actionable migration error. They stay hidden from help and
+/// never trigger index or application updates.
 #[derive(Parser, Debug)]
 pub struct UpdateArgs {
+    #[arg(short = 'f', long = "force", hide = true)]
+    pub legacy_force: bool,
+
+    #[arg(long = "manifest-url", hide = true)]
+    pub legacy_manifest_url: Option<String>,
+
+    #[arg(long = "skip-verify", hide = true)]
+    pub legacy_skip_verify: bool,
+
+    #[arg(long = "public-key", hide = true)]
+    pub legacy_public_key: Option<String>,
+
+    #[arg(long = "no-self-update", hide = true)]
+    pub legacy_no_self_update: bool,
+}
+
+impl UpdateArgs {
+    pub fn has_legacy_index_options(&self) -> bool {
+        self.legacy_force
+            || self.legacy_manifest_url.is_some()
+            || self.legacy_skip_verify
+            || self.legacy_public_key.is_some()
+            || self.legacy_no_self_update
+    }
+}
+
+/// Arguments for the sync command.
+#[derive(Parser, Debug)]
+pub struct SyncArgs {
     /// Force full re-download of the index.
     #[arg(short, long)]
     pub force: bool,
 
-    /// Custom manifest URL (for testing or alternate index sources).
-    #[arg(long, env = "NXV_MANIFEST_URL", hide = true)]
+    /// Custom manifest URL for alternate or self-hosted indexes.
+    #[arg(long, env = "NXV_MANIFEST_URL")]
     pub manifest_url: Option<String>,
 
     /// Skip manifest signature verification (INSECURE - use only for development/testing).
@@ -326,14 +369,6 @@ pub struct UpdateArgs {
     /// Can be the raw key (RW...) or path to a .pub file.
     #[arg(long, env = "NXV_PUBLIC_KEY")]
     pub public_key: Option<String>,
-
-    /// Skip the binary self-update check after the index refresh.
-    ///
-    /// By default, `nxv update` also checks GitHub for a newer nxv release
-    /// and updates the binary (for local installs) or prints a hint (for
-    /// managed installs). Pass this flag to only refresh the index.
-    #[arg(long, env = "NXV_NO_SELF_UPDATE")]
-    pub no_self_update: bool,
 }
 
 /// Arguments for the history command.
@@ -720,55 +755,76 @@ mod tests {
         let args = Cli::try_parse_from(["nxv", "update"]).unwrap();
         match args.command {
             Commands::Update(update) => {
-                assert!(!update.force);
+                assert!(!update.has_legacy_index_options());
             }
             _ => panic!("Expected Update command"),
         }
     }
 
     #[test]
-    fn test_update_force() {
+    fn test_update_retains_legacy_force_for_migration_error() {
         let args = Cli::try_parse_from(["nxv", "update", "--force"]).unwrap();
         match args.command {
             Commands::Update(update) => {
-                assert!(update.force);
+                assert!(update.has_legacy_index_options());
             }
             _ => panic!("Expected Update command"),
         }
     }
 
     #[test]
-    fn test_update_public_key() {
-        let args = Cli::try_parse_from(["nxv", "update", "--public-key", "RWTest123"]).unwrap();
+    fn test_sync_command() {
+        let args = Cli::try_parse_from(["nxv", "sync"]).unwrap();
         match args.command {
-            Commands::Update(update) => {
-                assert_eq!(update.public_key, Some("RWTest123".to_string()));
-                assert!(!update.skip_verify);
+            Commands::Sync(sync) => {
+                assert!(!sync.force);
+                assert!(!sync.skip_verify);
             }
-            _ => panic!("Expected Update command"),
+            _ => panic!("Expected Sync command"),
         }
     }
 
     #[test]
-    fn test_update_public_key_file() {
-        let args =
-            Cli::try_parse_from(["nxv", "update", "--public-key", "/path/to/key.pub"]).unwrap();
+    fn test_sync_force() {
+        let args = Cli::try_parse_from(["nxv", "sync", "--force"]).unwrap();
         match args.command {
-            Commands::Update(update) => {
-                assert_eq!(update.public_key, Some("/path/to/key.pub".to_string()));
+            Commands::Sync(sync) => {
+                assert!(sync.force);
             }
-            _ => panic!("Expected Update command"),
+            _ => panic!("Expected Sync command"),
         }
     }
 
     #[test]
-    fn test_update_no_self_update_flag() {
-        let args = Cli::try_parse_from(["nxv", "update", "--no-self-update"]).unwrap();
+    fn test_sync_public_key() {
+        let args = Cli::try_parse_from(["nxv", "sync", "--public-key", "RWTest123"]).unwrap();
         match args.command {
-            Commands::Update(u) => {
-                assert!(u.no_self_update);
+            Commands::Sync(sync) => {
+                assert_eq!(sync.public_key, Some("RWTest123".to_string()));
+                assert!(!sync.skip_verify);
             }
-            _ => panic!("Expected Update command"),
+            _ => panic!("Expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_skill_install_requires_explicit_target_mode() {
+        assert!(Cli::try_parse_from(["nxv", "skill", "install"]).is_err());
+    }
+
+    #[test]
+    fn test_skill_install_detected_mode() {
+        let args = Cli::try_parse_from(["nxv", "skill", "install", "--detected"]).unwrap();
+        match args.command {
+            Commands::Skill(skill) => match skill.command {
+                SkillCommands::Install(install) => {
+                    assert!(install.detected);
+                    assert!(!install.all);
+                    assert!(install.agents.is_empty());
+                }
+                _ => panic!("Expected Install command"),
+            },
+            _ => panic!("Expected Skill command"),
         }
     }
 
@@ -849,6 +905,7 @@ mod tests {
                     assert_eq!(install.agents, vec![Agent::Claude, Agent::Codex]);
                     assert!(install.project);
                     assert!(install.dir.is_none());
+                    assert!(!install.detected);
                     assert!(!install.all);
                 }
                 _ => panic!("Expected Install subcommand"),
@@ -861,6 +918,12 @@ mod tests {
     fn test_skill_install_all_conflicts_with_agents() {
         let result = Cli::try_parse_from(["nxv", "skill", "install", "claude", "--all"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skill_install_detected_conflicts_with_other_targets() {
+        assert!(Cli::try_parse_from(["nxv", "skill", "install", "claude", "--detected"]).is_err());
+        assert!(Cli::try_parse_from(["nxv", "skill", "install", "--detected", "--all"]).is_err());
     }
 
     #[test]

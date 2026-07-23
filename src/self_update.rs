@@ -1,11 +1,9 @@
-//! Self-update support for `nxv update`.
+//! Application-update support for `nxv update`.
 //!
-//! There is no standalone `self-update` subcommand — `nxv update` refreshes
-//! the package index first and then delegates to [`run`] here to check for
-//! a newer `nxv` release. For a local install the running binary is
-//! replaced in place; for a managed install (Nix / cargo / Homebrew) the
-//! binary is left untouched and the correct package-manager hint is
-//! printed instead.
+//! `nxv update` delegates directly to [`run`] and never synchronizes the
+//! package index. For a local install the running binary is replaced in
+//! place; for a managed install (Nix / cargo / Homebrew) the binary is left
+//! untouched and the correct package-manager hint is printed instead.
 
 use std::path::Path;
 use std::time::Duration;

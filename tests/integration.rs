@@ -126,6 +126,7 @@ fn test_help_displays() {
         .stdout(predicate::str::contains("Nix Version Index"))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("sync"))
         .stdout(predicate::str::contains("info"))
         .stdout(predicate::str::contains("stats"))
         .stdout(predicate::str::contains("history"))
@@ -133,15 +134,76 @@ fn test_help_displays() {
 }
 
 #[test]
-fn test_update_help_mentions_self_update() {
-    // `nxv update` is one command: it refreshes the index and then checks for
-    // a newer binary. Verify the help surface exposes the opt-out flag.
+fn test_update_help_is_application_only() {
     nxv()
         .args(["update", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--no-self-update"))
-        .stdout(predicate::str::contains("--force"));
+        .stdout(predicate::str::contains("latest application release"))
+        .stdout(predicate::str::contains("nxv sync"))
+        .stdout(predicate::str::contains("--force").not());
+}
+
+#[test]
+fn test_sync_help_owns_index_options() {
+    nxv()
+        .args(["sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("package index"))
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--manifest-url"))
+        .stdout(predicate::str::contains("--skip-verify"))
+        .stdout(predicate::str::contains("--public-key"));
+}
+
+#[test]
+fn test_update_rejects_legacy_index_flags_with_sync_guidance() {
+    nxv()
+        .args(["update", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nxv sync"));
+}
+
+#[test]
+fn test_update_rejects_retired_no_self_update_environment() {
+    nxv()
+        .arg("update")
+        .env("NXV_NO_SELF_UPDATE", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NXV_NO_SELF_UPDATE is retired"))
+        .stderr(predicate::str::contains("nxv sync"));
+}
+
+#[test]
+fn test_update_checks_application_release_without_touching_index() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("index.db");
+    std::fs::write(&db_path, b"index sentinel").unwrap();
+
+    let mut server = mockito::Server::new();
+    let release = serde_json::json!({
+        "tag_name": format!("v{}", env!("CARGO_PKG_VERSION")),
+        "assets": []
+    });
+    let _release_mock = server
+        .mock("GET", "/repos/utensils/nxv/releases/latest")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(release.to_string())
+        .create();
+
+    nxv()
+        .args(["--db-path", db_path.to_str().unwrap(), "update"])
+        .env("NXV_GITHUB_API_BASE", server.url())
+        .env("NXV_NO_SELF_UPDATE", "0")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Already up to date"));
+
+    assert_eq!(std::fs::read(&db_path).unwrap(), b"index sentinel");
 }
 
 #[test]
@@ -1148,16 +1210,16 @@ fn test_verbose_debug_level() {
 // ============================================================================
 
 #[test]
-fn test_search_no_index_suggests_update() {
+fn test_search_no_index_suggests_sync() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("nonexistent.db");
 
-    // When there's no index, suggest running 'nxv update'
+    // When there's no index, suggest running 'nxv sync'.
     nxv()
         .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("nxv update"));
+        .stderr(predicate::str::contains("nxv sync"));
 }
 
 #[test]
@@ -1189,7 +1251,7 @@ fn test_error_messages_have_error_prefix() {
         .args(["--db-path", db_path.to_str().unwrap(), "search", "python"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("error:").and(predicate::str::contains("nxv update")));
+        .stderr(predicate::str::contains("error:").and(predicate::str::contains("nxv sync")));
 }
 
 #[test]
@@ -1209,7 +1271,7 @@ fn test_error_messages_no_color() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("error:").and(predicate::str::contains("nxv update")));
+        .stderr(predicate::str::contains("error:").and(predicate::str::contains("nxv sync")));
 }
 
 // ============================================================================
@@ -1697,7 +1759,7 @@ fn create_test_bloom_filter() -> (Vec<u8>, String) {
 }
 
 #[test]
-fn test_update_with_mock_http_server() {
+fn test_sync_with_mock_http_server() {
     // Create test artifacts
     let (compressed_db, db_hash) = create_compressed_test_db();
     let (bloom_data, bloom_hash) = create_test_bloom_filter();
@@ -1745,6 +1807,12 @@ fn test_update_with_mock_http_server() {
         .with_body(bloom_data)
         .create();
 
+    let _release_mock = server
+        .mock("GET", "/repos/utensils/nxv/releases/latest")
+        .with_status(500)
+        .expect(0)
+        .create();
+
     // Create temp directory for test database
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("index.db");
@@ -1753,17 +1821,19 @@ fn test_update_with_mock_http_server() {
     // Set environment variable for manifest URL
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command
+    // Run sync command
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
         ])
         .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
+        .env("NXV_GITHUB_API_BASE", server.url())
+        .env("NXV_API_URL", "http://127.0.0.1:1")
         .assert()
         .success()
         .stderr(predicate::str::contains("Downloading").or(predicate::str::contains("up to date")));
@@ -1794,7 +1864,7 @@ fn test_update_with_mock_http_server() {
 }
 
 #[test]
-fn test_update_already_up_to_date() {
+fn test_sync_already_up_to_date() {
     // Create test artifacts
     let (compressed_db, db_hash) = create_compressed_test_db();
     let (bloom_data, bloom_hash) = create_test_bloom_filter();
@@ -1849,12 +1919,12 @@ fn test_update_already_up_to_date() {
     // Set environment variable for manifest URL
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should report up to date
+    // Run sync command - should report up to date
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -1865,7 +1935,7 @@ fn test_update_already_up_to_date() {
 }
 
 #[test]
-fn test_update_delta_available() {
+fn test_sync_delta_available() {
     use sha2::{Digest, Sha256};
 
     // Create test artifacts
@@ -1989,12 +2059,12 @@ COMMIT;
     // Set environment variable for manifest URL
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should apply delta
+    // Run sync command - should apply delta
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2035,7 +2105,7 @@ COMMIT;
 }
 
 #[test]
-fn test_update_network_error_handling() {
+fn test_sync_network_error_handling() {
     // Start mock server that returns errors
     let mut server = mockito::Server::new();
 
@@ -2051,12 +2121,12 @@ fn test_update_network_error_handling() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should fail gracefully
+    // Run sync command - should fail gracefully
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2067,7 +2137,7 @@ fn test_update_network_error_handling() {
 }
 
 #[test]
-fn test_update_checksum_mismatch() {
+fn test_sync_checksum_mismatch() {
     // Create test artifacts with wrong hash
     let (compressed_db, _) = create_compressed_test_db();
     let (bloom_data, bloom_hash) = create_test_bloom_filter();
@@ -2114,12 +2184,12 @@ fn test_update_checksum_mismatch() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should fail due to checksum mismatch
+    // Run sync command - should fail due to checksum mismatch
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2134,7 +2204,7 @@ fn test_update_checksum_mismatch() {
 }
 
 #[test]
-fn test_update_unreachable_server() {
+fn test_sync_unreachable_server() {
     // Use a URL that points to a non-existent/unreachable host
     // Using localhost with a port that's unlikely to be in use
     let manifest_url = "http://127.0.0.1:59999/manifest.json";
@@ -2143,12 +2213,12 @@ fn test_update_unreachable_server() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("index.db");
 
-    // Run update command - should fail gracefully with network error
+    // Run sync command - should fail gracefully with network error
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             manifest_url,
@@ -2158,14 +2228,63 @@ fn test_update_unreachable_server() {
         .stderr(predicate::str::contains("error"));
 }
 
+#[test]
+fn test_sync_incompatible_index_guides_app_update_without_calling_release_api() {
+    let mut server = mockito::Server::new();
+    let manifest = serde_json::json!({
+        "version": 1,
+        "min_version": 999,
+        "latest_commit": "abc123",
+        "latest_commit_date": "2024-01-15T12:00:00Z",
+        "full_index": {
+            "url": format!("{}/index.db.zst", server.url()),
+            "size_bytes": 1,
+            "sha256": "00"
+        },
+        "bloom_filter": {
+            "url": format!("{}/index.bloom", server.url()),
+            "size_bytes": 1,
+            "sha256": "00"
+        },
+        "deltas": []
+    });
+    let _manifest_mock = server
+        .mock("GET", "/manifest.json")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(manifest.to_string())
+        .create();
+    let _release_mock = server
+        .mock("GET", "/repos/utensils/nxv/releases/latest")
+        .with_status(500)
+        .expect(0)
+        .create();
+
+    let dir = tempdir().unwrap();
+    nxv()
+        .args([
+            "--db-path",
+            dir.path().join("index.db").to_str().unwrap(),
+            "sync",
+            "--skip-verify",
+            "--manifest-url",
+            &format!("{}/manifest.json", server.url()),
+        ])
+        .env("NXV_GITHUB_API_BASE", server.url())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Run `nxv update`"))
+        .stderr(predicate::str::contains("retry `nxv sync`"));
+}
+
 // ============================================================================
 // Signature Verification Tests
 // ============================================================================
 
 #[test]
-fn test_update_fails_without_signature_when_verify_enabled() {
+fn test_sync_fails_without_signature_when_verify_enabled() {
     // This test verifies that manifest signature verification is enforced by default.
-    // When no signature file is available, the update should fail unless --skip-verify is used.
+    // When no signature file is available, sync should fail unless --skip-verify is used.
 
     // Create test artifacts
     let (compressed_db, db_hash) = create_compressed_test_db();
@@ -2216,13 +2335,13 @@ fn test_update_fails_without_signature_when_verify_enabled() {
     let db_path = dir.path().join("index.db");
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Update should FAIL because signature verification is enabled by default
+    // Sync should FAIL because signature verification is enabled by default
     // and no signature is available
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--manifest-url",
             &manifest_url,
         ])
@@ -2241,7 +2360,7 @@ fn test_update_fails_without_signature_when_verify_enabled() {
 }
 
 #[test]
-fn test_update_skip_verify_shows_warning() {
+fn test_sync_skip_verify_shows_warning() {
     // This test verifies that --skip-verify allows updates but shows a warning
 
     // Create test artifacts
@@ -2307,7 +2426,7 @@ fn test_update_skip_verify_shows_warning() {
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2377,7 +2496,7 @@ fn test_clear_error_message_no_index() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("No index found"))
-        .stderr(predicate::str::contains("nxv update"));
+        .stderr(predicate::str::contains("nxv sync"));
 }
 
 #[test]
@@ -2418,7 +2537,7 @@ fn test_clear_error_message_invalid_manifest_version() {
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2524,12 +2643,12 @@ fn test_no_data_corruption_on_failed_download() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should fail
+    // Run sync command - should fail
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2598,12 +2717,12 @@ fn test_temp_files_cleaned_up_on_failure() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run update command - should fail
+    // Run sync command - should fail
     nxv()
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2625,13 +2744,13 @@ fn test_temp_files_cleaned_up_on_failure() {
     );
 }
 
-/// Full delta update workflow test:
+/// Full delta sync workflow test:
 /// 1. Initial download creates index with initial packages
 /// 2. New delta becomes available with new packages
-/// 3. Apply delta update
+/// 3. Apply delta sync
 /// 4. Verify search returns both old and new packages
 #[test]
-fn test_full_delta_update_workflow() {
+fn test_full_delta_sync_workflow() {
     use sha2::{Digest, Sha256};
 
     let dir = tempdir().unwrap();
@@ -2742,13 +2861,13 @@ fn test_full_delta_update_workflow() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Run initial update
+    // Run initial sync
     nxv()
         .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -2773,7 +2892,7 @@ fn test_full_delta_update_workflow() {
         .success()
         .stderr(predicate::str::contains("not found").or(predicate::str::contains("No packages")));
 
-    // --- PHASE 2: Delta update ---
+    // --- PHASE 2: Delta sync ---
 
     // Create delta SQL that adds nodejs
     let delta_sql = r#"
@@ -2853,13 +2972,13 @@ UPDATE meta SET value = 'delta789012345678901234567890abcdef12' WHERE key = 'las
         .with_body(updated_bloom_data)
         .create();
 
-    // Run delta update
+    // Run delta sync
     nxv()
         .env("NXV_BLOOM_PATH", bloom_path.to_str().unwrap())
         .args([
             "--db-path",
             db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--skip-verify",
             "--manifest-url",
             &manifest_url,
@@ -3808,12 +3927,12 @@ fn test_end_to_end_signed_manifest_verification() {
 
     let manifest_url = format!("{}/manifest.json", server.url());
 
-    // Step 5: Update using the public key - this should SUCCEED
+    // Step 5: Sync using the public key - this should SUCCEED
     nxv()
         .args([
             "--db-path",
             client_db_path.to_str().unwrap(),
-            "update",
+            "sync",
             "--manifest-url",
             &manifest_url,
             "--public-key",
@@ -3826,7 +3945,7 @@ fn test_end_to_end_signed_manifest_verification() {
     // Verify the database was created
     assert!(
         client_db_path.exists(),
-        "Database should be created after successful signed update"
+        "Database should be created after successful signed sync"
     );
 
     // Step 6: Try with WRONG public key - this should FAIL
@@ -3850,7 +3969,7 @@ fn test_end_to_end_signed_manifest_verification() {
         .args([
             "--db-path",
             client_db_path2.to_str().unwrap(),
-            "update",
+            "sync",
             "--manifest-url",
             &manifest_url,
             "--public-key",
@@ -3912,12 +4031,12 @@ fn test_skill_install_user_scope_explicit_agent() {
 
 #[cfg(unix)]
 #[test]
-fn test_skill_install_defaults_to_detected_agents() {
+fn test_skill_install_detected_agents_requires_explicit_flag() {
     let home = tempdir().unwrap();
     std::fs::create_dir(home.path().join(".codex")).unwrap();
     nxv()
         .env("HOME", home.path())
-        .args(["skill", "install"])
+        .args(["skill", "install", "--detected"])
         .assert()
         .success()
         .stderr(predicate::str::contains(".codex"));
@@ -3929,26 +4048,74 @@ fn test_skill_install_defaults_to_detected_agents() {
 
 #[cfg(unix)]
 #[test]
-fn test_skill_install_falls_back_to_generic_agents_dir() {
+fn test_skill_install_detected_with_no_agents_fails_without_writes() {
     let home = tempdir().unwrap();
     nxv()
         .env("HOME", home.path())
-        .args(["skill", "install"])
+        .args(["skill", "install", "--detected"])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("No agents detected"));
-    assert!(home.path().join(".agents/skills/nxv/SKILL.md").exists());
+        .failure()
+        .stderr(predicate::str::contains(
+            "no supported agents were detected",
+        ))
+        .stderr(predicate::str::contains(
+            "use `agents` for the generic Agent Skills directory",
+        ));
+    assert!(!home.path().join(".agents").exists());
 }
 
 #[test]
-fn test_skill_install_project_default_pair() {
+fn test_skill_install_project_without_target_fails_without_writes() {
     let proj = tempdir().unwrap();
     nxv()
         .args(["skill", "install", "--dir", proj.path().to_str().unwrap()])
         .assert()
+        .failure()
+        .stderr(predicate::str::contains("required"));
+    assert!(!proj.path().join(".claude").exists());
+    assert!(!proj.path().join(".agents").exists());
+}
+
+#[test]
+fn test_skill_install_project_all_is_explicitly_broad() {
+    let proj = tempdir().unwrap();
+    nxv()
+        .args([
+            "skill",
+            "install",
+            "--all",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
         .success();
     assert!(proj.path().join(".claude/skills/nxv/SKILL.md").exists());
     assert!(proj.path().join(".agents/skills/nxv/SKILL.md").exists());
+    assert!(proj.path().join(".pi/skills/nxv/SKILL.md").exists());
+    assert!(proj.path().join(".github/skills/nxv/SKILL.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_skill_install_project_detected_maps_only_detected_agents() {
+    let home = tempdir().unwrap();
+    let proj = tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".codex")).unwrap();
+    nxv()
+        .env("HOME", home.path())
+        .args([
+            "skill",
+            "install",
+            "--detected",
+            "--dir",
+            proj.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("codex"));
+    assert!(proj.path().join(".agents/skills/nxv/SKILL.md").exists());
+    assert!(!proj.path().join(".claude").exists());
+    assert!(!proj.path().join(".github").exists());
 }
 
 #[test]
@@ -4014,7 +4181,7 @@ fn test_skill_uninstall_removes_only_nxv() {
     let dir_arg = proj.path().to_str().unwrap();
 
     nxv()
-        .args(["skill", "install", "--dir", dir_arg])
+        .args(["skill", "install", "--all", "--dir", dir_arg])
         .assert()
         .success();
 

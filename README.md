@@ -152,15 +152,14 @@ nix run nixpkgs/e4a45f9#python
 ### Keeping nxv up to date
 
 ```bash
-nxv update                    # Refresh the index, then check for a newer nxv release
-nxv update --force            # Force a full re-download of the index
-nxv update --no-self-update   # Only refresh the index; skip the binary check
+nxv update                    # Update the nxv application
+nxv sync                      # Download or refresh the package index
+nxv sync --force              # Force a full re-download of the index
 nxv stats                     # Show index statistics
 ```
 
-`nxv update` always refreshes the package index first. Afterwards it
-checks GitHub for a newer nxv release and behaves according to how nxv
-was installed:
+`nxv update` only checks GitHub for the latest nxv release and behaves
+according to how nxv was installed:
 
 - **Local install** (from `install.sh` or a manual download) — downloads
   the platform binary, verifies its SHA-256 against `SHA256SUMS.txt`, and
@@ -169,9 +168,9 @@ was installed:
   matching upgrade command (e.g. `brew upgrade nxv`,
   `cargo install --locked nxv`).
 
-Set `NXV_NO_SELF_UPDATE=1` or pass `--no-self-update` to skip the binary
-check entirely (useful for CI or systemd timer units that only want to
-refresh the index).
+`nxv sync` independently refreshes the local SQLite index and bloom filter.
+It never checks for or replaces the nxv application, so it is the command to
+use in CI and systemd timers.
 
 ## API Server
 
@@ -384,18 +383,18 @@ Clients can then verify using your public key:
 
 ```bash
 # Via CLI flag
-nxv update --manifest-url https://your-server/manifest.json \
-           --public-key /path/to/nxv.pub
+nxv sync --manifest-url https://your-server/manifest.json \
+         --public-key /path/to/nxv.pub
 
 # Or via environment variable
 export NXV_PUBLIC_KEY=/path/to/nxv.pub
-nxv update --manifest-url https://your-server/manifest.json
+nxv sync --manifest-url https://your-server/manifest.json
 ```
 
 To skip verification (not recommended for production):
 
 ```bash
-nxv update --manifest-url https://your-server/manifest.json --skip-verify
+nxv sync --manifest-url https://your-server/manifest.json --skip-verify
 ```
 
 ### Hosting Your Own Index
@@ -488,7 +487,7 @@ Clients download the index once and query locally. Low server load, works offlin
 
 ```bash
 # One-time download
-nxv update --manifest-url https://your-server.com/nxv/manifest.json
+nxv sync --manifest-url https://your-server.com/nxv/manifest.json
 
 # Or set permanently
 export NXV_MANIFEST_URL=https://your-server.com/nxv/manifest.json
@@ -558,7 +557,6 @@ The `manifest.json` format:
 | `NXV_SECRET_KEY` | Secret key for manifest signing (path or raw key content) |
 | `NXV_SKIP_VERIFY` | Skip manifest signature verification (set to any value) |
 | `NXV_API_TIMEOUT` | API request timeout in seconds (default: 30) |
-| `NXV_NO_SELF_UPDATE` | Skip the binary self-update check in `nxv update` |
 | `NO_COLOR` | Disable colored output |
 | `NXV_HOST` | `nxv serve` bind address (default: `127.0.0.1`) |
 | `NXV_PORT` | `nxv serve` port (default: `8080`) |
@@ -598,7 +596,7 @@ src/
 ├── output/          # Table/JSON/plain formatters
 ├── bloom.rs         # Bloom filter
 ├── search.rs        # Search/filter/sort logic
-├── self_update.rs   # Binary self-update (part of nxv update)
+├── self_update.rs   # Application update used by nxv update
 ├── skill/           # Agent skill install/list/uninstall (nxv skill ...)
 ├── version.rs       # Version/long-version string helpers
 ├── paths.rs         # Platform-specific paths
@@ -621,8 +619,9 @@ API on your behalf without extra setup. The binary embeds the skill and
 installs it where each agent looks:
 
 ```bash
-nxv skill install              # Install user-wide for detected agents
-nxv skill install --project    # Install into the current project
+nxv skill install codex        # Install user-wide for one agent
+nxv skill install --detected   # Explicitly target detected agents
+nxv skill install codex --project # Install for Codex in this project
 nxv skill list                 # Show agents, paths, install status
 ```
 

@@ -6,7 +6,7 @@ available when nxv is built with the `indexer` feature.
 ::: warning Feature-Gated
 
 These commands require `nxv-indexer` or building with `--features indexer`. Most
-users should use `nxv update` to download the pre-built index instead.
+users should use `nxv sync` to download the pre-built index instead.
 
 :::
 

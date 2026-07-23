@@ -253,7 +253,7 @@ pub fn run_index(cli: &Cli, args: &IndexArgs) -> Result<()> {
     let bloom_path = crate::paths::get_bloom_path_for_db(&cli.db_path);
     save_bloom_filter(&db, &bloom_path)?;
 
-    // Watermarks: load-bearing for manifest.latest_commit, `nxv update`'s
+    // Watermarks: load-bearing for manifest.latest_commit, `nxv sync`'s
     // UpToDate check, /health, /api/v1/stats and the frontend stats panel.
     if let Some(newest) = db.newest_ingested_release(None)? {
         db.set_meta("last_indexed_commit", &newest.commit_hash)?;
