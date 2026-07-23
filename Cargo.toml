@@ -12,7 +12,6 @@ repository = "https://github.com/utensils/nxv"
 keywords = ["nix", "nixpkgs", "package", "version"]
 categories = ["command-line-utilities"]
 exclude = [
-    "nixpkgs/",
     "publish/",
     "docs/",
     ".github/",
