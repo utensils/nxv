@@ -95,7 +95,7 @@ directly:
 /nxv search python 2.7
 /nxv search python 2.7.3 --all-depths
 /nxv info python311 3.11.4
-/nxv history nodejs_15
+/nxv history nodejs-15_x
 ```
 
 Or just ask naturally — the agent loads the skill automatically when your
@@ -137,16 +137,32 @@ Example agent pattern — generate a `nix shell` invocation for a specific versi
 directly from the public API:
 
 ```bash
-curl -s "https://nxv.urandom.io/api/v1/packages/python27/versions/2.7.18/first" | \
+curl -s "https://nxv.urandom.io/api/v1/packages/python/versions/2.7.18/first" | \
   jq -r '.data | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
 
 Or via the CLI against any backend:
 
 ```bash
-nxv search nodejs 15 --exact --format json | \
+nxv search nodejs-15_x 15 --exact --format json | \
   jq -r '.[0] | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
+
+For old nixpkgs commits, modern Nix may reject a retired flake `edition`, and
+pre-Apple-Silicon revisions may fail to evaluate packages as `aarch64-darwin`.
+Use a classic import with the full hash and exact returned attribute path,
+evaluating as `x86_64-darwin` when Rosetta is available:
+
+```bash
+nix shell --impure --expr '
+  (import (builtins.fetchTarball
+    "https://github.com/NixOS/nixpkgs/archive/<full-hash>.tar.gz")
+    { system = "x86_64-darwin"; }).ruby
+' --command ruby --version
+```
+
+The returned `platforms` values are package metadata, not proof that a
+historical revision evaluates on that system or has a Hydra-cached binary.
 
 ## Keeping the skill up to date
 

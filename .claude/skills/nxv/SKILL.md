@@ -191,8 +191,8 @@ nxv history python311 --format json
 ```json
 {
   "version": "3.11.4",
-  "first_seen": "2023-06-15T00:00:00Z",
-  "last_seen": "2023-12-01T00:00:00Z",
+  "first_seen": "2023-06-15T00:00:00+00:00",
+  "last_seen": "2023-12-01T00:00:00+00:00",
   "is_insecure": false
 }
 ```
@@ -215,6 +215,33 @@ inputs.nixpkgs-python27.url = "github:NixOS/nixpkgs/<commit>";
 ```
 
 Pick `first_commit_hash` for the canonical "introduced in" commit; pick `last_commit_hash` if you want the most recent commit that still shipped that version.
+
+### Caveats for Old Commits
+
+The direct `nix shell nixpkgs/<commit>#<attribute_path>` form may fail for old
+nixpkgs revisions even when nxv found a valid observation:
+
+- Modern Nix rejects the retired `edition` field in flake files from roughly
+  2020 and earlier.
+- Revisions from before late 2021 predate usable `aarch64-darwin` support for
+  many packages. On Apple Silicon, evaluate the package as `x86_64-darwin` and
+  run it through Rosetta when necessary.
+
+Use a classic nixpkgs import with the full commit hash and the result's exact
+`attribute_path`:
+
+```bash
+nix shell --impure --expr '
+  (import (builtins.fetchTarball
+    "https://github.com/NixOS/nixpkgs/archive/<full-hash>.tar.gz")
+    { system = "x86_64-darwin"; }).ruby
+' --command ruby --version
+```
+
+Replace `.ruby` and the command with the returned attribute and executable.
+The `platforms` field comes from package metadata (`meta.platforms`); it is not
+proof that the historical revision evaluates on that system or that Hydra
+produced a cached binary for it.
 
 ## Application and Index Management
 
@@ -291,7 +318,7 @@ All paths are under `/api/v1`. Wrapped responses always look like `{ "data": ...
 ```bash
 curl -s "https://nxv.urandom.io/api/v1/search?q=python&version=3.11&limit=5" | jq
 curl -s "https://nxv.urandom.io/api/v1/packages/python311/history" | jq '.data[0:3]'
-curl -s "https://nxv.urandom.io/api/v1/packages/nodejs_15/versions/15.14.0/first" | jq
+curl -s "https://nxv.urandom.io/api/v1/packages/nodejs-15_x/versions/15.14.0/first" | jq
 curl -s "https://nxv.urandom.io/api/v1/stats" | jq '.data'
 ```
 
@@ -424,14 +451,14 @@ nxv search python 3.11.4 --exact --format json | \
 **Generate the `nix shell` invocation directly (CLI):**
 
 ```bash
-nxv search nodejs 15 --exact --format json | \
+nxv search nodejs-15_x 15 --exact --format json | \
   jq -r '.[0] | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
 
 **Find a package version on the public API:**
 
 ```bash
-curl -s "https://nxv.urandom.io/api/v1/packages/python27/versions/2.7.18/first" | \
+curl -s "https://nxv.urandom.io/api/v1/packages/python/versions/2.7.18/first" | \
   jq -r '.data | "nix shell nixpkgs/\(.first_commit_hash | .[0:7])#\(.attribute_path)"'
 ```
 
@@ -463,7 +490,7 @@ curl -s "https://nxv.urandom.io/api/v1/stats" | \
 
 ## Practical Tips
 
-- **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python27`.
+- **Just want a python 2.7 shell?** `nxv search python 2.7 --exact --format json | jq -r '.[0].first_commit_hash'`, then `nix shell nixpkgs/<hash>#python`.
 - **Use `--exact`** when one exact attribute is required. Default version searches stay within the shallowest matching tier; use `--all-depths` only when nested variants are intentional.
 - **Use `--desc`** for fuzzy intent ("a package that does X") instead of exact name searches.
 - **Set `NXV_API_URL=https://nxv.urandom.io`** to skip the ~220MB index download entirely if you only need occasional lookups.
