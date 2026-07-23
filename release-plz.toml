@@ -22,7 +22,10 @@ features_always_increment_minor = true
 semver_check = false
 
 [changelog]
-trim = true
+# trim strips the body template's leading newline, gluing the new release
+# heading to the changelog intro; false keeps the blank line between them
+# (verified with release-plz 0.3.160 locally).
+trim = false
 
 # Squash merges put each branch commit in the body as a "* type: subject"
 # bullet; strip those so breaking-change bodies render as clean prose.
