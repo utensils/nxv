@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/utensils/nxv/compare/v0.5.0...v0.6.0) - 2026-07-23
+
+### Added
+
+- *(cli)* [**breaking**] split application update from index sync ([#67](https://github.com/utensils/nxv/pull/67))
+  `nxv update` now only updates the nxv application; the new `nxv sync` command
+  downloads or refreshes the package index. Old index-related `nxv update` flags
+  are rejected with migration guidance, and the retired `NXV_NO_SELF_UPDATE`
+  variable is rejected when set. `nxv skill install` now requires an explicit
+  target: agent names, `--detected`, or `--all`.
+
+### Fixed
+
+- *(cli)* clarify sync and skill guidance ([#67](https://github.com/utensils/nxv/pull/67))
+- *(release)* keep blank line before new changelog sections ([#70](https://github.com/utensils/nxv/pull/70))
+
+### Other
+
+- *(release)* carry breaking-change details into the changelog ([#69](https://github.com/utensils/nxv/pull/69))
+
 ## [0.5.0](https://github.com/utensils/nxv/compare/v0.4.4...v0.5.0) - 2026-07-22
 
 ### Added
